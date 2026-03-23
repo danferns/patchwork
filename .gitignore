@@ -1,0 +1,5 @@
+/target
+.DS_Store
+*.icns
+icons/icon.iconset/
+.claude/
