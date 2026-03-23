@@ -35,6 +35,11 @@ pub struct PatchworkApp {
     // Option+drag duplication
     opt_drag_source: Option<NodeId>,
     opt_drag_created: Option<NodeId>,
+    // Canvas pan & zoom
+    canvas_offset: egui::Vec2,
+    canvas_zoom: f32,
+    panning: bool,
+    pinned_nodes: std::collections::HashSet<NodeId>,
 }
 
 impl PatchworkApp {
@@ -61,6 +66,10 @@ impl PatchworkApp {
             context_menu_pos: egui::Pos2::ZERO,
             opt_drag_source: None,
             opt_drag_created: None,
+            canvas_offset: egui::Vec2::ZERO,
+            canvas_zoom: 1.0,
+            panning: false,
+            pinned_nodes: std::collections::HashSet::new(),
         }
     }
 
@@ -93,7 +102,11 @@ impl PatchworkApp {
         for path in dropped {
             let content = std::fs::read_to_string(&path).unwrap_or_default();
             let pos = ctx.pointer_latest_pos().unwrap_or(egui::pos2(200.0, 200.0));
-            self.graph.add_node(NodeType::File { path: path.display().to_string(), content }, [pos.x, pos.y]);
+            // pos is in zoomed space; convert to canvas
+            let off_e = self.canvas_offset / self.canvas_zoom;
+            let canvas_x = pos.x - off_e.x;
+            let canvas_y = pos.y - off_e.y;
+            self.graph.add_node(NodeType::File { path: path.display().to_string(), content }, [canvas_x, canvas_y]);
         }
     }
 
@@ -186,18 +199,39 @@ impl PatchworkApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             let painter = ui.painter();
             let rect = ui.max_rect();
-            let grid = 25.0;
-            // Use theme grid color if a Theme node exists
+            let grid = 25.0; // In egui units (visually scaled by zoom_factor)
             let gc = self.graph.nodes.values()
                 .find_map(|n| if let NodeType::Theme { grid_color, .. } = &n.node_type { Some(*grid_color) } else { None })
                 .unwrap_or([12, 12, 12]);
             let col = egui::Color32::from_rgba_premultiplied(gc[0], gc[1], gc[2], 35);
-            let x0 = (rect.left() / grid).floor() as i32;
-            let x1 = (rect.right() / grid).ceil() as i32;
-            let y0 = (rect.top() / grid).floor() as i32;
-            let y1 = (rect.bottom() / grid).ceil() as i32;
-            for i in x0..=x1 { let x = i as f32 * grid; painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], egui::Stroke::new(0.5, col)); }
-            for i in y0..=y1 { let y = i as f32 * grid; painter.line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)], egui::Stroke::new(0.5, col)); }
+            // Offset in egui units
+            let off = self.canvas_offset / self.canvas_zoom;
+            let x_start = ((rect.left() - off.x) / grid).floor() as i32;
+            let x_end = ((rect.right() - off.x) / grid).ceil() as i32;
+            let y_start = ((rect.top() - off.y) / grid).floor() as i32;
+            let y_end = ((rect.bottom() - off.y) / grid).ceil() as i32;
+            for i in x_start..=x_end {
+                let x = i as f32 * grid + off.x;
+                painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], egui::Stroke::new(0.5, col));
+            }
+            for i in y_start..=y_end {
+                let y = i as f32 * grid + off.y;
+                painter.line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)], egui::Stroke::new(0.5, col));
+            }
+            // Origin crosshair
+            if rect.contains(egui::pos2(off.x, off.y)) {
+                painter.circle_filled(egui::pos2(off.x, off.y), 3.0, egui::Color32::from_rgba_premultiplied(gc[0], gc[1], gc[2], 80));
+            }
+            // Zoom indicator
+            if (self.canvas_zoom - 1.0).abs() > 0.01 {
+                painter.text(
+                    egui::pos2(rect.right() - 8.0, rect.bottom() - 8.0),
+                    egui::Align2::RIGHT_BOTTOM,
+                    format!("{:.0}%", self.canvas_zoom * 100.0),
+                    egui::FontId::proportional(11.0),
+                    egui::Color32::from_rgb(100, 100, 100),
+                );
+            }
             if self.graph.nodes.is_empty() {
                 ui.centered_and_justified(|ui| {
                     ui.label(egui::RichText::new("Double-click to add a node  \u{2022}  Drag & drop a file").size(16.0).color(egui::Color32::from_rgb(100, 100, 100)));
@@ -212,14 +246,16 @@ impl PatchworkApp {
         let midi_out_ports = self.midi.cached_output_ports.clone();
         let midi_in_ports = self.midi.cached_input_ports.clone();
         let serial_ports = self.serial.cached_ports.clone();
-        // Snapshot monitor state before the mutable borrow loop
         let monitor_state = std::mem::take(&mut self.monitor);
+        let offset = self.canvas_offset;
+        let zoom = self.canvas_zoom;
         let mut port_positions: HashMap<(NodeId, usize, bool), egui::Pos2> = HashMap::new();
         let mut node_rects: HashMap<NodeId, egui::Rect> = HashMap::new();
         let mut pending_connections: Vec<(NodeId, usize, NodeId, usize)> = Vec::new();
         let mut nodes_to_delete: Vec<NodeId> = Vec::new();
         let mut osc_actions: Vec<OscAction> = Vec::new();
         let mut dragging_from = self.dragging_from;
+        let mut palette_spawns: Vec<([f32; 2], NodeType)> = Vec::new();
         let mut midi_actions: Vec<MidiAction> = Vec::new();
         let mut serial_actions: Vec<SerialAction> = Vec::new();
 
@@ -237,9 +273,19 @@ impl PatchworkApp {
 
             let mut open = true;
             let inline = node.node_type.inline_ports();
+            let is_pinned = self.pinned_nodes.contains(&node_id);
+            // With set_zoom_factor(z), egui coords are in zoomed space
+            // Canvas pos + offset (converted to egui units) = egui position
+            let offset_egui = offset / zoom; // screen pixels → egui units
+            let (egui_x, egui_y) = if is_pinned {
+                // Pinned: fixed screen position → divide by zoom to get stable egui pos
+                (node.pos[0] / zoom, node.pos[1] / zoom)
+            } else {
+                (node.pos[0] + offset_egui.x, node.pos[1] + offset_egui.y)
+            };
             let resp = egui::Window::new(egui::RichText::new(&title).color(accent).strong())
                 .id(egui::Id::new(("node", node_id)))
-                .default_pos(egui::pos2(node.pos[0], node.pos[1]))
+                .current_pos(egui::pos2(egui_x, egui_y))
                 .default_width(180.0)
                 .resizable(true)
                 .constrain(false)
@@ -269,6 +315,13 @@ impl PatchworkApp {
                         &serial_ports, serial_conn, &mut serial_actions, &monitor_state,
                         osc_listening, &mut osc_actions, &mut port_positions, &mut dragging_from);
 
+                    // Check if a Palette node wants to spawn new nodes
+                    if matches!(node.node_type, NodeType::Palette { .. }) {
+                        for spawn_nt in nodes::palette_actions(ui) {
+                            palette_spawns.push((node.pos, spawn_nt));
+                        }
+                    }
+
                     // Bottom output ports (skip for inline-port nodes)
                     if !inline {
                         if !output_defs.is_empty() { ui.separator(); }
@@ -288,7 +341,16 @@ impl PatchworkApp {
                 });
 
             if let Some(r) = &resp {
-                node.pos = [r.response.rect.left(), r.response.rect.top()];
+                if is_pinned {
+                    // Pinned: store screen position (egui pos * zoom)
+                    node.pos = [r.response.rect.left() * zoom, r.response.rect.top() * zoom];
+                } else {
+                    // Egui pos back to canvas pos: subtract offset_egui
+                    node.pos = [
+                        r.response.rect.left() - offset_egui.x,
+                        r.response.rect.top() - offset_egui.y,
+                    ];
+                }
                 node_rects.insert(node_id, r.response.rect);
 
                 // Selection on click
@@ -296,8 +358,11 @@ impl PatchworkApp {
                     self.selected_node = Some(node_id);
                 }
 
-                // Right-click context menu
-                if r.response.secondary_clicked() {
+                // Right-click context menu (check raw secondary click within node rect)
+                let secondary_in_rect = ctx.input(|i| {
+                    i.pointer.button_clicked(egui::PointerButton::Secondary)
+                }) && ctx.pointer_latest_pos().map(|p| r.response.rect.contains(p)).unwrap_or(false);
+                if r.response.secondary_clicked() || secondary_in_rect {
                     self.selected_node = Some(node_id);
                     self.context_menu_node = Some(node_id);
                     self.show_context_menu = true;
@@ -308,6 +373,17 @@ impl PatchworkApp {
                 if self.selected_node == Some(node_id) {
                     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("selection")));
                     painter.rect_stroke(r.response.rect.expand(2.0), 4.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 170, 255)), egui::StrokeKind::Outside);
+                }
+                // Pin indicator
+                if is_pinned {
+                    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("pins")));
+                    painter.text(
+                        egui::pos2(r.response.rect.left() + 4.0, r.response.rect.top() - 12.0),
+                        egui::Align2::LEFT_TOP,
+                        "Pinned",
+                        egui::FontId::proportional(9.0),
+                        egui::Color32::from_rgb(255, 200, 80),
+                    );
                 }
 
                 // Option+drag to duplicate
@@ -339,6 +415,10 @@ impl PatchworkApp {
         self.monitor = monitor_state;
         for id in nodes_to_delete { self.midi.cleanup_node(id); self.serial.cleanup_node(id); self.osc.cleanup_node(id); self.graph.remove_node(id); }
         for (fn_, fp, tn, tp) in pending_connections { self.graph.add_connection(fn_, fp, tn, tp); }
+        // Spawn nodes from Palette clicks (place to the right of the palette node)
+        for (palette_pos, nt) in palette_spawns {
+            self.graph.add_node(nt, [palette_pos[0] + 250.0, palette_pos[1]]);
+        }
         self.midi.process(midi_actions);
         self.serial.process(serial_actions);
         self.osc.process(osc_actions);
@@ -367,63 +447,106 @@ impl PatchworkApp {
         if !self.show_node_menu { return; }
         let pos = self.node_menu_pos;
         let mut keep_open = true;
+        let menu_id = egui::Id::new("add_node_menu_window");
 
-        egui::Area::new(egui::Id::new("add_node_popup"))
+        let accent_rgb = self.graph.nodes.values()
+            .find_map(|n| if let NodeType::Theme { accent, .. } = &n.node_type { Some(*accent) } else { None })
+            .unwrap_or([80, 160, 255]);
+        let accent = egui::Color32::from_rgb(accent_rgb[0], accent_rgb[1], accent_rgb[2]);
+
+        let resp = egui::Window::new(egui::RichText::new("➕ Add Node").color(accent).strong())
+            .id(menu_id)
             .fixed_pos(pos)
+            .default_width(200.0)
+            .resizable(false)
+            .collapsible(false)
+            .title_bar(true)
+            .scroll([false, true])
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_min_width(180.0);
-                    ui.set_max_height(400.0);
+                // Search box (auto-focused)
+                let search_re = ui.add(
+                    egui::TextEdit::singleline(&mut self.node_menu_search)
+                        .hint_text("🔍 Search nodes...")
+                        .desired_width(180.0),
+                );
+                if search_re.gained_focus() || self.node_menu_search.is_empty() {
+                    search_re.request_focus();
+                }
 
-                    // Search box (auto-focused)
-                    let search_re = ui.add(
-                        egui::TextEdit::singleline(&mut self.node_menu_search)
-                            .hint_text("Search nodes...")
-                            .desired_width(160.0),
-                    );
-                    if search_re.gained_focus() || self.node_menu_search.is_empty() {
-                        search_re.request_focus();
+                ui.separator();
+
+                let query = self.node_menu_search.to_lowercase();
+                let catalog = nodes::catalog();
+
+                let mut last_cat = "";
+                let mut any_shown = false;
+
+                // Place new nodes to the right of the menu
+                let offset_egui = self.canvas_offset / self.canvas_zoom;
+                let spawn_x = pos.x - offset_egui.x + 220.0;
+                let mut spawn_y_base = pos.y - offset_egui.y;
+
+                for entry in &catalog {
+                    if !query.is_empty()
+                        && !entry.label.to_lowercase().contains(&query)
+                        && !entry.category.to_lowercase().contains(&query)
+                    {
+                        continue;
                     }
 
-                    ui.separator();
-
-                    let query = self.node_menu_search.to_lowercase();
-                    let catalog = nodes::catalog();
-
-                    egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
-                        let mut last_cat = "";
-                        let mut any_shown = false;
-
-                        for entry in &catalog {
-                            // Filter by search
-                            if !query.is_empty()
-                                && !entry.label.to_lowercase().contains(&query)
-                                && !entry.category.to_lowercase().contains(&query)
-                            {
-                                continue;
-                            }
-
-                            // Category header
-                            if entry.category != last_cat {
-                                if !last_cat.is_empty() { ui.separator(); }
-                                ui.label(egui::RichText::new(entry.category).small().color(egui::Color32::GRAY));
-                                last_cat = entry.category;
-                            }
-
-                            if ui.button(entry.label).clicked() {
-                                self.graph.add_node((entry.factory)(), [pos.x, pos.y]);
-                                keep_open = false;
-                            }
-                            any_shown = true;
+                    // Category header
+                    if entry.category != last_cat {
+                        if !last_cat.is_empty() {
+                            ui.add_space(4.0);
+                            ui.separator();
+                            ui.add_space(2.0);
                         }
+                        ui.label(egui::RichText::new(entry.category).small().strong().color(egui::Color32::GRAY));
+                        last_cat = entry.category;
+                    }
 
-                        if !any_shown {
-                            ui.label(egui::RichText::new("No matches").color(egui::Color32::GRAY));
-                        }
-                    });
-                });
+                    // Each node as a small styled button
+                    let btn = ui.add_sized(
+                        [ui.available_width(), 24.0],
+                        egui::Button::new(egui::RichText::new(entry.label).size(13.0))
+                            .frame(true),
+                    );
+
+                    if btn.clicked() {
+                        self.graph.add_node((entry.factory)(), [spawn_x, spawn_y_base]);
+                        spawn_y_base += 40.0;
+                        keep_open = false;
+                    }
+
+                    // Tooltip with category
+                    btn.on_hover_text(format!("Add {} node", entry.label));
+
+                    any_shown = true;
+                }
+
+                if !any_shown {
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new("No matches").color(egui::Color32::GRAY).italics());
+                    ui.add_space(8.0);
+                }
             });
+
+        // Close on click outside the menu window
+        if let Some(inner) = &resp {
+            let menu_rect = inner.response.rect;
+            let clicked_outside = ctx.input(|i| {
+                i.pointer.button_clicked(egui::PointerButton::Primary)
+                    || i.pointer.button_clicked(egui::PointerButton::Secondary)
+            }) && ctx.pointer_latest_pos().map(|p| !menu_rect.contains(p)).unwrap_or(false);
+
+            // Also close on Escape
+            let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+
+            if clicked_outside || esc {
+                keep_open = false;
+            }
+        }
 
         if !keep_open {
             self.show_node_menu = false;
@@ -431,6 +554,121 @@ impl PatchworkApp {
         }
     }
 
+    /// Pan/zoom handling — runs in zoomed egui space.
+    /// All pointer positions and node_rects are in the same space.
+    fn handle_pan_zoom(&mut self, ctx: &egui::Context) {
+        let space_held = ctx.input(|i| i.key_down(egui::Key::Space));
+        let middle_down = ctx.input(|i| i.pointer.button_down(egui::PointerButton::Middle));
+        let modifiers = ctx.input(|i| i.modifiers);
+        let z = self.canvas_zoom;
+
+        // Check if pointer is over a node (used only for Cmd+scroll zoom, not for panning)
+        let on_node = ctx.pointer_latest_pos().map(|p| {
+            self.node_rects.values().any(|r| r.contains(p))
+        }).unwrap_or(false);
+
+        // Check if a node is being actively dragged (interacted with via primary button)
+        let dragging_node = ctx.pointer_latest_pos().map(|p| {
+            ctx.input(|i| i.pointer.button_down(egui::PointerButton::Primary))
+                && self.node_rects.values().any(|r| r.contains(p))
+        }).unwrap_or(false);
+
+        // Don't pan while context menu is open
+        if self.show_context_menu {
+            self.panning = false;
+            return;
+        }
+
+        // Mouse drag pan: middle-mouse or space+click always pan, even over nodes
+        if middle_down || (space_held && ctx.input(|i| i.pointer.button_down(egui::PointerButton::Primary))) {
+            self.panning = true;
+            let delta = ctx.input(|i| i.pointer.delta());
+            self.canvas_offset += delta * z;
+        } else {
+            self.panning = false;
+        }
+
+        // Two-finger trackpad scroll → pan (always, even over nodes, unless Cmd is held)
+        if !modifiers.command {
+            let scroll = ctx.input(|i| i.smooth_scroll_delta);
+            if scroll.length() > 0.5 {
+                self.canvas_offset += scroll * z;
+            }
+        }
+
+        // Zoom
+        let min_zoom: f32 = 0.08;
+        let max_zoom: f32 = 4.0;
+
+        // Pinch-to-zoom (pointer is in zoomed space → convert to screen for offset math)
+        let pinch = ctx.input(|i| i.zoom_delta());
+        if (pinch - 1.0).abs() > 0.001 {
+            let old_zoom = self.canvas_zoom;
+            self.canvas_zoom = (self.canvas_zoom * pinch).clamp(min_zoom, max_zoom);
+            if let Some(pointer) = ctx.pointer_latest_pos() {
+                // pointer is in old-zoom space; convert to screen pixels
+                let screen_ptr = pointer.to_vec2() * old_zoom;
+                let ratio = self.canvas_zoom / old_zoom;
+                self.canvas_offset = screen_ptr - (screen_ptr - self.canvas_offset) * ratio;
+            }
+        }
+
+        // Cmd+scroll → zoom
+        if modifiers.command && !on_node {
+            let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
+            if scroll.abs() > 0.5 {
+                let old_zoom = self.canvas_zoom;
+                self.canvas_zoom = (self.canvas_zoom + scroll * 0.003 * z).clamp(min_zoom, max_zoom);
+                if let Some(pointer) = ctx.pointer_latest_pos() {
+                    let screen_ptr = pointer.to_vec2() * old_zoom;
+                    let ratio = self.canvas_zoom / old_zoom;
+                    self.canvas_offset = screen_ptr - (screen_ptr - self.canvas_offset) * ratio;
+                }
+            }
+        }
+
+        // Clamp pan boundary
+        let boundary: f32 = 2000.0;
+        let screen = ctx.screen_rect();
+        // screen_rect in zoomed space — convert to real screen size
+        let real_w = screen.width() * z;
+        let real_h = screen.height() * z;
+        let (mut min_cx, mut min_cy, mut max_cx, mut max_cy): (f32, f32, f32, f32) = (-boundary, -boundary, boundary, boundary);
+        for node in self.graph.nodes.values() {
+            if self.pinned_nodes.contains(&node.id) { continue; }
+            min_cx = min_cx.min(node.pos[0] - 200.0);
+            min_cy = min_cy.min(node.pos[1] - 200.0);
+            max_cx = max_cx.max(node.pos[0] + 400.0);
+            max_cy = max_cy.max(node.pos[1] + 400.0);
+        }
+        let max_off_x = -min_cx * z + real_w;
+        let min_off_x = -max_cx * z;
+        let max_off_y = -min_cy * z + real_h;
+        let min_off_y = -max_cy * z;
+        self.canvas_offset.x = self.canvas_offset.x.clamp(min_off_x, max_off_x);
+        self.canvas_offset.y = self.canvas_offset.y.clamp(min_off_y, max_off_y);
+
+        // Reset / fit
+        if (modifiers.mac_cmd || modifiers.ctrl) && ctx.input(|i| i.key_pressed(egui::Key::Num0)) {
+            self.canvas_offset = egui::Vec2::ZERO;
+            self.canvas_zoom = 1.0;
+        }
+        if (modifiers.mac_cmd || modifiers.ctrl) && ctx.input(|i| i.key_pressed(egui::Key::Num1)) {
+            self.fit_all_nodes(ctx);
+        }
+
+        // Cursor icon: grab when panning, move when dragging a node
+        if self.panning {
+            ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if dragging_node && !self.panning {
+            ctx.set_cursor_icon(egui::CursorIcon::Move);
+        } else if space_held {
+            ctx.set_cursor_icon(egui::CursorIcon::Grab);
+        }
+    }
+
+    /// Node interaction — runs AFTER set_zoom_factor (in zoomed egui space).
+    /// Pointer positions and node_rects are in the same coordinate space.
     fn handle_canvas_interaction(&mut self, ctx: &egui::Context) {
         // Double-click to add node
         if ctx.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary)) {
@@ -458,7 +696,6 @@ impl PatchworkApp {
             self.show_node_menu = false;
             self.node_menu_search.clear();
         }
-        // Escape closes context menu
         if self.show_context_menu && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.show_context_menu = false;
         }
@@ -468,6 +705,33 @@ impl PatchworkApp {
 
         // Option+drag completion
         self.handle_opt_drag(ctx);
+    }
+
+    fn fit_all_nodes(&mut self, ctx: &egui::Context) {
+        if self.graph.nodes.is_empty() { return; }
+        let mut min_x = f32::MAX; let mut min_y = f32::MAX;
+        let mut max_x = f32::MIN; let mut max_y = f32::MIN;
+        for node in self.graph.nodes.values() {
+            if self.pinned_nodes.contains(&node.id) { continue; }
+            min_x = min_x.min(node.pos[0]);
+            min_y = min_y.min(node.pos[1]);
+            max_x = max_x.max(node.pos[0] + 200.0);
+            max_y = max_y.max(node.pos[1] + 150.0);
+        }
+        if min_x >= max_x { return; }
+        let screen = ctx.screen_rect();
+        let margin = 80.0;
+        let available_w = screen.width() - margin * 2.0;
+        let available_h = screen.height() - margin * 2.0;
+        let content_w = max_x - min_x;
+        let content_h = max_y - min_y;
+        let zoom_x = available_w / content_w;
+        let zoom_y = available_h / content_h;
+        self.canvas_zoom = zoom_x.min(zoom_y).clamp(0.08, 2.0);
+        self.canvas_offset = egui::vec2(
+            margin - min_x * self.canvas_zoom,
+            margin - min_y * self.canvas_zoom,
+        );
     }
 
     fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
@@ -486,7 +750,11 @@ impl PatchworkApp {
         if cmd && ctx.input(|i| i.key_pressed(egui::Key::V)) {
             if let Some(nt) = &self.clipboard {
                 let pos = ctx.pointer_latest_pos().unwrap_or(egui::pos2(200.0, 200.0));
-                let new_id = self.graph.add_node(nt.clone(), [pos.x + 20.0, pos.y + 20.0]);
+                // pos is in zoomed space; subtract offset_egui to get canvas pos
+                let off_e = self.canvas_offset / self.canvas_zoom;
+                let cx = pos.x - off_e.x + 20.0;
+                let cy = pos.y - off_e.y + 20.0;
+                let new_id = self.graph.add_node(nt.clone(), [cx, cy]);
                 self.selected_node = Some(new_id);
             }
         }
@@ -560,7 +828,8 @@ impl PatchworkApp {
                     if self.clipboard.is_some() {
                         if ui.button("Paste").clicked() {
                             if let Some(nt) = &self.clipboard {
-                                let new_id = self.graph.add_node(nt.clone(), [pos.x + 20.0, pos.y + 20.0]);
+                                let off_e = self.canvas_offset / self.canvas_zoom;
+                                let new_id = self.graph.add_node(nt.clone(), [pos.x - off_e.x + 20.0, pos.y - off_e.y + 20.0]);
                                 self.selected_node = Some(new_id);
                             }
                             keep_open = false;
@@ -576,6 +845,26 @@ impl PatchworkApp {
                             }
                         }
                         keep_open = false;
+                    }
+                    ui.separator();
+                    // Pin/Unpin toggle
+                    if let Some(id) = self.context_menu_node {
+                        let is_pinned = self.pinned_nodes.contains(&id);
+                        let pin_label = if is_pinned { "Unpin from screen" } else { "Pin to screen" };
+                        if ui.button(pin_label).clicked() {
+                            if is_pinned {
+                                self.pinned_nodes.remove(&id);
+                            } else {
+                                // Convert canvas pos to screen pos before pinning
+                                if let Some(node) = self.graph.nodes.get_mut(&id) {
+                                    let sx = node.pos[0] * self.canvas_zoom + self.canvas_offset.x;
+                                    let sy = node.pos[1] * self.canvas_zoom + self.canvas_offset.y;
+                                    node.pos = [sx, sy];
+                                }
+                                self.pinned_nodes.insert(id);
+                            }
+                            keep_open = false;
+                        }
                     }
                     ui.separator();
                     if ui.button(egui::RichText::new("Delete").color(egui::Color32::from_rgb(255, 100, 100))).clicked() {
@@ -595,10 +884,18 @@ impl PatchworkApp {
             self.show_context_menu = false;
             self.context_menu_node = None;
         }
-        // Click elsewhere to close
-        if ctx.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary)) {
-            self.show_context_menu = false;
-            self.context_menu_node = None;
+        // Click elsewhere to close (primary or secondary click outside the menu)
+        if ctx.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary)
+            || i.pointer.button_clicked(egui::PointerButton::Secondary))
+        {
+            if let Some(ptr) = ctx.pointer_latest_pos() {
+                // Only dismiss if click is outside the context menu area
+                let menu_rect = egui::Rect::from_min_size(pos, egui::vec2(140.0, 200.0));
+                if !menu_rect.contains(ptr) {
+                    self.show_context_menu = false;
+                    self.context_menu_node = None;
+                }
+            }
         }
     }
 
@@ -606,6 +903,31 @@ impl PatchworkApp {
         if let Some(pos) = ctx.pointer_latest_pos() {
             for node in self.graph.nodes.values_mut() {
                 if let NodeType::MouseTracker { x, y } = &mut node.node_type { *x = pos.x; *y = pos.y; }
+            }
+        }
+    }
+
+    fn update_key_inputs(&mut self, ctx: &egui::Context) {
+        // Don't capture keys when a text field is focused
+        if ctx.wants_keyboard_input() { return; }
+
+        for node in self.graph.nodes.values_mut() {
+            if let NodeType::KeyInput { key_name, pressed, toggle_mode, toggled_on } = &mut node.node_type {
+                if let Some(key) = nodes::key_input::parse_key(key_name) {
+                    let is_down = ctx.input(|i| i.key_down(key));
+                    let just_pressed = ctx.input(|i| i.key_pressed(key));
+
+                    if *toggle_mode {
+                        if just_pressed {
+                            *toggled_on = !*toggled_on;
+                        }
+                        *pressed = just_pressed;
+                    } else {
+                        *pressed = is_down;
+                    }
+                } else {
+                    *pressed = false;
+                }
             }
         }
     }
@@ -634,9 +956,13 @@ impl PatchworkApp {
 
 impl eframe::App for PatchworkApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Set zoom ONCE at start — everything runs in one coordinate space
+        ctx.set_zoom_factor(self.canvas_zoom);
+
         self.apply_theme(ctx);
         self.handle_file_drop(ctx);
         self.update_mouse_trackers(ctx);
+        self.update_key_inputs(ctx);
         self.poll_midi_inputs();
         self.poll_serial_inputs();
         self.poll_osc_inputs();
@@ -653,7 +979,6 @@ impl eframe::App for PatchworkApp {
 
         let mut values = self.graph.evaluate();
 
-        // Inject monitor outputs so they can be connected to other nodes
         for (&id, node) in &self.graph.nodes {
             if matches!(node.node_type, NodeType::Monitor) {
                 values.insert((id, 0), PortValue::Float(self.monitor.fps));
@@ -669,6 +994,7 @@ impl eframe::App for PatchworkApp {
         self.sync_console_messages();
         self.node_menu(ctx);
         self.context_menu(ctx);
+        self.handle_pan_zoom(ctx);
         self.handle_canvas_interaction(ctx);
         ctx.request_repaint();
     }

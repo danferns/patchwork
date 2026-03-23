@@ -15,8 +15,10 @@ pub mod console;
 pub mod monitor;
 pub mod osc_out;
 pub mod osc_in;
+pub mod key_input;
 pub mod time;
 pub mod color;
+pub mod palette;
 
 use crate::graph::*;
 use crate::midi::MidiAction;
@@ -37,6 +39,8 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
             factory: || NodeType::Slider { value: 0.5, min: 0.0, max: 1.0 } },
         NodeCatalogEntry { label: "Mouse Tracker", category: "Input",
             factory: || NodeType::MouseTracker { x: 0.0, y: 0.0 } },
+        NodeCatalogEntry { label: "Key Input", category: "Input",
+            factory: || NodeType::KeyInput { key_name: String::new(), pressed: false, toggle_mode: false, toggled_on: false } },
         NodeCatalogEntry { label: "Add", category: "Math", factory: || NodeType::Add },
         NodeCatalogEntry { label: "Multiply", category: "Math", factory: || NodeType::Multiply },
         NodeCatalogEntry { label: "File", category: "IO",
@@ -44,7 +48,10 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
         NodeCatalogEntry { label: "Text Editor", category: "IO",
             factory: || NodeType::TextEditor { content: String::new() } },
         NodeCatalogEntry { label: "Display", category: "Output", factory: || NodeType::Display },
-        NodeCatalogEntry { label: "WGSL Viewer", category: "Shader", factory: || NodeType::WgslViewer { uniform_names: vec![], uniform_types: vec![], uniform_values: vec![], uniform_min: vec![], uniform_max: vec![] } },
+        NodeCatalogEntry { label: "WGSL Viewer", category: "Shader", factory: || NodeType::WgslViewer {
+            uniform_names: vec![], uniform_types: vec![], uniform_values: vec![], uniform_min: vec![], uniform_max: vec![],
+            canvas_w: 800.0, canvas_h: 600.0, resolution: 120, expanded: false,
+        } },
         NodeCatalogEntry { label: "Time", category: "Input",
             factory: || NodeType::Time { elapsed: 0.0, speed: 1.0, running: true } },
         NodeCatalogEntry { label: "Color", category: "Input",
@@ -74,6 +81,8 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
             factory: || NodeType::OscIn { port: 8000, address_filter: String::new(), arg_count: 1, last_args: vec![0.0], log: Vec::new(), listening: false } },
         NodeCatalogEntry { label: "Script", category: "Custom",
             factory: || NodeType::Script { name: "Custom Script".to_string(), input_names: vec![], output_names: vec![], code: String::new(), last_values: vec![], error: String::new(), continuous: true, trigger: false } },
+        NodeCatalogEntry { label: "Node Palette", category: "Utility",
+            factory: || NodeType::Palette { search: String::new() } },
     ]
 }
 
@@ -104,8 +113,8 @@ pub fn render_content(
         NodeType::Add | NodeType::Multiply => math::render(ui, node_id, values),
         NodeType::File { path, content } => file::render(ui, path, content),
         NodeType::TextEditor { content } => text_editor::render(ui, content, node_id, values, connections),
-        NodeType::WgslViewer { uniform_names, uniform_types, uniform_values, uniform_min, uniform_max } =>
-            wgsl_viewer::render(ui, uniform_names, uniform_types, uniform_values, uniform_min, uniform_max, node_id, values, connections),
+        NodeType::WgslViewer { uniform_names, uniform_types, uniform_values, uniform_min, uniform_max, canvas_w, canvas_h, resolution, expanded } =>
+            wgsl_viewer::render(ui, uniform_names, uniform_types, uniform_values, uniform_min, uniform_max, canvas_w, canvas_h, resolution, expanded, node_id, values, connections),
         NodeType::Time { elapsed, speed, running } => time::render(ui, elapsed, speed, running),
         NodeType::Color { r, g, b } => color::render(ui, r, g, b),
         NodeType::MouseTracker { x, y } => mouse_tracker::render(ui, *x, *y),
@@ -124,7 +133,22 @@ pub fn render_content(
             osc_out::render(ui, host, port, address, arg_count, node_id, values, osc_actions),
         NodeType::OscIn { port, address_filter, arg_count, last_args, log, listening, .. } =>
             osc_in::render(ui, port, address_filter, arg_count, last_args, log, listening, node_id, osc_listening, osc_actions),
+        NodeType::KeyInput { key_name, pressed, toggle_mode, toggled_on } =>
+            key_input::render(ui, key_name, pressed, toggle_mode, toggled_on),
         NodeType::Script { name, input_names, output_names, code, last_values, error, continuous, trigger } =>
             script::render(ui, name, input_names, output_names, code, last_values, error, continuous, trigger, values, node_id),
+        NodeType::Palette { search } =>
+            palette::render(ui, search, node_id),
     }
+}
+
+/// Returns node types to create from Palette clicks (checked after render_content)
+pub fn palette_actions(ui: &egui::Ui) -> Vec<NodeType> {
+    ui.memory_mut(|mem| {
+        let v: Vec<NodeType> = mem.data.get_temp(egui::Id::new("palette_spawn")).unwrap_or_default();
+        if !v.is_empty() {
+            mem.data.insert_temp::<Vec<NodeType>>(egui::Id::new("palette_spawn"), vec![]);
+        }
+        v
+    })
 }

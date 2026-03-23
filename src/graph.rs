@@ -9,6 +9,9 @@ fn default_window_alpha() -> u8 { 240 }
 fn default_grid_color() -> [u8; 3] { [12, 12, 12] }
 fn default_rounding() -> f32 { 4.0 }
 fn default_spacing() -> f32 { 4.0 }
+fn default_canvas_w() -> f32 { 800.0 }
+fn default_canvas_h() -> f32 { 600.0 }
+fn default_resolution() -> u32 { 120 }
 
 pub type NodeId = u64;
 
@@ -59,13 +62,21 @@ pub enum NodeType {
         #[serde(default)]
         uniform_names: Vec<String>,
         #[serde(default)]
-        uniform_types: Vec<String>, // "float", "color", "range"
+        uniform_types: Vec<String>,
         #[serde(default)]
-        uniform_values: Vec<f32>, // local values for unconnected uniforms
+        uniform_values: Vec<f32>,
         #[serde(default)]
         uniform_min: Vec<f32>,
         #[serde(default)]
         uniform_max: Vec<f32>,
+        #[serde(default = "default_canvas_w")]
+        canvas_w: f32,
+        #[serde(default = "default_canvas_h")]
+        canvas_h: f32,
+        #[serde(default = "default_resolution")]
+        resolution: u32,
+        #[serde(default)]
+        expanded: bool,
     },
     MouseTracker { x: f32, y: f32 },
     Time {
@@ -161,6 +172,19 @@ pub enum NodeType {
         #[serde(default)]
         listening: bool,
     },
+    KeyInput {
+        key_name: String,
+        #[serde(default)]
+        pressed: bool,
+        #[serde(default)]
+        toggle_mode: bool,
+        #[serde(default)]
+        toggled_on: bool,
+    },
+    Palette {
+        #[serde(default)]
+        search: String,
+    },
 }
 
 impl NodeType {
@@ -186,6 +210,8 @@ impl NodeType {
             NodeType::Monitor => "Monitor",
             NodeType::OscOut { .. } => "OSC Out",
             NodeType::OscIn { .. } => "OSC In",
+            NodeType::KeyInput { .. } => "Key Input",
+            NodeType::Palette { .. } => "Node Palette",
         }
     }
 
@@ -247,6 +273,8 @@ impl NodeType {
                 (0..*arg_count).map(|i| PortDef { name: Box::leak(format!("Arg {}", i).into_boxed_str()) }).collect()
             }
             NodeType::OscIn { .. } => vec![],
+            NodeType::KeyInput { .. } => vec![],
+            NodeType::Palette { .. } => vec![],
             NodeType::Script { input_names, continuous, .. } => {
                 let mut ports: Vec<PortDef> = Vec::new();
                 if !continuous {
@@ -295,9 +323,15 @@ impl NodeType {
             NodeType::OscIn { arg_count, .. } => {
                 (0..*arg_count).map(|i| PortDef { name: Box::leak(format!("Arg {}", i).into_boxed_str()) }).collect()
             }
+            NodeType::KeyInput { .. } => vec![
+                PortDef { name: "Trigger" },
+                PortDef { name: "Held" },
+                PortDef { name: "Toggle" },
+            ],
             NodeType::Script { output_names, .. } => {
                 output_names.iter().map(|n| PortDef { name: Box::leak(n.clone().into_boxed_str()) }).collect()
             }
+            NodeType::Palette { .. } => vec![],
         }
     }
 
@@ -322,6 +356,8 @@ impl NodeType {
             NodeType::Monitor => [80, 200, 200],
             NodeType::OscOut { .. } => [220, 120, 60],
             NodeType::OscIn { .. } => [60, 160, 220],
+            NodeType::KeyInput { .. } => [220, 180, 60],
+            NodeType::Palette { .. } => [120, 120, 180],
         }
     }
 
@@ -382,12 +418,11 @@ impl Graph {
                         // Override min/max from inputs if connected
                         if let Some(PortValue::Float(v)) = inputs.get(1) { *min = *v; }
                         if let Some(PortValue::Float(v)) = inputs.get(2) { *max = *v; }
-                        let out_val = if let Some(PortValue::Float(v)) = inputs.first() {
-                            *v
-                        } else {
-                            *value
-                        };
-                        values.insert((id, 0), PortValue::Float(out_val));
+                        // Override value from input — also update the stored value so slider UI moves
+                        if let Some(PortValue::Float(v)) = inputs.first() {
+                            *value = *v;
+                        }
+                        values.insert((id, 0), PortValue::Float(*value));
                     }
                     NodeType::Add => {
                         let a = inputs.get(0).map(|v| v.as_float()).unwrap_or(0.0);
@@ -521,6 +556,11 @@ impl Graph {
                             let v = last_args.get(i).copied().unwrap_or(0.0);
                             values.insert((id, i), PortValue::Float(v));
                         }
+                    }
+                    NodeType::KeyInput { pressed, toggled_on, .. } => {
+                        values.insert((id, 0), PortValue::Float(if *pressed { 1.0 } else { 0.0 }));
+                        values.insert((id, 1), PortValue::Float(if *pressed { 1.0 } else { 0.0 }));
+                        values.insert((id, 2), PortValue::Float(if *toggled_on { 1.0 } else { 0.0 }));
                     }
                     _ => {}
                 }
