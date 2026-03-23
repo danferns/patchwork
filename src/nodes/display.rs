@@ -8,6 +8,18 @@ pub fn render(
     values: &HashMap<(NodeId, usize), PortValue>,
     connections: &[Connection],
 ) {
-    let val = crate::graph::Graph::static_input_value(connections, values, node_id, 0);
-    ui.heading(format!("{}", val));
+    let val = Graph::static_input_value(connections, values, node_id, 0);
+    match &val {
+        PortValue::Float(v) => {
+            ui.heading(format!("{:.3}", v));
+        }
+        PortValue::Text(s) => {
+            egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
+                ui.label(egui::RichText::new(s.as_str()).monospace());
+            });
+        }
+        PortValue::None => {
+            ui.label(egui::RichText::new("\u{2014}").color(egui::Color32::GRAY));
+        }
+    }
 }

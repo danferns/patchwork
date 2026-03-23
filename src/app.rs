@@ -3,14 +3,10 @@ use crate::nodes;
 use eframe::egui;
 use std::collections::HashMap;
 
-// ── Constants ───────────────────────────────────────────────────────────────
-
 const PORT_RADIUS: f32 = 5.0;
 const PORT_INTERACT: f32 = 14.0;
 const CONN_COLOR: egui::Color32 = egui::Color32::from_rgb(180, 180, 180);
 const CONN_ACTIVE: egui::Color32 = egui::Color32::from_rgb(80, 170, 255);
-
-// ── App state ───────────────────────────────────────────────────────────────
 
 pub struct PatchworkApp {
     graph: Graph,
@@ -35,7 +31,43 @@ impl PatchworkApp {
         }
     }
 
-    // ── Menu bar ────────────────────────────────────────────────────────────
+    // ── Theme ───────────────────────────────────────────────────────────
+
+    fn apply_theme(&self, ctx: &egui::Context) {
+        // Find first Theme node and apply its settings
+        for node in self.graph.nodes.values() {
+            if let NodeType::Theme { dark_mode, accent, font_size } = &node.node_type {
+                nodes::theme::apply(ctx, *dark_mode, *accent, *font_size);
+                return;
+            }
+        }
+    }
+
+    // ── File drop ───────────────────────────────────────────────────────
+
+    fn handle_file_drop(&mut self, ctx: &egui::Context) {
+        let dropped: Vec<_> = ctx.input(|i| {
+            i.raw.dropped_files
+                .iter()
+                .filter_map(|f| f.path.clone())
+                .collect()
+        });
+        for path in dropped {
+            let content = std::fs::read_to_string(&path).unwrap_or_default();
+            let pos = ctx
+                .pointer_latest_pos()
+                .unwrap_or(egui::pos2(200.0, 200.0));
+            self.graph.add_node(
+                NodeType::File {
+                    path: path.display().to_string(),
+                    content,
+                },
+                [pos.x, pos.y],
+            );
+        }
+    }
+
+    // ── Menu bar ────────────────────────────────────────────────────────
 
     fn menu_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
@@ -57,16 +89,24 @@ impl PatchworkApp {
                 });
                 ui.separator();
                 let count = self.graph.nodes.len();
-                ui.label(egui::RichText::new(format!("{count} nodes")).small().color(egui::Color32::GRAY));
+                ui.label(
+                    egui::RichText::new(format!("{count} nodes"))
+                        .small()
+                        .color(egui::Color32::GRAY),
+                );
                 if let Some(path) = &self.project_path {
                     ui.separator();
-                    ui.label(egui::RichText::new(path.as_str()).small().color(egui::Color32::GRAY));
+                    ui.label(
+                        egui::RichText::new(path.as_str())
+                            .small()
+                            .color(egui::Color32::GRAY),
+                    );
                 }
             });
         });
     }
 
-    // ── Canvas background ───────────────────────────────────────────────────
+    // ── Canvas ──────────────────────────────────────────────────────────
 
     fn canvas(&self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -74,7 +114,6 @@ impl PatchworkApp {
             let rect = ui.max_rect();
             let grid = 25.0;
             let col = egui::Color32::from_rgba_premultiplied(12, 12, 12, 35);
-
             let x0 = (rect.left() / grid).floor() as i32;
             let x1 = (rect.right() / grid).ceil() as i32;
             let y0 = (rect.top() / grid).floor() as i32;
@@ -93,13 +132,11 @@ impl PatchworkApp {
                     egui::Stroke::new(0.5, col),
                 );
             }
-
-            // Hint when canvas is empty
             if self.graph.nodes.is_empty() {
                 ui.centered_and_justified(|ui| {
                     ui.label(
-                        egui::RichText::new("Double-click to add a node")
-                            .size(18.0)
+                        egui::RichText::new("Double-click to add a node  \u{2022}  Drag & drop a file")
+                            .size(16.0)
                             .color(egui::Color32::from_rgb(100, 100, 100)),
                     );
                 });
@@ -107,7 +144,7 @@ impl PatchworkApp {
         });
     }
 
-    // ── Render all nodes ────────────────────────────────────────────────────
+    // ── Nodes ───────────────────────────────────────────────────────────
 
     fn render_nodes(&mut self, ctx: &egui::Context, values: &HashMap<(NodeId, usize), PortValue>) {
         let node_ids: Vec<NodeId> = self.graph.nodes.keys().copied().collect();
@@ -134,30 +171,22 @@ impl PatchworkApp {
             let resp = egui::Window::new(egui::RichText::new(&title).color(accent).strong())
                 .id(egui::Id::new(("node", node_id)))
                 .default_pos(egui::pos2(node.pos[0], node.pos[1]))
-                .default_width(200.0)
+                .default_width(220.0)
                 .resizable(true)
                 .collapsible(true)
                 .open(&mut open)
                 .show(ctx, |ui| {
-                    // ── Input ports ─────────────────────────────────────
+                    // Input ports
                     for (i, pdef) in input_defs.iter().enumerate() {
                         ui.horizontal(|ui| {
                             let (rect, response) = ui.allocate_exact_size(
                                 egui::vec2(PORT_INTERACT, PORT_INTERACT),
                                 egui::Sense::click_and_drag(),
                             );
-                            let hovered = response.hovered() || response.dragged();
-                            let col = if hovered {
-                                egui::Color32::YELLOW
-                            } else {
-                                egui::Color32::from_rgb(170, 170, 170)
-                            };
+                            let hov = response.hovered() || response.dragged();
+                            let col = if hov { egui::Color32::YELLOW } else { egui::Color32::from_rgb(170, 170, 170) };
                             ui.painter().circle_filled(rect.center(), PORT_RADIUS, col);
-                            ui.painter().circle_stroke(
-                                rect.center(),
-                                PORT_RADIUS,
-                                egui::Stroke::new(1.0, egui::Color32::WHITE),
-                            );
+                            ui.painter().circle_stroke(rect.center(), PORT_RADIUS, egui::Stroke::new(1.0, egui::Color32::WHITE));
                             port_positions.insert((node_id, i, true), rect.center());
 
                             let val = Graph::static_input_value(&connections, values, node_id, i);
@@ -168,40 +197,27 @@ impl PatchworkApp {
                             }
                         });
                     }
+                    if !input_defs.is_empty() { ui.separator(); }
 
-                    if !input_defs.is_empty() {
-                        ui.separator();
-                    }
-
-                    // ── Node content (dispatched to nodes/ module) ──────
+                    // Node content
                     nodes::render_content(ui, &mut node.node_type, node_id, values, &connections);
 
-                    if !output_defs.is_empty() {
-                        ui.separator();
-                    }
+                    if !output_defs.is_empty() { ui.separator(); }
 
-                    // ── Output ports ────────────────────────────────────
+                    // Output ports
                     for (i, pdef) in output_defs.iter().enumerate() {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let (rect, response) = ui.allocate_exact_size(
                                 egui::vec2(PORT_INTERACT, PORT_INTERACT),
                                 egui::Sense::click_and_drag(),
                             );
-                            let hovered = response.hovered() || response.dragged();
-                            let col = if hovered {
-                                egui::Color32::YELLOW
-                            } else {
-                                egui::Color32::from_rgb(100, 180, 255)
-                            };
+                            let hov = response.hovered() || response.dragged();
+                            let col = if hov { egui::Color32::YELLOW } else { egui::Color32::from_rgb(100, 180, 255) };
                             ui.painter().circle_filled(rect.center(), PORT_RADIUS, col);
-                            ui.painter().circle_stroke(
-                                rect.center(),
-                                PORT_RADIUS,
-                                egui::Stroke::new(1.0, egui::Color32::WHITE),
-                            );
+                            ui.painter().circle_stroke(rect.center(), PORT_RADIUS, egui::Stroke::new(1.0, egui::Color32::WHITE));
                             port_positions.insert((node_id, i, false), rect.center());
 
-                            let val = values.get(&(node_id, i)).copied().unwrap_or(PortValue::None);
+                            let val = values.get(&(node_id, i)).cloned().unwrap_or(PortValue::None);
                             ui.label(format!("{}: {}", pdef.name, val));
 
                             if response.drag_started() {
@@ -216,7 +232,6 @@ impl PatchworkApp {
                 node.pos = [rect.left(), rect.top()];
                 node_rects.insert(node_id, rect);
             }
-
             if open {
                 self.graph.nodes.insert(node_id, node);
             } else {
@@ -224,7 +239,7 @@ impl PatchworkApp {
             }
         }
 
-        // ── Connection drop ─────────────────────────────────────────────
+        // Connection drop
         if let Some((src_node, src_port, is_output)) = dragging_from {
             if ctx.input(|i| i.pointer.any_released()) {
                 if let Some(pointer) = ctx.pointer_latest_pos() {
@@ -243,26 +258,20 @@ impl PatchworkApp {
             }
         }
 
-        // Apply
         self.dragging_from = dragging_from;
         self.port_positions = port_positions;
         self.node_rects = node_rects;
-        for id in nodes_to_delete {
-            self.graph.remove_node(id);
-        }
-        for (fn_, fp, tn, tp) in pending_connections {
-            self.graph.add_connection(fn_, fp, tn, tp);
-        }
+        for id in nodes_to_delete { self.graph.remove_node(id); }
+        for (fn_, fp, tn, tp) in pending_connections { self.graph.add_connection(fn_, fp, tn, tp); }
     }
 
-    // ── Connection rendering ────────────────────────────────────────────────
+    // ── Connections ─────────────────────────────────────────────────────
 
     fn render_connections(&self, ctx: &egui::Context) {
         let painter = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Middle,
             egui::Id::new("connections"),
         ));
-
         for conn in &self.graph.connections {
             let from = self.port_positions.get(&(conn.from_node, conn.from_port, false));
             let to = self.port_positions.get(&(conn.to_node, conn.to_port, true));
@@ -270,7 +279,6 @@ impl PatchworkApp {
                 draw_bezier(&painter, a, b, CONN_COLOR, 2.0);
             }
         }
-
         if let Some((nid, pidx, is_output)) = self.dragging_from {
             let key = (nid, pidx, !is_output);
             if let Some(&from) = self.port_positions.get(&key) {
@@ -285,12 +293,10 @@ impl PatchworkApp {
         }
     }
 
-    // ── Add-node popup ──────────────────────────────────────────────────────
+    // ── Add-node menu ───────────────────────────────────────────────────
 
     fn node_menu(&mut self, ctx: &egui::Context) {
-        if !self.show_node_menu {
-            return;
-        }
+        if !self.show_node_menu { return; }
         let pos = self.node_menu_pos;
         let mut keep_open = true;
 
@@ -302,18 +308,11 @@ impl PatchworkApp {
                     ui.set_min_width(160.0);
                     ui.label(egui::RichText::new("Add Node").strong());
                     ui.separator();
-
                     let mut last_cat = "";
                     for entry in nodes::catalog() {
                         if entry.category != last_cat {
-                            if !last_cat.is_empty() {
-                                ui.separator();
-                            }
-                            ui.label(
-                                egui::RichText::new(entry.category)
-                                    .small()
-                                    .color(egui::Color32::GRAY),
-                            );
+                            if !last_cat.is_empty() { ui.separator(); }
+                            ui.label(egui::RichText::new(entry.category).small().color(egui::Color32::GRAY));
                             last_cat = entry.category;
                         }
                         if ui.button(entry.label).clicked() {
@@ -323,13 +322,10 @@ impl PatchworkApp {
                     }
                 });
             });
-
-        if !keep_open {
-            self.show_node_menu = false;
-        }
+        if !keep_open { self.show_node_menu = false; }
     }
 
-    // ── Canvas interaction ──────────────────────────────────────────────────
+    // ── Canvas interaction ──────────────────────────────────────────────
 
     fn handle_canvas_interaction(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary)) {
@@ -341,9 +337,7 @@ impl PatchworkApp {
                 }
             }
         }
-        if self.show_node_menu
-            && ctx.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary))
-        {
+        if self.show_node_menu && ctx.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary)) {
             self.show_node_menu = false;
         }
     }
@@ -359,7 +353,7 @@ impl PatchworkApp {
         }
     }
 
-    // ── Save / Load ─────────────────────────────────────────────────────────
+    // ── Save / Load ─────────────────────────────────────────────────────
 
     fn save_project(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
@@ -390,10 +384,10 @@ impl PatchworkApp {
     }
 }
 
-// ── eframe::App ─────────────────────────────────────────────────────────────
-
 impl eframe::App for PatchworkApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.apply_theme(ctx);
+        self.handle_file_drop(ctx);
         self.update_mouse_trackers(ctx);
         let values = self.graph.evaluate();
 
@@ -408,17 +402,14 @@ impl eframe::App for PatchworkApp {
     }
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
-
 fn draw_bezier(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, color: egui::Color32, width: f32) {
     let dx = (to.x - from.x).abs().max(50.0) * 0.5;
     let cp1 = egui::pos2(from.x + dx, from.y);
     let cp2 = egui::pos2(to.x - dx, to.y);
-    let shape = egui::epaint::CubicBezierShape::from_points_stroke(
+    painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
         [from, cp1, cp2, to],
         false,
         egui::Color32::TRANSPARENT,
         egui::Stroke::new(width, color),
-    );
-    painter.add(shape);
+    ));
 }
