@@ -15,6 +15,8 @@ pub mod console;
 pub mod monitor;
 pub mod osc_out;
 pub mod osc_in;
+pub mod time;
+pub mod color;
 
 use crate::graph::*;
 use crate::midi::MidiAction;
@@ -42,7 +44,11 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
         NodeCatalogEntry { label: "Text Editor", category: "IO",
             factory: || NodeType::TextEditor { content: String::new() } },
         NodeCatalogEntry { label: "Display", category: "Output", factory: || NodeType::Display },
-        NodeCatalogEntry { label: "WGSL Viewer", category: "Shader", factory: || NodeType::WgslViewer },
+        NodeCatalogEntry { label: "WGSL Viewer", category: "Shader", factory: || NodeType::WgslViewer { uniform_names: vec![], uniform_types: vec![], uniform_values: vec![], uniform_min: vec![], uniform_max: vec![] } },
+        NodeCatalogEntry { label: "Time", category: "Input",
+            factory: || NodeType::Time { elapsed: 0.0, speed: 1.0, running: true } },
+        NodeCatalogEntry { label: "Color", category: "Input",
+            factory: || NodeType::Color { r: 128, g: 128, b: 255 } },
         NodeCatalogEntry { label: "MIDI Out", category: "MIDI",
             factory: || NodeType::MidiOut { port_name: String::new(), mode: MidiMode::Note, channel: 0 } },
         NodeCatalogEntry { label: "MIDI In", category: "MIDI",
@@ -50,7 +56,12 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
         NodeCatalogEntry { label: "Serial", category: "Serial",
             factory: || NodeType::Serial { port_name: String::new(), baud_rate: 115200, log: Vec::new(), last_line: String::new(), send_buf: String::new() } },
         NodeCatalogEntry { label: "Theme", category: "Utility",
-            factory: || NodeType::Theme { dark_mode: true, accent: [80, 160, 255], font_size: 14.0 } },
+            factory: || NodeType::Theme {
+                dark_mode: true, accent: [80, 160, 255], font_size: 14.0,
+                bg_color: [30, 30, 30], text_color: [220, 220, 220],
+                window_bg: [40, 40, 40], window_alpha: 240,
+                grid_color: [12, 12, 12], rounding: 4.0, spacing: 4.0, use_hsl: false,
+            } },
         NodeCatalogEntry { label: "Comment", category: "Utility",
             factory: || NodeType::Comment { text: String::new() } },
         NodeCatalogEntry { label: "Console", category: "Utility",
@@ -84,6 +95,8 @@ pub fn render_content(
     monitor_state: &monitor::MonitorState,
     osc_listening: bool,
     osc_actions: &mut Vec<OscAction>,
+    port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
+    dragging_from: &mut Option<(NodeId, usize, bool)>,
 ) {
     match node_type {
         NodeType::Slider { value, min, max } => slider::render(ui, value, min, max),
@@ -91,7 +104,10 @@ pub fn render_content(
         NodeType::Add | NodeType::Multiply => math::render(ui, node_id, values),
         NodeType::File { path, content } => file::render(ui, path, content),
         NodeType::TextEditor { content } => text_editor::render(ui, content, node_id, values, connections),
-        NodeType::WgslViewer => wgsl_viewer::render(ui, node_id, values, connections),
+        NodeType::WgslViewer { uniform_names, uniform_types, uniform_values, uniform_min, uniform_max } =>
+            wgsl_viewer::render(ui, uniform_names, uniform_types, uniform_values, uniform_min, uniform_max, node_id, values, connections),
+        NodeType::Time { elapsed, speed, running } => time::render(ui, elapsed, speed, running),
+        NodeType::Color { r, g, b } => color::render(ui, r, g, b),
         NodeType::MouseTracker { x, y } => mouse_tracker::render(ui, *x, *y),
         NodeType::MidiOut { port_name, mode, channel } =>
             midi_out::render(ui, port_name, mode, channel, node_id, values, connections, midi_out_ports, midi_connected_out, midi_actions),
@@ -99,7 +115,8 @@ pub fn render_content(
             midi_in::render(ui, port_name, channel, note, velocity, log, node_id, midi_in_ports, midi_connected_in, midi_actions),
         NodeType::Serial { port_name, baud_rate, log, last_line, send_buf } =>
             serial::render(ui, port_name, baud_rate, log, last_line, send_buf, node_id, values, connections, serial_ports, serial_connected, serial_actions),
-        NodeType::Theme { dark_mode, accent, font_size } => theme::render(ui, dark_mode, accent, font_size),
+        NodeType::Theme { dark_mode, accent, font_size, bg_color, text_color, window_bg, window_alpha, grid_color, rounding, spacing, use_hsl } =>
+            theme::render(ui, dark_mode, accent, font_size, bg_color, text_color, window_bg, window_alpha, grid_color, rounding, spacing, use_hsl, node_id, values, connections, port_positions, dragging_from),
         NodeType::Comment { text } => comment::render(ui, text),
         NodeType::Console { messages } => console::render(ui, messages),
         NodeType::Monitor => monitor::render(ui, monitor_state),

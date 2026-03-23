@@ -26,6 +26,15 @@ pub struct PatchworkApp {
     console_messages: Vec<String>,
     monitor: nodes::monitor::MonitorState,
     osc: OscManager,
+    // Selection & clipboard
+    selected_node: Option<NodeId>,
+    clipboard: Option<NodeType>,
+    context_menu_node: Option<NodeId>,
+    show_context_menu: bool,
+    context_menu_pos: egui::Pos2,
+    // Option+drag duplication
+    opt_drag_source: Option<NodeId>,
+    opt_drag_created: Option<NodeId>,
 }
 
 impl PatchworkApp {
@@ -45,6 +54,13 @@ impl PatchworkApp {
             console_messages: Vec::new(),
             monitor: nodes::monitor::MonitorState::default(),
             osc: OscManager::new(),
+            selected_node: None,
+            clipboard: None,
+            context_menu_node: None,
+            show_context_menu: false,
+            context_menu_pos: egui::Pos2::ZERO,
+            opt_drag_source: None,
+            opt_drag_created: None,
         }
     }
 
@@ -65,8 +81,8 @@ impl PatchworkApp {
 
     fn apply_theme(&self, ctx: &egui::Context) {
         for node in self.graph.nodes.values() {
-            if let NodeType::Theme { dark_mode, accent, font_size } = &node.node_type {
-                nodes::theme::apply(ctx, *dark_mode, *accent, *font_size);
+            if let NodeType::Theme { dark_mode, accent, font_size, bg_color, text_color, window_bg, window_alpha, grid_color: _, rounding, spacing, .. } = &node.node_type {
+                nodes::theme::apply(ctx, *dark_mode, *accent, *font_size, *bg_color, *text_color, *window_bg, *window_alpha, *rounding, *spacing);
                 return;
             }
         }
@@ -171,7 +187,11 @@ impl PatchworkApp {
             let painter = ui.painter();
             let rect = ui.max_rect();
             let grid = 25.0;
-            let col = egui::Color32::from_rgba_premultiplied(12, 12, 12, 35);
+            // Use theme grid color if a Theme node exists
+            let gc = self.graph.nodes.values()
+                .find_map(|n| if let NodeType::Theme { grid_color, .. } = &n.node_type { Some(*grid_color) } else { None })
+                .unwrap_or([12, 12, 12]);
+            let col = egui::Color32::from_rgba_premultiplied(gc[0], gc[1], gc[2], 35);
             let x0 = (rect.left() / grid).floor() as i32;
             let x1 = (rect.right() / grid).ceil() as i32;
             let y0 = (rect.top() / grid).floor() as i32;
@@ -216,6 +236,7 @@ impl PatchworkApp {
             let osc_listening = self.osc.is_listening(node_id);
 
             let mut open = true;
+            let inline = node.node_type.inline_ports();
             let resp = egui::Window::new(egui::RichText::new(&title).color(accent).strong())
                 .id(egui::Id::new(("node", node_id)))
                 .default_pos(egui::pos2(node.pos[0], node.pos[1]))
@@ -226,41 +247,74 @@ impl PatchworkApp {
                 .scroll([false, true])
                 .open(&mut open)
                 .show(ctx, |ui| {
-                    for (i, pdef) in input_defs.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            let (rect, response) = ui.allocate_exact_size(egui::vec2(PORT_INTERACT, PORT_INTERACT), egui::Sense::click_and_drag());
-                            let col = if response.hovered() || response.dragged() { egui::Color32::YELLOW } else { egui::Color32::from_rgb(170, 170, 170) };
-                            ui.painter().circle_filled(rect.center(), PORT_RADIUS, col);
-                            ui.painter().circle_stroke(rect.center(), PORT_RADIUS, egui::Stroke::new(1.0, egui::Color32::WHITE));
-                            port_positions.insert((node_id, i, true), rect.center());
-                            let val = Graph::static_input_value(&connections, values, node_id, i);
-                            ui.label(format!("{}: {}", pdef.name, val));
-                            if response.drag_started() { dragging_from = Some((node_id, i, false)); }
-                        });
+                    // Top input ports (skip for inline-port nodes)
+                    if !inline {
+                        for (i, pdef) in input_defs.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                let (rect, response) = ui.allocate_exact_size(egui::vec2(PORT_INTERACT, PORT_INTERACT), egui::Sense::click_and_drag());
+                                let col = if response.hovered() || response.dragged() { egui::Color32::YELLOW } else { egui::Color32::from_rgb(170, 170, 170) };
+                                ui.painter().circle_filled(rect.center(), PORT_RADIUS, col);
+                                ui.painter().circle_stroke(rect.center(), PORT_RADIUS, egui::Stroke::new(1.0, egui::Color32::WHITE));
+                                port_positions.insert((node_id, i, true), rect.center());
+                                let val = Graph::static_input_value(&connections, values, node_id, i);
+                                ui.label(format!("{}: {}", pdef.name, val));
+                                if response.drag_started() { dragging_from = Some((node_id, i, false)); }
+                            });
+                        }
+                        if !input_defs.is_empty() { ui.separator(); }
                     }
-                    if !input_defs.is_empty() { ui.separator(); }
 
                     nodes::render_content(ui, &mut node.node_type, node_id, values, &connections,
                         &midi_out_ports, &midi_in_ports, midi_conn_out, midi_conn_in, &mut midi_actions,
                         &serial_ports, serial_conn, &mut serial_actions, &monitor_state,
-                        osc_listening, &mut osc_actions);
+                        osc_listening, &mut osc_actions, &mut port_positions, &mut dragging_from);
 
-                    if !output_defs.is_empty() { ui.separator(); }
-                    for (i, pdef) in output_defs.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            let val = values.get(&(node_id, i)).cloned().unwrap_or(PortValue::None);
-                            ui.label(format!("{}: {}", pdef.name, val));
-                            let (rect, response) = ui.allocate_exact_size(egui::vec2(PORT_INTERACT, PORT_INTERACT), egui::Sense::click_and_drag());
-                            let col = if response.hovered() || response.dragged() { egui::Color32::YELLOW } else { egui::Color32::from_rgb(100, 180, 255) };
-                            ui.painter().circle_filled(rect.center(), PORT_RADIUS, col);
-                            ui.painter().circle_stroke(rect.center(), PORT_RADIUS, egui::Stroke::new(1.0, egui::Color32::WHITE));
-                            port_positions.insert((node_id, i, false), rect.center());
-                            if response.drag_started() { dragging_from = Some((node_id, i, true)); }
-                        });
+                    // Bottom output ports (skip for inline-port nodes)
+                    if !inline {
+                        if !output_defs.is_empty() { ui.separator(); }
+                        for (i, pdef) in output_defs.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                let val = values.get(&(node_id, i)).cloned().unwrap_or(PortValue::None);
+                                ui.label(format!("{}: {}", pdef.name, val));
+                                let (rect, response) = ui.allocate_exact_size(egui::vec2(PORT_INTERACT, PORT_INTERACT), egui::Sense::click_and_drag());
+                                let col = if response.hovered() || response.dragged() { egui::Color32::YELLOW } else { egui::Color32::from_rgb(100, 180, 255) };
+                                ui.painter().circle_filled(rect.center(), PORT_RADIUS, col);
+                                ui.painter().circle_stroke(rect.center(), PORT_RADIUS, egui::Stroke::new(1.0, egui::Color32::WHITE));
+                                port_positions.insert((node_id, i, false), rect.center());
+                                if response.drag_started() { dragging_from = Some((node_id, i, true)); }
+                            });
+                        }
                     }
                 });
 
-            if let Some(r) = &resp { node.pos = [r.response.rect.left(), r.response.rect.top()]; node_rects.insert(node_id, r.response.rect); }
+            if let Some(r) = &resp {
+                node.pos = [r.response.rect.left(), r.response.rect.top()];
+                node_rects.insert(node_id, r.response.rect);
+
+                // Selection on click
+                if r.response.clicked() || r.response.drag_started() {
+                    self.selected_node = Some(node_id);
+                }
+
+                // Right-click context menu
+                if r.response.secondary_clicked() {
+                    self.selected_node = Some(node_id);
+                    self.context_menu_node = Some(node_id);
+                    self.show_context_menu = true;
+                    self.context_menu_pos = ctx.pointer_latest_pos().unwrap_or(r.response.rect.center());
+                }
+
+                // Draw selection highlight
+                if self.selected_node == Some(node_id) {
+                    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("selection")));
+                    painter.rect_stroke(r.response.rect.expand(2.0), 4.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 170, 255)), egui::StrokeKind::Outside);
+                }
+
+                // Option+drag to duplicate
+                if r.response.drag_started() && ctx.input(|i| i.modifiers.alt) {
+                    self.opt_drag_source = Some(node_id);
+                }
+            }
             if open { self.graph.nodes.insert(node_id, node); } else { nodes_to_delete.push(node_id); }
         }
 
@@ -378,12 +432,21 @@ impl PatchworkApp {
     }
 
     fn handle_canvas_interaction(&mut self, ctx: &egui::Context) {
+        // Double-click to add node
         if ctx.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary)) {
             if let Some(pos) = ctx.pointer_latest_pos() {
                 if !self.node_rects.values().any(|r| r.contains(pos)) {
                     self.show_node_menu = true;
                     self.node_menu_pos = pos;
                     self.node_menu_search.clear();
+                }
+            }
+        }
+        // Click on empty canvas deselects
+        if ctx.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary)) {
+            if let Some(pos) = ctx.pointer_latest_pos() {
+                if !self.node_rects.values().any(|r| r.contains(pos)) {
+                    self.selected_node = None;
                 }
             }
         }
@@ -394,6 +457,148 @@ impl PatchworkApp {
         if self.show_node_menu && ctx.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary)) {
             self.show_node_menu = false;
             self.node_menu_search.clear();
+        }
+        // Escape closes context menu
+        if self.show_context_menu && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.show_context_menu = false;
+        }
+
+        // Keyboard shortcuts
+        self.handle_keyboard_shortcuts(ctx);
+
+        // Option+drag completion
+        self.handle_opt_drag(ctx);
+    }
+
+    fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
+        let modifiers = ctx.input(|i| i.modifiers);
+        let cmd = modifiers.mac_cmd || modifiers.ctrl;
+
+        // Cmd+C = copy
+        if cmd && ctx.input(|i| i.key_pressed(egui::Key::C)) {
+            if let Some(id) = self.selected_node {
+                if let Some(node) = self.graph.nodes.get(&id) {
+                    self.clipboard = Some(node.node_type.clone());
+                }
+            }
+        }
+        // Cmd+V = paste
+        if cmd && ctx.input(|i| i.key_pressed(egui::Key::V)) {
+            if let Some(nt) = &self.clipboard {
+                let pos = ctx.pointer_latest_pos().unwrap_or(egui::pos2(200.0, 200.0));
+                let new_id = self.graph.add_node(nt.clone(), [pos.x + 20.0, pos.y + 20.0]);
+                self.selected_node = Some(new_id);
+            }
+        }
+        // Cmd+D = duplicate
+        if cmd && ctx.input(|i| i.key_pressed(egui::Key::D)) {
+            self.duplicate_selected();
+        }
+        // Delete / Backspace = delete selected (only if no text input is focused)
+        if ctx.input(|i| i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete)) {
+            if !ctx.wants_keyboard_input() {
+                if let Some(id) = self.selected_node.take() {
+                    self.midi.cleanup_node(id);
+                    self.serial.cleanup_node(id);
+                    self.osc.cleanup_node(id);
+                    self.graph.remove_node(id);
+                }
+            }
+        }
+    }
+
+    fn handle_opt_drag(&mut self, ctx: &egui::Context) {
+        if let Some(source_id) = self.opt_drag_source {
+            if self.opt_drag_created.is_none() {
+                // Create duplicate at same position
+                if let Some(node) = self.graph.nodes.get(&source_id) {
+                    let nt = node.node_type.clone();
+                    let pos = node.pos;
+                    let new_id = self.graph.add_node(nt, [pos[0] + 30.0, pos[1] + 30.0]);
+                    self.opt_drag_created = Some(new_id);
+                    self.selected_node = Some(new_id);
+                }
+            }
+            if ctx.input(|i| i.pointer.any_released()) {
+                self.opt_drag_source = None;
+                self.opt_drag_created = None;
+            }
+        }
+    }
+
+    fn duplicate_selected(&mut self) {
+        if let Some(id) = self.selected_node {
+            if let Some(node) = self.graph.nodes.get(&id) {
+                let nt = node.node_type.clone();
+                let pos = node.pos;
+                let new_id = self.graph.add_node(nt, [pos[0] + 30.0, pos[1] + 30.0]);
+                self.selected_node = Some(new_id);
+            }
+        }
+    }
+
+    fn context_menu(&mut self, ctx: &egui::Context) {
+        if !self.show_context_menu { return; }
+        let pos = self.context_menu_pos;
+        let mut keep_open = true;
+
+        egui::Area::new(egui::Id::new("node_context_menu"))
+            .fixed_pos(pos)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(120.0);
+
+                    if ui.button("Copy").clicked() {
+                        if let Some(id) = self.context_menu_node {
+                            if let Some(node) = self.graph.nodes.get(&id) {
+                                self.clipboard = Some(node.node_type.clone());
+                            }
+                        }
+                        keep_open = false;
+                    }
+                    if self.clipboard.is_some() {
+                        if ui.button("Paste").clicked() {
+                            if let Some(nt) = &self.clipboard {
+                                let new_id = self.graph.add_node(nt.clone(), [pos.x + 20.0, pos.y + 20.0]);
+                                self.selected_node = Some(new_id);
+                            }
+                            keep_open = false;
+                        }
+                    }
+                    if ui.button("Duplicate").clicked() {
+                        if let Some(id) = self.context_menu_node {
+                            if let Some(node) = self.graph.nodes.get(&id) {
+                                let nt = node.node_type.clone();
+                                let p = node.pos;
+                                let new_id = self.graph.add_node(nt, [p[0] + 30.0, p[1] + 30.0]);
+                                self.selected_node = Some(new_id);
+                            }
+                        }
+                        keep_open = false;
+                    }
+                    ui.separator();
+                    if ui.button(egui::RichText::new("Delete").color(egui::Color32::from_rgb(255, 100, 100))).clicked() {
+                        if let Some(id) = self.context_menu_node {
+                            self.midi.cleanup_node(id);
+                            self.serial.cleanup_node(id);
+                            self.osc.cleanup_node(id);
+                            self.graph.remove_node(id);
+                            if self.selected_node == Some(id) { self.selected_node = None; }
+                        }
+                        keep_open = false;
+                    }
+                });
+            });
+
+        if !keep_open {
+            self.show_context_menu = false;
+            self.context_menu_node = None;
+        }
+        // Click elsewhere to close
+        if ctx.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary)) {
+            self.show_context_menu = false;
+            self.context_menu_node = None;
         }
     }
 
@@ -463,6 +668,7 @@ impl eframe::App for PatchworkApp {
         self.render_nodes(ctx, &values);
         self.sync_console_messages();
         self.node_menu(ctx);
+        self.context_menu(ctx);
         self.handle_canvas_interaction(ctx);
         ctx.request_repaint();
     }
