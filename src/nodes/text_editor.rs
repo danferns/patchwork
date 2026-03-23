@@ -28,6 +28,7 @@ pub fn render(
         if !has_input {
             if ui.button("Open...").clicked() {
                 if let Some(fp) = rfd::FileDialog::new()
+                    .add_filter("All files", &["*"])
                     .add_filter("Text", &["txt", "json", "csv", "wgsl", "toml", "yaml", "rs", "py"])
                     .pick_file()
                 {

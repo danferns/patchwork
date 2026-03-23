@@ -1,5 +1,6 @@
 mod app;
 mod graph;
+mod http;
 mod midi;
 mod nodes;
 mod osc;
@@ -17,6 +18,7 @@ fn main() -> eframe::Result {
             .with_icon(Arc::new(icon))
             .with_inner_size([1280.0, 800.0])
             .with_title("Patchwork"),
+        renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
 

@@ -6,8 +6,8 @@ pub fn render(ui: &mut egui::Ui, path: &mut String, content: &mut String) {
     ui.horizontal(|ui| {
         if ui.button("Open...").clicked() {
             if let Some(fp) = rfd::FileDialog::new()
-                .add_filter("All supported", &["wgsl", "json", "csv", "txt", "toml", "yaml", "rs", "py", "glsl", "hlsl"])
                 .add_filter("All files", &["*"])
+                .add_filter("All supported", &["wgsl", "json", "csv", "txt", "toml", "yaml", "rs", "py", "glsl", "hlsl"])
                 .pick_file()
             {
                 *path = fp.display().to_string();

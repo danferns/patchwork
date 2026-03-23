@@ -12,6 +12,7 @@ fn default_spacing() -> f32 { 4.0 }
 fn default_canvas_w() -> f32 { 800.0 }
 fn default_canvas_h() -> f32 { 600.0 }
 fn default_resolution() -> u32 { 120 }
+fn default_max_tokens() -> u32 { 1024 }
 
 pub type NodeId = u64;
 
@@ -59,6 +60,8 @@ pub enum NodeType {
     File { path: String, content: String },
     TextEditor { content: String },
     WgslViewer {
+        #[serde(default)]
+        wgsl_code: String,
         #[serde(default)]
         uniform_names: Vec<String>,
         #[serde(default)]
@@ -185,6 +188,44 @@ pub enum NodeType {
         #[serde(default)]
         search: String,
     },
+    HttpRequest {
+        #[serde(default)]
+        url: String,
+        #[serde(default)]
+        method: String,        // GET or POST
+        #[serde(default)]
+        headers: String,       // Custom headers, key: value per line
+        #[serde(default)]
+        response: String,
+        #[serde(default)]
+        status: String,        // "idle" / "200 OK" / "error: ..."
+        #[serde(default)]
+        auto_send: bool,
+        #[serde(default)]
+        last_hash: u64,
+    },
+    AiRequest {
+        #[serde(default)]
+        provider: String,      // "anthropic" / "openai" / "custom"
+        #[serde(default)]
+        model: String,
+        #[serde(default)]
+        response: String,
+        #[serde(default)]
+        status: String,
+        #[serde(default = "default_max_tokens")]
+        max_tokens: u32,
+        #[serde(default)]
+        temperature: f32,
+        #[serde(default)]
+        api_key_name: String,  // Key name in project api_keys.json
+        #[serde(default)]
+        custom_url: String,
+    },
+    JsonExtract {
+        #[serde(default)]
+        path: String,
+    },
 }
 
 impl NodeType {
@@ -212,6 +253,9 @@ impl NodeType {
             NodeType::OscIn { .. } => "OSC In",
             NodeType::KeyInput { .. } => "Key Input",
             NodeType::Palette { .. } => "Node Palette",
+            NodeType::HttpRequest { .. } => "HTTP Request",
+            NodeType::AiRequest { .. } => "AI Request",
+            NodeType::JsonExtract { .. } => "JSON Extract",
         }
     }
 
@@ -275,6 +319,17 @@ impl NodeType {
             NodeType::OscIn { .. } => vec![],
             NodeType::KeyInput { .. } => vec![],
             NodeType::Palette { .. } => vec![],
+            NodeType::HttpRequest { .. } => vec![
+                PortDef { name: "URL" },
+                PortDef { name: "Body" },
+                PortDef { name: "Headers" },
+            ],
+            NodeType::AiRequest { .. } => vec![
+                PortDef { name: "Config" },
+                PortDef { name: "System" },
+                PortDef { name: "Prompt" },
+            ],
+            NodeType::JsonExtract { .. } => vec![PortDef { name: "JSON" }],
             NodeType::Script { input_names, continuous, .. } => {
                 let mut ports: Vec<PortDef> = Vec::new();
                 if !continuous {
@@ -332,6 +387,15 @@ impl NodeType {
                 output_names.iter().map(|n| PortDef { name: Box::leak(n.clone().into_boxed_str()) }).collect()
             }
             NodeType::Palette { .. } => vec![],
+            NodeType::HttpRequest { .. } => vec![
+                PortDef { name: "Response" },
+                PortDef { name: "Status" },
+            ],
+            NodeType::AiRequest { .. } => vec![
+                PortDef { name: "Response" },
+                PortDef { name: "Status" },
+            ],
+            NodeType::JsonExtract { .. } => vec![PortDef { name: "Value" }],
         }
     }
 
@@ -358,6 +422,9 @@ impl NodeType {
             NodeType::OscIn { .. } => [60, 160, 220],
             NodeType::KeyInput { .. } => [220, 180, 60],
             NodeType::Palette { .. } => [120, 120, 180],
+            NodeType::HttpRequest { .. } => [60, 180, 120],
+            NodeType::AiRequest { .. } => [180, 100, 255],
+            NodeType::JsonExtract { .. } => [200, 160, 60],
         }
     }
 
@@ -548,6 +615,34 @@ impl Graph {
                             }
                         }
                     }
+                    NodeType::HttpRequest { response, status, .. } => {
+                        values.insert((id, 0), PortValue::Text(response.clone()));
+                        // Parse status code from status string (e.g., "200 OK" → 200.0)
+                        let code = status.split_whitespace().next()
+                            .and_then(|s| s.parse::<f32>().ok())
+                            .unwrap_or(0.0);
+                        values.insert((id, 1), PortValue::Float(code));
+                    }
+                    NodeType::AiRequest { response, status, .. } => {
+                        values.insert((id, 0), PortValue::Text(response.clone()));
+                        let code = if status.contains("done") { 1.0 }
+                            else if status.contains("error") { -1.0 }
+                            else if status.contains("thinking") { 0.5 }
+                            else { 0.0 };
+                        values.insert((id, 1), PortValue::Float(code));
+                    }
+                    NodeType::JsonExtract { path, .. } => {
+                        let json_text = match inputs.first() {
+                            Some(PortValue::Text(s)) => s.clone(),
+                            _ => String::new(),
+                        };
+                        let extracted = if !json_text.is_empty() && !path.is_empty() {
+                            extract_json_path(&json_text, path)
+                        } else {
+                            String::new()
+                        };
+                        values.insert((id, 0), PortValue::Text(extracted));
+                    }
                     NodeType::Console { .. } => {}
                     NodeType::Monitor => {}
                     NodeType::OscOut { .. } => {}
@@ -589,5 +684,24 @@ impl Graph {
             }
         }
         PortValue::None
+    }
+}
+
+/// Walk a JSON value using dot-separated path (e.g., "choices.0.message.content")
+fn extract_json_path(json_str: &str, path: &str) -> String {
+    let Ok(mut val) = serde_json::from_str::<serde_json::Value>(json_str) else {
+        return format!("(parse error)");
+    };
+    for segment in path.split('.') {
+        val = if let Ok(idx) = segment.parse::<usize>() {
+            val.get(idx).cloned().unwrap_or(serde_json::Value::Null)
+        } else {
+            val.get(segment).cloned().unwrap_or(serde_json::Value::Null)
+        };
+    }
+    match &val {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
     }
 }

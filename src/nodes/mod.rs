@@ -19,11 +19,15 @@ pub mod key_input;
 pub mod time;
 pub mod color;
 pub mod palette;
+pub mod http_request;
+pub mod ai_request;
+pub mod json_extract;
 
 use crate::graph::*;
 use crate::midi::MidiAction;
 use crate::serial::SerialAction;
 use crate::osc::OscAction;
+use crate::http::HttpAction;
 use eframe::egui;
 use std::collections::HashMap;
 
@@ -49,6 +53,7 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
             factory: || NodeType::TextEditor { content: String::new() } },
         NodeCatalogEntry { label: "Display", category: "Output", factory: || NodeType::Display },
         NodeCatalogEntry { label: "WGSL Viewer", category: "Shader", factory: || NodeType::WgslViewer {
+            wgsl_code: String::new(),
             uniform_names: vec![], uniform_types: vec![], uniform_values: vec![], uniform_min: vec![], uniform_max: vec![],
             canvas_w: 800.0, canvas_h: 600.0, resolution: 120, expanded: false,
         } },
@@ -83,6 +88,19 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
             factory: || NodeType::Script { name: "Custom Script".to_string(), input_names: vec![], output_names: vec![], code: String::new(), last_values: vec![], error: String::new(), continuous: true, trigger: false } },
         NodeCatalogEntry { label: "Node Palette", category: "Utility",
             factory: || NodeType::Palette { search: String::new() } },
+        NodeCatalogEntry { label: "HTTP Request", category: "Web",
+            factory: || NodeType::HttpRequest {
+                url: String::new(), method: "POST".into(), headers: String::new(),
+                response: String::new(), status: String::new(), auto_send: false, last_hash: 0,
+            } },
+        NodeCatalogEntry { label: "AI Request", category: "Web",
+            factory: || NodeType::AiRequest {
+                provider: "anthropic".into(), model: "claude-sonnet-4-20250514".into(),
+                response: String::new(), status: String::new(),
+                max_tokens: 1024, temperature: 0.7, api_key_name: String::new(), custom_url: String::new(),
+            } },
+        NodeCatalogEntry { label: "JSON Extract", category: "Web",
+            factory: || NodeType::JsonExtract { path: String::new() } },
     ]
 }
 
@@ -106,6 +124,10 @@ pub fn render_content(
     osc_actions: &mut Vec<OscAction>,
     port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
     dragging_from: &mut Option<(NodeId, usize, bool)>,
+    http_actions: &mut Vec<HttpAction>,
+    http_pending: bool,
+    api_keys: &HashMap<String, String>,
+    wgpu_render_state: &Option<eframe::egui_wgpu::RenderState>,
 ) {
     match node_type {
         NodeType::Slider { value, min, max } => slider::render(ui, value, min, max),
@@ -113,8 +135,8 @@ pub fn render_content(
         NodeType::Add | NodeType::Multiply => math::render(ui, node_id, values),
         NodeType::File { path, content } => file::render(ui, path, content),
         NodeType::TextEditor { content } => text_editor::render(ui, content, node_id, values, connections),
-        NodeType::WgslViewer { uniform_names, uniform_types, uniform_values, uniform_min, uniform_max, canvas_w, canvas_h, resolution, expanded } =>
-            wgsl_viewer::render(ui, uniform_names, uniform_types, uniform_values, uniform_min, uniform_max, canvas_w, canvas_h, resolution, expanded, node_id, values, connections),
+        NodeType::WgslViewer { wgsl_code, .. } =>
+            wgsl_viewer::render(ui, wgsl_code, node_id, values, connections, wgpu_render_state),
         NodeType::Time { elapsed, speed, running } => time::render(ui, elapsed, speed, running),
         NodeType::Color { r, g, b } => color::render(ui, r, g, b),
         NodeType::MouseTracker { x, y } => mouse_tracker::render(ui, *x, *y),
@@ -139,6 +161,12 @@ pub fn render_content(
             script::render(ui, name, input_names, output_names, code, last_values, error, continuous, trigger, values, node_id),
         NodeType::Palette { search } =>
             palette::render(ui, search, node_id),
+        NodeType::HttpRequest { url, method, headers, response, status, auto_send, last_hash } =>
+            http_request::render(ui, url, method, headers, response, status, auto_send, last_hash, node_id, values, connections, http_pending, http_actions),
+        NodeType::AiRequest { provider, model, response, status, max_tokens, temperature, api_key_name, custom_url } =>
+            ai_request::render(ui, provider, model, response, status, max_tokens, temperature, api_key_name, custom_url, node_id, values, connections, http_pending, http_actions, api_keys),
+        NodeType::JsonExtract { path } =>
+            json_extract::render(ui, path, node_id, values, connections),
     }
 }
 

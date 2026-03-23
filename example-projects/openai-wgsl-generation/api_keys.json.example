@@ -1,0 +1,4 @@
+{
+  "openai": "sk-proj-YOUR_OPENAI_API_KEY_HERE",
+  "anthropic": "sk-ant-YOUR_ANTHROPIC_API_KEY_HERE"
+}

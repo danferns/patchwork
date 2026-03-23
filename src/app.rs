@@ -1,10 +1,13 @@
 use crate::graph::*;
+use crate::http::{HttpAction, HttpManager};
 use crate::midi::{MidiAction, MidiManager};
 use crate::serial::{SerialAction, SerialManager};
 use crate::osc::{OscAction, OscManager};
 use crate::nodes;
 use eframe::egui;
+use eframe::egui_wgpu;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 const PORT_RADIUS: f32 = 5.0;
 const PORT_INTERACT: f32 = 14.0;
@@ -40,10 +43,16 @@ pub struct PatchworkApp {
     canvas_zoom: f32,
     panning: bool,
     pinned_nodes: std::collections::HashSet<NodeId>,
+    // HTTP & API
+    http: HttpManager,
+    api_keys: HashMap<String, String>,
+    // WGPU render state for shader nodes
+    wgpu_render_state: Option<egui_wgpu::RenderState>,
 }
 
 impl PatchworkApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let wgpu_render_state = cc.wgpu_render_state.clone();
         Self {
             graph: Graph::new(),
             port_positions: HashMap::new(),
@@ -70,6 +79,9 @@ impl PatchworkApp {
             canvas_zoom: 1.0,
             panning: false,
             pinned_nodes: std::collections::HashSet::new(),
+            http: HttpManager::new(),
+            api_keys: HashMap::new(),
+            wgpu_render_state,
         }
     }
 
@@ -96,6 +108,8 @@ impl PatchworkApp {
             }
         }
     }
+
+    // Pinned nodes: pos is screen pixels, computed to egui coords inline in render
 
     fn handle_file_drop(&mut self, ctx: &egui::Context) {
         let dropped: Vec<_> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
@@ -176,6 +190,40 @@ impl PatchworkApp {
         }
     }
 
+    fn poll_http_responses(&mut self) {
+        let node_ids: Vec<NodeId> = self.graph.nodes.keys().copied().collect();
+        for nid in node_ids {
+            if let Some(resp) = self.http.poll(nid) {
+                if let Some(node) = self.graph.nodes.get_mut(&nid) {
+                    match &mut node.node_type {
+                        NodeType::HttpRequest { response, status, .. } => {
+                            *status = format!("{}", resp.status);
+                            *response = resp.body;
+                        }
+                        NodeType::AiRequest { provider, response, status, .. } => {
+                            if resp.status >= 200 && resp.status < 300 {
+                                // Try to detect provider from response shape if not set
+                                let prov = if provider.is_empty() {
+                                    // Auto-detect: Anthropic has "content" array, OpenAI has "choices"
+                                    if resp.body.contains("\"content\":[{\"type\"") { "anthropic" }
+                                    else { "openai" }
+                                } else {
+                                    provider.as_str()
+                                };
+                                *response = crate::nodes::ai_request::extract_ai_response(prov, &resp.body);
+                                *status = "done".into();
+                            } else {
+                                *response = resp.body;
+                                *status = format!("error: {}", resp.status);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
     fn menu_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -240,7 +288,9 @@ impl PatchworkApp {
         });
     }
 
-    fn render_nodes(&mut self, ctx: &egui::Context, values: &HashMap<(NodeId, usize), PortValue>) {
+    /// Render nodes. If `pinned_only` is true, only render pinned nodes (at zoom 1.0).
+    /// If false, only render non-pinned nodes (at canvas zoom).
+    fn render_nodes_filtered(&mut self, ctx: &egui::Context, values: &HashMap<(NodeId, usize), PortValue>, pinned_only: bool) {
         let node_ids: Vec<NodeId> = self.graph.nodes.keys().copied().collect();
         let connections = self.graph.connections.clone();
         let midi_out_ports = self.midi.cached_output_ports.clone();
@@ -249,8 +299,17 @@ impl PatchworkApp {
         let monitor_state = std::mem::take(&mut self.monitor);
         let offset = self.canvas_offset;
         let zoom = self.canvas_zoom;
-        let mut port_positions: HashMap<(NodeId, usize, bool), egui::Pos2> = HashMap::new();
-        let mut node_rects: HashMap<NodeId, egui::Rect> = HashMap::new();
+        // Don't create fresh — extend existing to preserve positions from other passes
+        let mut port_positions: HashMap<(NodeId, usize, bool), egui::Pos2> = if pinned_only {
+            std::mem::take(&mut self.port_positions)
+        } else {
+            HashMap::new()
+        };
+        let mut node_rects: HashMap<NodeId, egui::Rect> = if pinned_only {
+            std::mem::take(&mut self.node_rects)
+        } else {
+            HashMap::new()
+        };
         let mut pending_connections: Vec<(NodeId, usize, NodeId, usize)> = Vec::new();
         let mut nodes_to_delete: Vec<NodeId> = Vec::new();
         let mut osc_actions: Vec<OscAction> = Vec::new();
@@ -258,8 +317,16 @@ impl PatchworkApp {
         let mut palette_spawns: Vec<([f32; 2], NodeType)> = Vec::new();
         let mut midi_actions: Vec<MidiAction> = Vec::new();
         let mut serial_actions: Vec<SerialAction> = Vec::new();
+        let mut http_actions: Vec<HttpAction> = Vec::new();
+        let api_keys = self.api_keys.clone();
+        let wgpu_render_state = self.wgpu_render_state.clone();
 
         for node_id in node_ids {
+            let is_pinned = self.pinned_nodes.contains(&node_id);
+            // Skip nodes not in the current pass
+            if pinned_only != is_pinned {
+                continue;
+            }
             let mut node = match self.graph.nodes.remove(&node_id) { Some(n) => n, None => continue };
             let input_defs = node.node_type.inputs();
             let output_defs = node.node_type.outputs();
@@ -270,17 +337,17 @@ impl PatchworkApp {
             let midi_conn_in = self.midi.is_input_connected(node_id);
             let serial_conn = self.serial.is_connected(node_id);
             let osc_listening = self.osc.is_listening(node_id);
+            let http_pending = self.http.is_pending(node_id);
 
             let mut open = true;
             let inline = node.node_type.inline_ports();
-            let is_pinned = self.pinned_nodes.contains(&node_id);
-            // With set_zoom_factor(z), egui coords are in zoomed space
-            // Canvas pos + offset (converted to egui units) = egui position
-            let offset_egui = offset / zoom; // screen pixels → egui units
+            let offset_egui = offset / zoom;
             let (egui_x, egui_y) = if is_pinned {
-                // Pinned: fixed screen position → divide by zoom to get stable egui pos
+                // Pinned: pos is screen pixels. Convert to egui coords:
+                // egui_pos = screen_pos / zoom
                 (node.pos[0] / zoom, node.pos[1] / zoom)
             } else {
+                // Normal: pos is canvas coords
                 (node.pos[0] + offset_egui.x, node.pos[1] + offset_egui.y)
             };
             let resp = egui::Window::new(egui::RichText::new(&title).color(accent).strong())
@@ -313,7 +380,8 @@ impl PatchworkApp {
                     nodes::render_content(ui, &mut node.node_type, node_id, values, &connections,
                         &midi_out_ports, &midi_in_ports, midi_conn_out, midi_conn_in, &mut midi_actions,
                         &serial_ports, serial_conn, &mut serial_actions, &monitor_state,
-                        osc_listening, &mut osc_actions, &mut port_positions, &mut dragging_from);
+                        osc_listening, &mut osc_actions, &mut port_positions, &mut dragging_from,
+                        &mut http_actions, http_pending, &api_keys, &wgpu_render_state);
 
                     // Check if a Palette node wants to spawn new nodes
                     if matches!(node.node_type, NodeType::Palette { .. }) {
@@ -341,11 +409,19 @@ impl PatchworkApp {
                 });
 
             if let Some(r) = &resp {
+                let offset_egui = offset / zoom;
                 if is_pinned {
-                    // Pinned: store screen position (egui pos * zoom)
-                    node.pos = [r.response.rect.left() * zoom, r.response.rect.top() * zoom];
+                    // Pinned: only update screen position if user is actively dragging.
+                    // Otherwise keep the stored screen position as source of truth
+                    // to avoid jitter from float round-trip conversions.
+                    if r.response.dragged() {
+                        let delta = r.response.drag_delta();
+                        // delta is in egui (zoomed) units; convert to screen pixels
+                        node.pos[0] += delta.x * zoom;
+                        node.pos[1] += delta.y * zoom;
+                    }
+                    // pos stays as screen pixels (set during pin or previous drag)
                 } else {
-                    // Egui pos back to canvas pos: subtract offset_egui
                     node.pos = [
                         r.response.rect.left() - offset_egui.x,
                         r.response.rect.top() - offset_egui.y,
@@ -422,6 +498,7 @@ impl PatchworkApp {
         self.midi.process(midi_actions);
         self.serial.process(serial_actions);
         self.osc.process(osc_actions);
+        self.http.process(http_actions);
     }
 
     fn render_connections(&self, ctx: &egui::Context) {
@@ -737,40 +814,48 @@ impl PatchworkApp {
     fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
         let modifiers = ctx.input(|i| i.modifiers);
         let cmd = modifiers.mac_cmd || modifiers.ctrl;
+        let text_focused = ctx.wants_keyboard_input();
 
-        // Cmd+C = copy
-        if cmd && ctx.input(|i| i.key_pressed(egui::Key::C)) {
+        // Cmd+C = copy node (only when no text field is focused)
+        if cmd && !text_focused && ctx.input(|i| i.key_pressed(egui::Key::C)) {
             if let Some(id) = self.selected_node {
                 if let Some(node) = self.graph.nodes.get(&id) {
                     self.clipboard = Some(node.node_type.clone());
                 }
             }
         }
-        // Cmd+V = paste
-        if cmd && ctx.input(|i| i.key_pressed(egui::Key::V)) {
+        // Cmd+V = paste node (only when no text field is focused)
+        if cmd && !text_focused && ctx.input(|i| i.key_pressed(egui::Key::V)) {
             if let Some(nt) = &self.clipboard {
-                let pos = ctx.pointer_latest_pos().unwrap_or(egui::pos2(200.0, 200.0));
-                // pos is in zoomed space; subtract offset_egui to get canvas pos
-                let off_e = self.canvas_offset / self.canvas_zoom;
-                let cx = pos.x - off_e.x + 20.0;
-                let cy = pos.y - off_e.y + 20.0;
+                // Place near the selected node if one exists, otherwise at pointer
+                let (cx, cy) = if let Some(id) = self.selected_node {
+                    if let Some(node) = self.graph.nodes.get(&id) {
+                        (node.pos[0] + 30.0, node.pos[1] + 30.0)
+                    } else {
+                        let pos = ctx.pointer_latest_pos().unwrap_or(egui::pos2(200.0, 200.0));
+                        let off_e = self.canvas_offset / self.canvas_zoom;
+                        (pos.x - off_e.x + 20.0, pos.y - off_e.y + 20.0)
+                    }
+                } else {
+                    let pos = ctx.pointer_latest_pos().unwrap_or(egui::pos2(200.0, 200.0));
+                    let off_e = self.canvas_offset / self.canvas_zoom;
+                    (pos.x - off_e.x + 20.0, pos.y - off_e.y + 20.0)
+                };
                 let new_id = self.graph.add_node(nt.clone(), [cx, cy]);
                 self.selected_node = Some(new_id);
             }
         }
-        // Cmd+D = duplicate
-        if cmd && ctx.input(|i| i.key_pressed(egui::Key::D)) {
+        // Cmd+D = duplicate (only when no text field is focused)
+        if cmd && !text_focused && ctx.input(|i| i.key_pressed(egui::Key::D)) {
             self.duplicate_selected();
         }
         // Delete / Backspace = delete selected (only if no text input is focused)
-        if ctx.input(|i| i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete)) {
-            if !ctx.wants_keyboard_input() {
-                if let Some(id) = self.selected_node.take() {
-                    self.midi.cleanup_node(id);
-                    self.serial.cleanup_node(id);
-                    self.osc.cleanup_node(id);
-                    self.graph.remove_node(id);
-                }
+        if !text_focused && ctx.input(|i| i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete)) {
+            if let Some(id) = self.selected_node.take() {
+                self.midi.cleanup_node(id);
+                self.serial.cleanup_node(id);
+                self.osc.cleanup_node(id);
+                self.graph.remove_node(id);
             }
         }
     }
@@ -853,9 +938,17 @@ impl PatchworkApp {
                         let pin_label = if is_pinned { "Unpin from screen" } else { "Pin to screen" };
                         if ui.button(pin_label).clicked() {
                             if is_pinned {
+                                // Unpin: pos is currently screen pixels, convert to canvas
+                                // canvas = (screen - offset) / zoom
+                                if let Some(node) = self.graph.nodes.get_mut(&id) {
+                                    let cx = (node.pos[0] - self.canvas_offset.x) / self.canvas_zoom;
+                                    let cy = (node.pos[1] - self.canvas_offset.y) / self.canvas_zoom;
+                                    node.pos = [cx, cy];
+                                }
                                 self.pinned_nodes.remove(&id);
                             } else {
-                                // Convert canvas pos to screen pos before pinning
+                                // Pin: pos is currently canvas coords, convert to screen pixels
+                                // screen = canvas * zoom + offset
                                 if let Some(node) = self.graph.nodes.get_mut(&id) {
                                     let sx = node.pos[0] * self.canvas_zoom + self.canvas_offset.x;
                                     let sy = node.pos[1] * self.canvas_zoom + self.canvas_offset.y;
@@ -933,21 +1026,61 @@ impl PatchworkApp {
     }
 
     fn save_project(&mut self) {
-        if let Some(path) = rfd::FileDialog::new().add_filter("Patchwork", &["json"]).set_file_name("project.json").save_file() {
+        if let Some(dir) = rfd::FileDialog::new().set_title("Save Project Folder").pick_folder() {
+            let project_file = dir.join("project.json");
             let json = serde_json::to_string_pretty(&self.graph).unwrap_or_default();
-            let _ = std::fs::write(&path, json);
-            self.project_path = Some(path.display().to_string());
+            let _ = std::fs::write(&project_file, json);
+            // Also save api_keys if any exist
+            if !self.api_keys.is_empty() {
+                let keys_file = dir.join("api_keys.json");
+                let keys_json = serde_json::to_string_pretty(&self.api_keys).unwrap_or_default();
+                let _ = std::fs::write(&keys_file, keys_json);
+            }
+            self.project_path = Some(dir.display().to_string());
         }
     }
 
     fn load_project(&mut self) {
+        // Try picking a folder first, then fall back to file
         if let Some(path) = rfd::FileDialog::new().add_filter("Patchwork", &["json"]).pick_file() {
+            let dir = if path.file_name().map(|f| f == "project.json").unwrap_or(false) {
+                path.parent().map(|p| p.to_path_buf())
+            } else {
+                None
+            };
+            // Load graph from the file
             if let Ok(json) = std::fs::read_to_string(&path) {
                 if let Ok(graph) = serde_json::from_str::<Graph>(&json) {
                     self.graph = graph;
-                    self.project_path = Some(path.display().to_string());
                     self.port_positions.clear();
                     self.node_rects.clear();
+                }
+            }
+            // Load api_keys from the same folder
+            if let Some(dir) = &dir {
+                let keys_file = dir.join("api_keys.json");
+                if let Ok(json) = std::fs::read_to_string(&keys_file) {
+                    if let Ok(keys) = serde_json::from_str::<HashMap<String, String>>(&json) {
+                        self.api_keys = keys;
+                    }
+                }
+                self.project_path = Some(dir.display().to_string());
+            } else {
+                self.project_path = Some(path.display().to_string());
+            }
+        }
+    }
+
+    fn project_dir(&self) -> Option<std::path::PathBuf> {
+        self.project_path.as_ref().map(|p| std::path::PathBuf::from(p))
+    }
+
+    fn load_api_keys(&mut self) {
+        if let Some(dir) = self.project_dir() {
+            let keys_file = dir.join("api_keys.json");
+            if let Ok(json) = std::fs::read_to_string(&keys_file) {
+                if let Ok(keys) = serde_json::from_str::<HashMap<String, String>>(&json) {
+                    self.api_keys = keys;
                 }
             }
         }
@@ -966,6 +1099,7 @@ impl eframe::App for PatchworkApp {
         self.poll_midi_inputs();
         self.poll_serial_inputs();
         self.poll_osc_inputs();
+        self.poll_http_responses();
 
         self.frame_count += 1;
         if self.frame_count % 60 == 0 {
@@ -990,7 +1124,9 @@ impl eframe::App for PatchworkApp {
         self.menu_bar(ctx);
         self.canvas(ctx);
         self.render_connections(ctx);
-        self.render_nodes(ctx, &values);
+        self.render_nodes_filtered(ctx, &values, false);
+        // Pinned nodes render in the same pass now (same zoom)
+        self.render_nodes_filtered(ctx, &values, true);
         self.sync_console_messages();
         self.node_menu(ctx);
         self.context_menu(ctx);
