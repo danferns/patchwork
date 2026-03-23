@@ -1,6 +1,8 @@
 mod app;
 mod graph;
+mod midi;
 mod nodes;
+mod serial;
 
 use eframe::egui;
 use std::sync::Arc;

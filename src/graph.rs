@@ -3,8 +3,6 @@ use std::collections::HashMap;
 
 pub type NodeId = u64;
 
-// ── Values ──────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PortValue {
     Float(f32),
@@ -17,11 +15,8 @@ impl std::fmt::Display for PortValue {
         match self {
             PortValue::Float(v) => write!(f, "{:.3}", v),
             PortValue::Text(s) => {
-                if s.len() > 24 {
-                    write!(f, "\"{}...\"", &s[..24])
-                } else {
-                    write!(f, "\"{}\"", s)
-                }
+                if s.len() > 24 { write!(f, "\"{}...\"", &s[..24]) }
+                else { write!(f, "\"{}\"", s) }
             }
             PortValue::None => write!(f, "\u{2014}"),
         }
@@ -30,29 +25,16 @@ impl std::fmt::Display for PortValue {
 
 impl PortValue {
     pub fn as_float(&self) -> f32 {
-        match self {
-            PortValue::Float(v) => *v,
-            _ => 0.0,
-        }
-    }
-    pub fn as_text(&self) -> &str {
-        match self {
-            PortValue::Text(s) => s.as_str(),
-            PortValue::Float(v) => {
-                // Can't return a reference to a temp, so return empty
-                let _ = v;
-                ""
-            }
-            PortValue::None => "",
-        }
+        match self { PortValue::Float(v) => *v, _ => 0.0 }
     }
 }
 
-// ── Port definitions ────────────────────────────────────────────────────────
+pub struct PortDef { pub name: &'static str }
 
-pub struct PortDef {
-    pub name: &'static str,
-}
+// ── MIDI mode ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum MidiMode { Note, CC }
 
 // ── Node types ──────────────────────────────────────────────────────────────
 
@@ -62,17 +44,34 @@ pub enum NodeType {
     Display,
     Add,
     Multiply,
-    /// Loads a file from disk, outputs its text content.
     File { path: String, content: String },
-    /// Editable text area. If input connected, syncs from upstream (read-only).
-    /// Always outputs its current text.
     TextEditor { content: String },
-    /// Displays received WGSL code with preview placeholder.
     WgslViewer,
     MouseTracker { x: f32, y: f32 },
-    MidiOutput { channel: u8, note: u8, velocity: u8 },
-    /// Global theme controls (dark/light, accent color, font size).
+    MidiOut {
+        port_name: String,
+        mode: MidiMode,
+        channel: u8,
+    },
+    MidiIn {
+        port_name: String,
+        channel: u8,
+        note: u8,
+        velocity: u8,
+        #[serde(default)]
+        log: Vec<String>,
+    },
     Theme { dark_mode: bool, accent: [u8; 3], font_size: f32 },
+    Serial {
+        port_name: String,
+        baud_rate: u32,
+        #[serde(default)]
+        log: Vec<String>,
+        #[serde(default)]
+        last_line: String,
+        #[serde(default)]
+        send_buf: String,
+    },
     Comment { text: String },
 }
 
@@ -87,8 +86,10 @@ impl NodeType {
             NodeType::TextEditor { .. } => "Text Editor",
             NodeType::WgslViewer => "WGSL Viewer",
             NodeType::MouseTracker { .. } => "Mouse Tracker",
-            NodeType::MidiOutput { .. } => "MIDI Output",
+            NodeType::MidiOut { .. } => "MIDI Out",
+            NodeType::MidiIn { .. } => "MIDI In",
             NodeType::Theme { .. } => "Theme",
+            NodeType::Serial { .. } => "Serial",
             NodeType::Comment { .. } => "Comment",
         }
     }
@@ -103,11 +104,21 @@ impl NodeType {
             NodeType::TextEditor { .. } => vec![PortDef { name: "Text In" }],
             NodeType::WgslViewer => vec![PortDef { name: "WGSL" }],
             NodeType::MouseTracker { .. } => vec![],
-            NodeType::MidiOutput { .. } => vec![
-                PortDef { name: "Note" },
-                PortDef { name: "Velocity" },
-            ],
+            NodeType::MidiOut { mode, .. } => match mode {
+                MidiMode::Note => vec![
+                    PortDef { name: "Channel" },
+                    PortDef { name: "Note" },
+                    PortDef { name: "Velocity" },
+                ],
+                MidiMode::CC => vec![
+                    PortDef { name: "Channel" },
+                    PortDef { name: "CC#" },
+                    PortDef { name: "Value" },
+                ],
+            },
+            NodeType::MidiIn { .. } => vec![],
             NodeType::Theme { .. } => vec![],
+            NodeType::Serial { .. } => vec![PortDef { name: "Send" }],
             NodeType::Comment { .. } => vec![],
         }
     }
@@ -122,8 +133,14 @@ impl NodeType {
             NodeType::TextEditor { .. } => vec![PortDef { name: "Text Out" }],
             NodeType::WgslViewer => vec![],
             NodeType::MouseTracker { .. } => vec![PortDef { name: "X" }, PortDef { name: "Y" }],
-            NodeType::MidiOutput { .. } => vec![],
+            NodeType::MidiOut { .. } => vec![],
+            NodeType::MidiIn { .. } => vec![
+                PortDef { name: "Channel" },
+                PortDef { name: "Note" },
+                PortDef { name: "Velocity" },
+            ],
             NodeType::Theme { .. } => vec![],
+            NodeType::Serial { .. } => vec![PortDef { name: "Send" }],
             NodeType::Comment { .. } => vec![],
         }
     }
@@ -137,8 +154,10 @@ impl NodeType {
             NodeType::TextEditor { .. } => [160, 140, 220],
             NodeType::WgslViewer => [220, 140, 60],
             NodeType::MouseTracker { .. } => [200, 100, 100],
-            NodeType::MidiOutput { .. } => [100, 180, 180],
+            NodeType::MidiOut { .. } => [60, 180, 180],
+            NodeType::MidiIn { .. } => [80, 200, 160],
             NodeType::Theme { .. } => [255, 180, 80],
+            NodeType::Serial { .. } => [200, 180, 60],
             NodeType::Comment { .. } => [140, 140, 140],
         }
     }
@@ -147,18 +166,12 @@ impl NodeType {
 // ── Node & Connection ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Node {
-    pub id: NodeId,
-    pub node_type: NodeType,
-    pub pos: [f32; 2],
-}
+pub struct Node { pub id: NodeId, pub node_type: NodeType, pub pos: [f32; 2] }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Connection {
-    pub from_node: NodeId,
-    pub from_port: usize,
-    pub to_node: NodeId,
-    pub to_port: usize,
+    pub from_node: NodeId, pub from_port: usize,
+    pub to_node: NodeId, pub to_port: usize,
 }
 
 // ── Graph ───────────────────────────────────────────────────────────────────
@@ -174,19 +187,14 @@ impl Graph {
     pub fn new() -> Self {
         Self { nodes: HashMap::new(), connections: Vec::new(), next_id: 1 }
     }
-
     pub fn add_node(&mut self, node_type: NodeType, pos: [f32; 2]) -> NodeId {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.nodes.insert(id, Node { id, node_type, pos });
-        id
+        let id = self.next_id; self.next_id += 1;
+        self.nodes.insert(id, Node { id, node_type, pos }); id
     }
-
     pub fn remove_node(&mut self, id: NodeId) {
         self.nodes.remove(&id);
         self.connections.retain(|c| c.from_node != id && c.to_node != id);
     }
-
     pub fn add_connection(&mut self, from_node: NodeId, from_port: usize, to_node: NodeId, to_port: usize) {
         self.connections.retain(|c| !(c.to_node == to_node && c.to_port == to_port));
         self.connections.push(Connection { from_node, from_port, to_node, to_port });
@@ -194,7 +202,6 @@ impl Graph {
 
     pub fn evaluate(&self) -> HashMap<(NodeId, usize), PortValue> {
         let mut values: HashMap<(NodeId, usize), PortValue> = HashMap::new();
-
         for _ in 0..5 {
             for (&id, node) in &self.nodes {
                 let inputs = self.collect_inputs(id, &values);
@@ -220,13 +227,19 @@ impl Graph {
                         values.insert((id, 0), PortValue::Text(content.clone()));
                     }
                     NodeType::TextEditor { content } => {
-                        // If input is connected, that takes priority (set during render).
-                        // Otherwise output internal content.
                         if matches!(inputs.first(), Some(PortValue::Text(_))) {
                             values.insert((id, 0), inputs[0].clone());
                         } else {
                             values.insert((id, 0), PortValue::Text(content.clone()));
                         }
+                    }
+                    NodeType::MidiIn { channel, note, velocity, .. } => {
+                        values.insert((id, 0), PortValue::Float(*channel as f32));
+                        values.insert((id, 1), PortValue::Float(*note as f32));
+                        values.insert((id, 2), PortValue::Float(*velocity as f32));
+                    }
+                    NodeType::Serial { last_line, .. } => {
+                        values.insert((id, 0), PortValue::Text(last_line.clone()));
                     }
                     _ => {}
                 }
@@ -248,12 +261,7 @@ impl Graph {
         inputs
     }
 
-    pub fn static_input_value(
-        connections: &[Connection],
-        values: &HashMap<(NodeId, usize), PortValue>,
-        node_id: NodeId,
-        port_idx: usize,
-    ) -> PortValue {
+    pub fn static_input_value(connections: &[Connection], values: &HashMap<(NodeId, usize), PortValue>, node_id: NodeId, port_idx: usize) -> PortValue {
         for c in connections {
             if c.to_node == node_id && c.to_port == port_idx {
                 return values.get(&(c.from_node, c.from_port)).cloned().unwrap_or(PortValue::None);
