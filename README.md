@@ -47,7 +47,11 @@ src/
     ├── theme.rs         Global dark/light mode, accent color, font size
     ├── monitor.rs       Live FPS, frame time, node/connection count with sparklines
     ├── console.rs       System message log with color-coded output
-    └── comment.rs       Freeform text note
+    ├── comment.rs       Freeform text note
+    ├── http_request.rs  Generic HTTP GET/POST with custom headers
+    ├── ai_request.rs    AI API calls (Anthropic/OpenAI/custom endpoint)
+    └── json_extract.rs  JSON parsing with dot-path extraction
+├── http.rs             HTTP manager (async background threads, reqwest)
 ```
 
 ## Nodes
@@ -68,6 +72,9 @@ src/
 | **OSC Out** | OSC | `Arg 0..N` | — | Send OSC float messages over UDP; configurable host/port/address |
 | **OSC In** | OSC | — | `Arg 0..N` | Receive OSC messages; address filter, listen toggle, scrolling log |
 | **Script** | Custom | user-defined | user-defined | Rhai scripting engine; +/- buttons for I/O ports; continuous or manual execution |
+| **HTTP Request** | Network | `URL` `Body` `Headers` | `Response` `Status` | Generic HTTP client; GET/POST, custom headers, auto-send on input change |
+| **AI Request** | AI | `Config` `System` `Prompt` | `Response` `Status` | API calls to OpenAI, Anthropic, or custom endpoint; JSON config input |
+| **JSON Extract** | Data | `JSON` | `Value` | Extracts values from JSON using dot-separated paths (e.g., `choices.0.message.content`) |
 | **Theme** | Utility | — | — | Controls dark/light mode, accent color, font size |
 | **Monitor** | Utility | — | `FPS` `Frame ms` `Nodes` | Live performance data with sparkline graphs |
 | **Console** | Utility | — | — | System message log with color-coded output |
@@ -113,6 +120,52 @@ Toggle **Continuous** mode for live evaluation, or use manual **Run** button / *
 | **Escape** | Close menus |
 | **File > Save/Open** | Persist/restore the full graph as JSON |
 
+## Example projects
+
+See **[`example-projects/`](example-projects/)** for ready-to-use workflows:
+
+### OpenAI WGSL Generation
+Generate WGSL shaders using OpenAI's API and render them in real-time.
+
+```
+System Prompt ──┐
+User Prompt ───┼──> AI Request ──> JSON Extract ──> WGSL Viewer
+API Config ────┘
+```
+
+**Files:**
+- `example-projects/openai-wgsl-generation/project.json` — Complete node graph
+- `SETUP.md` — Step-by-step configuration
+- `EXAMPLE_PROMPTS.md` — 10+ shader generation prompts
+- `api_keys.json.example` — API key template
+
+**[Full OpenAI WGSL guide →](EXAMPLE_OPENAI_WGSL_WORKFLOW.md)**
+
+**Workflow diagrams:** See **[`WORKFLOW_DIAGRAMS.md`](WORKFLOW_DIAGRAMS.md)** for visual guides to common patterns.
+
+## AI & API Integration
+
+The **AI Request** node supports:
+
+- **OpenAI** — GPT-4, GPT-3.5-turbo
+- **Anthropic** — Claude models
+- **Custom endpoints** — Any OpenAI-compatible API
+
+Configuration is passed as JSON:
+
+```json
+{
+  "provider": "openai",
+  "model": "gpt-4-turbo",
+  "api_key": "sk-proj-YOUR_KEY",
+  "temperature": 0.7
+}
+```
+
+The **HTTP Request** node provides a generic client for any REST API.
+
+**Project structure:** Projects are folders containing `project.json` + optional `api_keys.json` for credentials.
+
 ## Adding a new node
 
 1. Create `src/nodes/my_node.rs` with a `pub fn render(ui, ...)` function
@@ -127,10 +180,13 @@ Toggle **Continuous** mode for live evaluation, or use manual **Run** button / *
 - **[serialport](https://crates.io/crates/serialport)** — serial communication
 - **[rosc](https://crates.io/crates/rosc)** — OSC protocol encoding/decoding
 - **[rhai](https://crates.io/crates/rhai)** — embedded scripting engine
-- **serde** — project serialization (JSON)
+- **[reqwest](https://crates.io/crates/reqwest)** — HTTP client for API calls
+- **serde** / **serde_json** — project serialization and JSON parsing
 - **rfd** — native file dialogs
 - **cargo-packager** — macOS `.app` / `.dmg` bundling
 
 ## License
 
-MIT
+This project is licensed under the **MIT License** — see [`LICENSE`](LICENSE) file for details.
+
+You are free to use, modify, and distribute this software in personal or commercial projects.
