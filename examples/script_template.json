@@ -1,0 +1,12 @@
+{
+  "name": "Simple Add",
+  "inputs": [
+    "a",
+    "b"
+  ],
+  "outputs": [
+    "sum",
+    "product"
+  ],
+  "code": "outputs[0] = a + b;\noutputs[1] = a * b;"
+}

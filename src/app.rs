@@ -1,6 +1,7 @@
 use crate::graph::*;
 use crate::midi::{MidiAction, MidiManager};
 use crate::serial::{SerialAction, SerialManager};
+use crate::osc::{OscAction, OscManager};
 use crate::nodes;
 use eframe::egui;
 use std::collections::HashMap;
@@ -22,6 +23,9 @@ pub struct PatchworkApp {
     midi: MidiManager,
     serial: SerialManager,
     frame_count: u64,
+    console_messages: Vec<String>,
+    monitor: nodes::monitor::MonitorState,
+    osc: OscManager,
 }
 
 impl PatchworkApp {
@@ -38,6 +42,24 @@ impl PatchworkApp {
             midi: MidiManager::new(),
             serial: SerialManager::new(),
             frame_count: 0,
+            console_messages: Vec::new(),
+            monitor: nodes::monitor::MonitorState::default(),
+            osc: OscManager::new(),
+        }
+    }
+
+    fn log_message(&mut self, msg: String) {
+        self.console_messages.push(msg);
+        if self.console_messages.len() > 200 {
+            self.console_messages.remove(0);
+        }
+    }
+
+    fn sync_console_messages(&mut self) {
+        for node in self.graph.nodes.values_mut() {
+            if let NodeType::Console { messages } = &mut node.node_type {
+                *messages = self.console_messages.clone();
+            }
         }
     }
 
@@ -97,6 +119,34 @@ impl PatchworkApp {
         }
     }
 
+    fn poll_osc_inputs(&mut self) {
+        let node_ids: Vec<NodeId> = self.graph.nodes.keys().copied().collect();
+        for nid in node_ids {
+            let messages = self.osc.poll(nid);
+            if !messages.is_empty() {
+                if let Some(node) = self.graph.nodes.get_mut(&nid) {
+                    if let NodeType::OscIn { address_filter, arg_count, last_args, log, .. } = &mut node.node_type {
+                        for (addr, args) in messages {
+                            if !address_filter.is_empty() && !addr.contains(address_filter.as_str()) {
+                                continue;
+                            }
+                            // Update last_args from received message
+                            for (i, &val) in args.iter().enumerate() {
+                                if i < *arg_count {
+                                    if i >= last_args.len() { last_args.push(0.0); }
+                                    last_args[i] = val;
+                                }
+                            }
+                            let args_str = args.iter().map(|v| format!("{:.3}", v)).collect::<Vec<_>>().join(", ");
+                            log.push(format!("{} [{}]", addr, args_str));
+                            if log.len() > 200 { log.remove(0); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn menu_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -142,10 +192,13 @@ impl PatchworkApp {
         let midi_out_ports = self.midi.cached_output_ports.clone();
         let midi_in_ports = self.midi.cached_input_ports.clone();
         let serial_ports = self.serial.cached_ports.clone();
+        // Snapshot monitor state before the mutable borrow loop
+        let monitor_state = std::mem::take(&mut self.monitor);
         let mut port_positions: HashMap<(NodeId, usize, bool), egui::Pos2> = HashMap::new();
         let mut node_rects: HashMap<NodeId, egui::Rect> = HashMap::new();
         let mut pending_connections: Vec<(NodeId, usize, NodeId, usize)> = Vec::new();
         let mut nodes_to_delete: Vec<NodeId> = Vec::new();
+        let mut osc_actions: Vec<OscAction> = Vec::new();
         let mut dragging_from = self.dragging_from;
         let mut midi_actions: Vec<MidiAction> = Vec::new();
         let mut serial_actions: Vec<SerialAction> = Vec::new();
@@ -160,14 +213,17 @@ impl PatchworkApp {
             let midi_conn_out = self.midi.is_output_connected(node_id);
             let midi_conn_in = self.midi.is_input_connected(node_id);
             let serial_conn = self.serial.is_connected(node_id);
+            let osc_listening = self.osc.is_listening(node_id);
 
             let mut open = true;
             let resp = egui::Window::new(egui::RichText::new(&title).color(accent).strong())
                 .id(egui::Id::new(("node", node_id)))
                 .default_pos(egui::pos2(node.pos[0], node.pos[1]))
-                .default_width(160.0)
+                .default_width(180.0)
                 .resizable(true)
+                .constrain(false)
                 .collapsible(true)
+                .scroll([false, true])
                 .open(&mut open)
                 .show(ctx, |ui| {
                     for (i, pdef) in input_defs.iter().enumerate() {
@@ -186,18 +242,19 @@ impl PatchworkApp {
 
                     nodes::render_content(ui, &mut node.node_type, node_id, values, &connections,
                         &midi_out_ports, &midi_in_ports, midi_conn_out, midi_conn_in, &mut midi_actions,
-                        &serial_ports, serial_conn, &mut serial_actions);
+                        &serial_ports, serial_conn, &mut serial_actions, &monitor_state,
+                        osc_listening, &mut osc_actions);
 
                     if !output_defs.is_empty() { ui.separator(); }
                     for (i, pdef) in output_defs.iter().enumerate() {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.horizontal(|ui| {
+                            let val = values.get(&(node_id, i)).cloned().unwrap_or(PortValue::None);
+                            ui.label(format!("{}: {}", pdef.name, val));
                             let (rect, response) = ui.allocate_exact_size(egui::vec2(PORT_INTERACT, PORT_INTERACT), egui::Sense::click_and_drag());
                             let col = if response.hovered() || response.dragged() { egui::Color32::YELLOW } else { egui::Color32::from_rgb(100, 180, 255) };
                             ui.painter().circle_filled(rect.center(), PORT_RADIUS, col);
                             ui.painter().circle_stroke(rect.center(), PORT_RADIUS, egui::Stroke::new(1.0, egui::Color32::WHITE));
                             port_positions.insert((node_id, i, false), rect.center());
-                            let val = values.get(&(node_id, i)).cloned().unwrap_or(PortValue::None);
-                            ui.label(format!("{}: {}", pdef.name, val));
                             if response.drag_started() { dragging_from = Some((node_id, i, true)); }
                         });
                     }
@@ -225,10 +282,12 @@ impl PatchworkApp {
         self.dragging_from = dragging_from;
         self.port_positions = port_positions;
         self.node_rects = node_rects;
-        for id in nodes_to_delete { self.midi.cleanup_node(id); self.serial.cleanup_node(id); self.graph.remove_node(id); }
+        self.monitor = monitor_state;
+        for id in nodes_to_delete { self.midi.cleanup_node(id); self.serial.cleanup_node(id); self.osc.cleanup_node(id); self.graph.remove_node(id); }
         for (fn_, fp, tn, tp) in pending_connections { self.graph.add_connection(fn_, fp, tn, tp); }
         self.midi.process(midi_actions);
         self.serial.process(serial_actions);
+        self.osc.process(osc_actions);
     }
 
     fn render_connections(&self, ctx: &egui::Context) {
@@ -375,6 +434,7 @@ impl eframe::App for PatchworkApp {
         self.update_mouse_trackers(ctx);
         self.poll_midi_inputs();
         self.poll_serial_inputs();
+        self.poll_osc_inputs();
 
         self.frame_count += 1;
         if self.frame_count % 60 == 0 {
@@ -382,11 +442,26 @@ impl eframe::App for PatchworkApp {
             self.serial.refresh_ports();
         }
 
-        let values = self.graph.evaluate();
+        let node_count = self.graph.nodes.len();
+        let conn_count = self.graph.connections.len();
+        self.monitor.tick(node_count, conn_count);
+
+        let mut values = self.graph.evaluate();
+
+        // Inject monitor outputs so they can be connected to other nodes
+        for (&id, node) in &self.graph.nodes {
+            if matches!(node.node_type, NodeType::Monitor) {
+                values.insert((id, 0), PortValue::Float(self.monitor.fps));
+                values.insert((id, 1), PortValue::Float(self.monitor.frame_ms));
+                values.insert((id, 2), PortValue::Float(self.monitor.node_count as f32));
+            }
+        }
+
         self.menu_bar(ctx);
         self.canvas(ctx);
         self.render_connections(ctx);
         self.render_nodes(ctx, &values);
+        self.sync_console_messages();
         self.node_menu(ctx);
         self.handle_canvas_interaction(ctx);
         ctx.request_repaint();

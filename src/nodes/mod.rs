@@ -10,10 +10,16 @@ pub mod midi_in;
 pub mod serial;
 pub mod theme;
 pub mod comment;
+pub mod script;
+pub mod console;
+pub mod monitor;
+pub mod osc_out;
+pub mod osc_in;
 
 use crate::graph::*;
 use crate::midi::MidiAction;
 use crate::serial::SerialAction;
+use crate::osc::OscAction;
 use eframe::egui;
 use std::collections::HashMap;
 
@@ -47,6 +53,16 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
             factory: || NodeType::Theme { dark_mode: true, accent: [80, 160, 255], font_size: 14.0 } },
         NodeCatalogEntry { label: "Comment", category: "Utility",
             factory: || NodeType::Comment { text: String::new() } },
+        NodeCatalogEntry { label: "Console", category: "Utility",
+            factory: || NodeType::Console { messages: Vec::new() } },
+        NodeCatalogEntry { label: "Monitor", category: "Utility",
+            factory: || NodeType::Monitor },
+        NodeCatalogEntry { label: "OSC Out", category: "OSC",
+            factory: || NodeType::OscOut { host: "127.0.0.1".to_string(), port: 9000, address: "/patchwork".to_string(), arg_count: 1 } },
+        NodeCatalogEntry { label: "OSC In", category: "OSC",
+            factory: || NodeType::OscIn { port: 8000, address_filter: String::new(), arg_count: 1, last_args: vec![0.0], log: Vec::new(), listening: false } },
+        NodeCatalogEntry { label: "Script", category: "Custom",
+            factory: || NodeType::Script { name: "Custom Script".to_string(), input_names: vec![], output_names: vec![], code: String::new(), last_values: vec![], error: String::new(), continuous: true, trigger: false } },
     ]
 }
 
@@ -65,6 +81,9 @@ pub fn render_content(
     serial_ports: &[String],
     serial_connected: bool,
     serial_actions: &mut Vec<SerialAction>,
+    monitor_state: &monitor::MonitorState,
+    osc_listening: bool,
+    osc_actions: &mut Vec<OscAction>,
 ) {
     match node_type {
         NodeType::Slider { value, min, max } => slider::render(ui, value, min, max),
@@ -82,5 +101,13 @@ pub fn render_content(
             serial::render(ui, port_name, baud_rate, log, last_line, send_buf, node_id, values, connections, serial_ports, serial_connected, serial_actions),
         NodeType::Theme { dark_mode, accent, font_size } => theme::render(ui, dark_mode, accent, font_size),
         NodeType::Comment { text } => comment::render(ui, text),
+        NodeType::Console { messages } => console::render(ui, messages),
+        NodeType::Monitor => monitor::render(ui, monitor_state),
+        NodeType::OscOut { host, port, address, arg_count } =>
+            osc_out::render(ui, host, port, address, arg_count, node_id, values, osc_actions),
+        NodeType::OscIn { port, address_filter, arg_count, last_args, log, listening, .. } =>
+            osc_in::render(ui, port, address_filter, arg_count, last_args, log, listening, node_id, osc_listening, osc_actions),
+        NodeType::Script { name, input_names, output_names, code, last_values, error, continuous, trigger } =>
+            script::render(ui, name, input_names, output_names, code, last_values, error, continuous, trigger, values, node_id),
     }
 }

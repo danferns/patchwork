@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+fn default_true() -> bool { true }
+
 pub type NodeId = u64;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -73,6 +75,43 @@ pub enum NodeType {
         send_buf: String,
     },
     Comment { text: String },
+    Script {
+        name: String,
+        input_names: Vec<String>,
+        output_names: Vec<String>,
+        code: String,
+        #[serde(default)]
+        last_values: Vec<f32>,
+        #[serde(default)]
+        error: String,
+        #[serde(default = "default_true")]
+        continuous: bool,
+        #[serde(default)]
+        trigger: bool,
+    },
+    Console {
+        #[serde(default)]
+        messages: Vec<String>,
+    },
+    Monitor,
+    OscOut {
+        host: String,
+        port: u16,
+        address: String,
+        arg_count: usize,
+    },
+    OscIn {
+        port: u16,
+        address_filter: String,
+        #[serde(default)]
+        arg_count: usize,
+        #[serde(default)]
+        last_args: Vec<f32>,
+        #[serde(default)]
+        log: Vec<String>,
+        #[serde(default)]
+        listening: bool,
+    },
 }
 
 impl NodeType {
@@ -91,12 +130,17 @@ impl NodeType {
             NodeType::Theme { .. } => "Theme",
             NodeType::Serial { .. } => "Serial",
             NodeType::Comment { .. } => "Comment",
+            NodeType::Script { .. } => "Script",
+            NodeType::Console { .. } => "Console",
+            NodeType::Monitor => "Monitor",
+            NodeType::OscOut { .. } => "OSC Out",
+            NodeType::OscIn { .. } => "OSC In",
         }
     }
 
     pub fn inputs(&self) -> Vec<PortDef> {
         match self {
-            NodeType::Slider { .. } => vec![],
+            NodeType::Slider { .. } => vec![PortDef { name: "In" }],
             NodeType::Display => vec![PortDef { name: "Value" }],
             NodeType::Add => vec![PortDef { name: "A" }, PortDef { name: "B" }],
             NodeType::Multiply => vec![PortDef { name: "A" }, PortDef { name: "B" }],
@@ -120,6 +164,22 @@ impl NodeType {
             NodeType::Theme { .. } => vec![],
             NodeType::Serial { .. } => vec![PortDef { name: "Send" }],
             NodeType::Comment { .. } => vec![],
+            NodeType::Console { .. } => vec![],
+            NodeType::Monitor => vec![],
+            NodeType::OscOut { arg_count, .. } => {
+                (0..*arg_count).map(|i| PortDef { name: Box::leak(format!("Arg {}", i).into_boxed_str()) }).collect()
+            }
+            NodeType::OscIn { .. } => vec![],
+            NodeType::Script { input_names, continuous, .. } => {
+                let mut ports: Vec<PortDef> = Vec::new();
+                if !continuous {
+                    ports.push(PortDef { name: "Exec" });
+                }
+                for n in input_names {
+                    ports.push(PortDef { name: Box::leak(n.clone().into_boxed_str()) });
+                }
+                ports
+            }
         }
     }
 
@@ -142,6 +202,19 @@ impl NodeType {
             NodeType::Theme { .. } => vec![],
             NodeType::Serial { .. } => vec![PortDef { name: "Send" }],
             NodeType::Comment { .. } => vec![],
+            NodeType::Console { .. } => vec![],
+            NodeType::Monitor => vec![
+                PortDef { name: "FPS" },
+                PortDef { name: "Frame ms" },
+                PortDef { name: "Nodes" },
+            ],
+            NodeType::OscOut { .. } => vec![],
+            NodeType::OscIn { arg_count, .. } => {
+                (0..*arg_count).map(|i| PortDef { name: Box::leak(format!("Arg {}", i).into_boxed_str()) }).collect()
+            }
+            NodeType::Script { output_names, .. } => {
+                output_names.iter().map(|n| PortDef { name: Box::leak(n.clone().into_boxed_str()) }).collect()
+            }
         }
     }
 
@@ -159,6 +232,11 @@ impl NodeType {
             NodeType::Theme { .. } => [255, 180, 80],
             NodeType::Serial { .. } => [200, 180, 60],
             NodeType::Comment { .. } => [140, 140, 140],
+            NodeType::Script { .. } => [150, 100, 200],
+            NodeType::Console { .. } => [100, 150, 100],
+            NodeType::Monitor => [80, 200, 200],
+            NodeType::OscOut { .. } => [220, 120, 60],
+            NodeType::OscIn { .. } => [60, 160, 220],
         }
     }
 }
@@ -200,14 +278,22 @@ impl Graph {
         self.connections.push(Connection { from_node, from_port, to_node, to_port });
     }
 
-    pub fn evaluate(&self) -> HashMap<(NodeId, usize), PortValue> {
+    pub fn evaluate(&mut self) -> HashMap<(NodeId, usize), PortValue> {
         let mut values: HashMap<(NodeId, usize), PortValue> = HashMap::new();
+        let ids: Vec<NodeId> = self.nodes.keys().copied().collect();
+
         for _ in 0..5 {
-            for (&id, node) in &self.nodes {
+            for &id in &ids {
                 let inputs = self.collect_inputs(id, &values);
-                match &node.node_type {
+                let node = match self.nodes.get_mut(&id) { Some(n) => n, None => continue };
+                match &mut node.node_type {
                     NodeType::Slider { value, .. } => {
-                        values.insert((id, 0), PortValue::Float(*value));
+                        let out_val = if let Some(PortValue::Float(v)) = inputs.first() {
+                            *v
+                        } else {
+                            *value
+                        };
+                        values.insert((id, 0), PortValue::Float(out_val));
                     }
                     NodeType::Add => {
                         let a = inputs.get(0).map(|v| v.as_float()).unwrap_or(0.0);
@@ -240,6 +326,83 @@ impl Graph {
                     }
                     NodeType::Serial { last_line, .. } => {
                         values.insert((id, 0), PortValue::Text(last_line.clone()));
+                    }
+                    NodeType::Script { input_names, output_names, code, last_values, error, continuous, trigger, .. } => {
+                        if code.is_empty() || output_names.is_empty() {
+                            // Still output last known values
+                            for (i, v) in last_values.iter().enumerate() {
+                                values.insert((id, i), PortValue::Float(*v));
+                            }
+                            continue;
+                        }
+
+                        // In manual mode, only run if triggered (UI button or Exec port > 0.5)
+                        let should_run = if *continuous {
+                            true
+                        } else {
+                            // Exec is the first input port in manual mode
+                            let exec_val = inputs.first().map(|v| v.as_float()).unwrap_or(0.0);
+                            let fired = exec_val > 0.5 || *trigger;
+                            *trigger = false;
+                            fired
+                        };
+
+                        if !should_run {
+                            // Output last known values
+                            for (i, v) in last_values.iter().enumerate() {
+                                values.insert((id, i), PortValue::Float(*v));
+                            }
+                            continue;
+                        }
+
+                        let engine = rhai::Engine::new();
+                        // In manual mode, user inputs start at index 1 (after Exec port)
+                        let input_offset: usize = if *continuous { 0 } else { 1 };
+                        // Declare input variables with their connected values
+                        let in_vars: Vec<String> = input_names.iter().enumerate().map(|(i, name)| {
+                            let val = inputs.get(i + input_offset).map(|v| v.as_float()).unwrap_or(0.0);
+                            format!("let {} = {};", name, val)
+                        }).collect();
+                        // Declare output variables initialized to 0.0
+                        let out_vars: Vec<String> = output_names.iter()
+                            .map(|name| format!("let {} = 0.0;", name))
+                            .collect();
+                        // After user code, collect output variables into array
+                        let collect_outputs = format!("[{}]",
+                            output_names.join(", ")
+                        );
+                        let full_script = format!(
+                            "{}\n{}\n{}\n{}",
+                            in_vars.join("\n"),
+                            out_vars.join("\n"),
+                            code,
+                            collect_outputs
+                        );
+                        match engine.eval::<rhai::Array>(&full_script) {
+                            Ok(arr) => {
+                                error.clear();
+                                last_values.clear();
+                                for (i, val) in arr.iter().enumerate() {
+                                    if i < output_names.len() {
+                                        let f = val.as_float().unwrap_or(0.0) as f32;
+                                        values.insert((id, i), PortValue::Float(f));
+                                        last_values.push(f);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                *error = e.to_string();
+                            }
+                        }
+                    }
+                    NodeType::Console { .. } => {}
+                    NodeType::Monitor => {}
+                    NodeType::OscOut { .. } => {}
+                    NodeType::OscIn { last_args, arg_count, .. } => {
+                        for i in 0..*arg_count {
+                            let v = last_args.get(i).copied().unwrap_or(0.0);
+                            values.insert((id, i), PortValue::Float(v));
+                        }
                     }
                     _ => {}
                 }

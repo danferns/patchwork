@@ -2,6 +2,7 @@ mod app;
 mod graph;
 mod midi;
 mod nodes;
+mod osc;
 mod serial;
 
 use eframe::egui;
