@@ -22,6 +22,8 @@ pub mod palette;
 pub mod http_request;
 pub mod ai_request;
 pub mod json_extract;
+pub mod file_menu;
+pub mod zoom_control;
 
 use crate::graph::*;
 use crate::midi::MidiAction;
@@ -51,7 +53,9 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
             factory: || NodeType::File { path: String::new(), content: String::new() } },
         NodeCatalogEntry { label: "Text Editor", category: "IO",
             factory: || NodeType::TextEditor { content: String::new() } },
-        NodeCatalogEntry { label: "Display", category: "Output", factory: || NodeType::Display },
+        NodeCatalogEntry { label: "Display", category: "Output", factory: || NodeType::Display {
+            history: Vec::new(), history_max: 200, scope_min: 0.0, scope_max: 1.0, scope_height: 80.0, paused: false,
+        } },
         NodeCatalogEntry { label: "WGSL Viewer", category: "Shader", factory: || NodeType::WgslViewer {
             wgsl_code: String::new(),
             uniform_names: vec![], uniform_types: vec![], uniform_values: vec![], uniform_min: vec![], uniform_max: vec![],
@@ -101,6 +105,10 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
             } },
         NodeCatalogEntry { label: "JSON Extract", category: "Web",
             factory: || NodeType::JsonExtract { path: String::new() } },
+        NodeCatalogEntry { label: "File Menu", category: "System",
+            factory: || NodeType::FileMenu },
+        NodeCatalogEntry { label: "Zoom Control", category: "System",
+            factory: || NodeType::ZoomControl { zoom_value: 1.0 } },
     ]
 }
 
@@ -128,15 +136,17 @@ pub fn render_content(
     http_pending: bool,
     api_keys: &HashMap<String, String>,
     wgpu_render_state: &Option<eframe::egui_wgpu::RenderState>,
+    pending_disconnects: &mut Vec<(NodeId, usize)>,
 ) {
     match node_type {
         NodeType::Slider { value, min, max } => slider::render(ui, value, min, max),
-        NodeType::Display => display::render(ui, node_id, values, connections),
+        NodeType::Display { history, history_max, scope_min, scope_max, scope_height, paused } =>
+            display::render(ui, node_id, values, connections, history, history_max, scope_min, scope_max, scope_height, paused),
         NodeType::Add | NodeType::Multiply => math::render(ui, node_id, values),
         NodeType::File { path, content } => file::render(ui, path, content),
-        NodeType::TextEditor { content } => text_editor::render(ui, content, node_id, values, connections),
-        NodeType::WgslViewer { wgsl_code, .. } =>
-            wgsl_viewer::render(ui, wgsl_code, node_id, values, connections, wgpu_render_state),
+        NodeType::TextEditor { content } => text_editor::render(ui, content, node_id, values, connections, pending_disconnects),
+        NodeType::WgslViewer { wgsl_code, uniform_names, uniform_types, uniform_values, canvas_w, canvas_h, .. } =>
+            wgsl_viewer::render(ui, wgsl_code, uniform_names, uniform_types, uniform_values, canvas_w, canvas_h, node_id, values, connections, wgpu_render_state, pending_disconnects),
         NodeType::Time { elapsed, speed, running } => time::render(ui, elapsed, speed, running),
         NodeType::Color { r, g, b } => color::render(ui, r, g, b),
         NodeType::MouseTracker { x, y } => mouse_tracker::render(ui, *x, *y),
@@ -167,6 +177,19 @@ pub fn render_content(
             ai_request::render(ui, provider, model, response, status, max_tokens, temperature, api_key_name, custom_url, node_id, values, connections, http_pending, http_actions, api_keys),
         NodeType::JsonExtract { path } =>
             json_extract::render(ui, path, node_id, values, connections),
+        NodeType::FileMenu => {
+            let action = file_menu::render(ui);
+            // Store actions in temp data for app.rs to pick up
+            if action.new_project { ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("file_action_new"), true)); }
+            if action.load_project { ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("file_action_load"), true)); }
+            if action.save_project { ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("file_action_save"), true)); }
+        }
+        NodeType::ZoomControl { zoom_value } => {
+            let current_zoom = ui.ctx().data_mut(|d| d.get_temp::<f32>(egui::Id::new("current_zoom")).unwrap_or(1.0));
+            if let Some(new_zoom) = zoom_control::render(ui, zoom_value, node_id, values, connections, current_zoom) {
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("zoom_action"), new_zoom));
+            }
+        }
     }
 }
 

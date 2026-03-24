@@ -9,6 +9,11 @@ fn default_window_alpha() -> u8 { 240 }
 fn default_grid_color() -> [u8; 3] { [12, 12, 12] }
 fn default_rounding() -> f32 { 4.0 }
 fn default_spacing() -> f32 { 4.0 }
+fn default_scope_history() -> Vec<f32> { Vec::new() }
+fn default_scope_length() -> usize { 200 }
+fn default_scope_min() -> f32 { 0.0 }
+fn default_scope_max() -> f32 { 1.0 }
+fn default_scope_height() -> f32 { 80.0 }
 fn default_canvas_w() -> f32 { 800.0 }
 fn default_canvas_h() -> f32 { 600.0 }
 fn default_resolution() -> u32 { 120 }
@@ -54,7 +59,20 @@ pub enum MidiMode { Note, CC }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NodeType {
     Slider { value: f32, min: f32, max: f32 },
-    Display,
+    Display {
+        #[serde(default = "default_scope_history")]
+        history: Vec<f32>,
+        #[serde(default = "default_scope_length")]
+        history_max: usize,
+        #[serde(default = "default_scope_min")]
+        scope_min: f32,
+        #[serde(default = "default_scope_max")]
+        scope_max: f32,
+        #[serde(default = "default_scope_height")]
+        scope_height: f32,
+        #[serde(default)]
+        paused: bool,
+    },
     Add,
     Multiply,
     File { path: String, content: String },
@@ -226,13 +244,18 @@ pub enum NodeType {
         #[serde(default)]
         path: String,
     },
+    FileMenu,
+    ZoomControl {
+        #[serde(default)]
+        zoom_value: f32,
+    },
 }
 
 impl NodeType {
     pub fn title(&self) -> &str {
         match self {
             NodeType::Slider { .. } => "Slider",
-            NodeType::Display => "Display",
+            NodeType::Display { .. } => "Display",
             NodeType::Add => "Add",
             NodeType::Multiply => "Multiply",
             NodeType::File { .. } => "File",
@@ -256,13 +279,15 @@ impl NodeType {
             NodeType::HttpRequest { .. } => "HTTP Request",
             NodeType::AiRequest { .. } => "AI Request",
             NodeType::JsonExtract { .. } => "JSON Extract",
+            NodeType::FileMenu => "File",
+            NodeType::ZoomControl { .. } => "Zoom",
         }
     }
 
     pub fn inputs(&self) -> Vec<PortDef> {
         match self {
             NodeType::Slider { .. } => vec![PortDef { name: "In" }, PortDef { name: "Min" }, PortDef { name: "Max" }],
-            NodeType::Display => vec![PortDef { name: "Value" }],
+            NodeType::Display { .. } => vec![PortDef { name: "Value" }],
             NodeType::Add => vec![PortDef { name: "A" }, PortDef { name: "B" }],
             NodeType::Multiply => vec![PortDef { name: "A" }, PortDef { name: "B" }],
             NodeType::File { .. } => vec![],
@@ -330,6 +355,8 @@ impl NodeType {
                 PortDef { name: "Prompt" },
             ],
             NodeType::JsonExtract { .. } => vec![PortDef { name: "JSON" }],
+            NodeType::FileMenu => vec![],
+            NodeType::ZoomControl { .. } => vec![PortDef { name: "Zoom" }],
             NodeType::Script { input_names, continuous, .. } => {
                 let mut ports: Vec<PortDef> = Vec::new();
                 if !continuous {
@@ -346,7 +373,7 @@ impl NodeType {
     pub fn outputs(&self) -> Vec<PortDef> {
         match self {
             NodeType::Slider { .. } => vec![PortDef { name: "Value" }],
-            NodeType::Display => vec![],
+            NodeType::Display { .. } => vec![],
             NodeType::Add => vec![PortDef { name: "Result" }],
             NodeType::Multiply => vec![PortDef { name: "Result" }],
             NodeType::File { .. } => vec![PortDef { name: "Content" }],
@@ -396,13 +423,15 @@ impl NodeType {
                 PortDef { name: "Status" },
             ],
             NodeType::JsonExtract { .. } => vec![PortDef { name: "Value" }],
+            NodeType::FileMenu => vec![],
+            NodeType::ZoomControl { .. } => vec![PortDef { name: "Zoom" }],
         }
     }
 
     pub fn color_hint(&self) -> [u8; 3] {
         match self {
             NodeType::Slider { .. } => [80, 160, 255],
-            NodeType::Display => [100, 200, 100],
+            NodeType::Display { .. } => [100, 200, 100],
             NodeType::Add | NodeType::Multiply => [200, 160, 80],
             NodeType::File { .. } => [180, 120, 200],
             NodeType::TextEditor { .. } => [160, 140, 220],
@@ -425,6 +454,8 @@ impl NodeType {
             NodeType::HttpRequest { .. } => [60, 180, 120],
             NodeType::AiRequest { .. } => [180, 100, 255],
             NodeType::JsonExtract { .. } => [200, 160, 60],
+            NodeType::FileMenu => [200, 200, 200],
+            NodeType::ZoomControl { .. } => [160, 160, 160],
         }
     }
 
@@ -466,6 +497,9 @@ impl Graph {
     pub fn remove_node(&mut self, id: NodeId) {
         self.nodes.remove(&id);
         self.connections.retain(|c| c.from_node != id && c.to_node != id);
+    }
+    pub fn remove_connections_to_port(&mut self, node_id: NodeId, port: usize) {
+        self.connections.retain(|c| !(c.to_node == node_id && c.to_port == port));
     }
     pub fn add_connection(&mut self, from_node: NodeId, from_port: usize, to_node: NodeId, to_port: usize) {
         self.connections.retain(|c| !(c.to_node == to_node && c.to_port == to_port));

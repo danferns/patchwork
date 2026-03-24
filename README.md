@@ -4,6 +4,8 @@ A node-based visual programming environment built with Rust and [egui](https://g
 
 Connect nodes to build data pipelines — route numbers through math, load and edit files, preview shaders, send MIDI/OSC, communicate over serial, run custom scripts, and more. Everything is a window. Everything connects.
 
+![Patchwork Screenshot](assets/screenshot.png)
+
 ## Quick start
 
 ```bash
@@ -32,11 +34,11 @@ src/
 └── nodes/
     ├── mod.rs           Node catalog + render dispatch
     ├── slider.rs        Float slider with configurable range and input port
-    ├── display.rs       Shows any input value (float or text)
+    ├── display.rs       Oscilloscope display with waveform history
     ├── math.rs          Add / Multiply
     ├── file.rs          Opens any file from disk, outputs content as text
     ├── text_editor.rs   Editable text area with input/output ports
-    ├── wgsl_viewer.rs   Displays WGSL shader code with preview
+    ├── wgsl_viewer.rs   Real-time GPU shader rendering via wgpu
     ├── mouse_tracker.rs Outputs live pointer X/Y
     ├── midi_out.rs      Send MIDI Note or CC messages to a device
     ├── midi_in.rs       Receive MIDI messages with live log
@@ -50,7 +52,13 @@ src/
     ├── comment.rs       Freeform text note
     ├── http_request.rs  Generic HTTP GET/POST with custom headers
     ├── ai_request.rs    AI API calls (Anthropic/OpenAI/custom endpoint)
-    └── json_extract.rs  JSON parsing with dot-path extraction
+    ├── json_extract.rs  JSON parsing with dot-path extraction
+    ├── file_menu.rs     Project file operations (New/Open/Save)
+    ├── zoom_control.rs  Canvas zoom slider with presets
+    ├── key_input.rs     Keyboard key state (press/toggle)
+    ├── time.rs          Elapsed time generator
+    ├── color.rs         RGB color picker with component outputs
+    └── palette.rs       Searchable node catalog for adding nodes
 ├── http.rs             HTTP manager (async background threads, reqwest)
 ```
 
@@ -64,8 +72,8 @@ src/
 | **Multiply** | Math | `A` `B` | `Result` | Outputs A x B |
 | **File** | IO | — | `Content` | Loads any text file, outputs its content |
 | **Text Editor** | IO | `Text In` | `Text Out` | Editable area; read-only when input connected |
-| **Display** | Output | `Value` | — | Renders float or text from upstream |
-| **WGSL Viewer** | Shader | `WGSL` | — | Shows shader code with visual preview |
+| **Display** | Output | `Value` | — | Oscilloscope with waveform history, auto-fit, pause/resume, adjustable range and sample count |
+| **WGSL Viewer** | Shader | `WGSL` + dynamic uniform ports | — | Real-time GPU shader rendering via wgpu; auto-detects `u.xxx` uniforms and creates input ports; built-in time, resolution, mouse uniforms; pop-out window support |
 | **MIDI Out** | MIDI | `Channel` `Note/CC#` `Velocity/Value` | — | Send Note or CC messages; device selector, change detection |
 | **MIDI In** | MIDI | — | `Channel` `Note` `Velocity` | Receive MIDI with scrolling message log |
 | **Serial** | Serial | `Send` | `Received` | Read/write serial ports; baud rate selector, live log |
@@ -79,6 +87,12 @@ src/
 | **Monitor** | Utility | — | `FPS` `Frame ms` `Nodes` | Live performance data with sparkline graphs |
 | **Console** | Utility | — | — | System message log with color-coded output |
 | **Comment** | Utility | — | — | Sticky note for documentation |
+| **Key Input** | Input | — | `State` | Keyboard key press/toggle detection |
+| **Time** | Input | — | `Elapsed` | Elapsed time with speed control and pause |
+| **Color** | Input | — | `R` `G` `B` | Color picker with RGB component outputs |
+| **Node Palette** | Utility | — | — | Searchable catalog for adding nodes by clicking |
+| **File Menu** | System | — | — | Project operations: New, Open, Save |
+| **Zoom Control** | System | `Zoom` | `Zoom` | Canvas zoom slider with presets (50%, 100%, 200%) |
 
 ### Data flow
 
@@ -118,7 +132,22 @@ Toggle **Continuous** mode for live evaluation, or use manual **Run** button / *
 | **Close** a node (x) | Delete the node and its connections |
 | **Drag & drop** a file onto the canvas | Creates a File node with that file loaded |
 | **Escape** | Close menus |
-| **File > Save/Open** | Persist/restore the full graph as JSON |
+| **Pinch / Cmd+scroll** | Zoom canvas in/out |
+| **Middle-click drag / Space+drag** | Pan the canvas |
+| **Right-click** a node → **Pin** | Fix node to screen position (unaffected by zoom/pan) |
+
+### Default layout
+
+New projects start with four pinned system nodes:
+
+| Position | Node | Purpose |
+|----------|------|---------|
+| Top-left | File Menu | New / Open / Save project |
+| Top-right | Zoom Control | Canvas zoom with slider and presets |
+| Left | Node Palette | Searchable catalog to add nodes |
+| Bottom-right | Monitor | Live FPS, frame time, node count |
+
+All four are regular nodes — unpin, move, resize, or delete them as needed.
 
 ## Example projects
 
@@ -175,7 +204,8 @@ The **HTTP Request** node provides a generic client for any REST API.
 
 ## Tech
 
-- **[eframe](https://github.com/emilk/egui/tree/master/crates/eframe)** / **egui** — immediate-mode GUI
+- **[eframe](https://github.com/emilk/egui/tree/master/crates/eframe)** / **egui** / **egui_wgpu** — immediate-mode GUI with GPU rendering
+- **[wgpu](https://wgpu.rs)** / **[naga](https://crates.io/crates/naga)** — GPU shader compilation and real-time rendering
 - **[midir](https://crates.io/crates/midir)** — cross-platform MIDI I/O
 - **[serialport](https://crates.io/crates/serialport)** — serial communication
 - **[rosc](https://crates.io/crates/rosc)** — OSC protocol encoding/decoding

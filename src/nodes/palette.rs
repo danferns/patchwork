@@ -19,6 +19,8 @@ pub fn render(
     let query = search.to_lowercase();
     let cat = catalog();
 
+    // Scrollable list with max height so the palette stays compact
+    egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
     let mut last_cat = "";
     let mut any_shown = false;
 
@@ -67,4 +69,5 @@ pub fn render(
         ui.add_space(4.0);
         ui.label(egui::RichText::new("No matches").color(egui::Color32::GRAY).italics());
     }
+    }); // end ScrollArea
 }

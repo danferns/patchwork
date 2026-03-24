@@ -228,7 +228,7 @@ pub fn render(
 
     // Float params with inline input ports
     float_row(ui, "Font", font_size, 8.0..=28.0, "px", port_positions, dragging_from, node_id, 15, values, connections);
-    float_row(ui, "Round", rounding, 0.0..=16.0, "px", port_positions, dragging_from, node_id, 16, values, connections);
+    float_row(ui, "Round", rounding, 0.0..=80.0, "px", port_positions, dragging_from, node_id, 16, values, connections);
     float_row(ui, "Space", spacing, 0.0..=12.0, "px", port_positions, dragging_from, node_id, 17, values, connections);
     u8_row(ui, "Opacity", window_alpha, port_positions, dragging_from, node_id, 18, values, connections);
 }
