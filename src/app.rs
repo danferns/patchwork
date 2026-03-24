@@ -1580,6 +1580,88 @@ impl eframe::App for PatchworkApp {
 
         let mut values = self.graph.evaluate();
 
+        // Inject OB hardware values into the graph (before they're used by downstream nodes)
+        // These need a second evaluation pass to propagate through Add/Multiply/etc.
+        {
+            let mut ob_injected = false;
+            for (&id, node) in &self.graph.nodes {
+                match &node.node_type {
+                    NodeType::ObHub { detected_devices, .. } => {
+                        let mut port_idx = 0usize;
+                        let mut sorted = detected_devices.clone();
+                        sorted.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+                        for (dtype, did) in &sorted {
+                            if let Some(hub) = self.ob.get_hub(id) {
+                                match dtype.as_str() {
+                                    "joystick" => {
+                                        values.insert((id, port_idx), PortValue::Float(hub.get_value("joystick", *did, "x")));
+                                        values.insert((id, port_idx + 1), PortValue::Float(hub.get_value("joystick", *did, "y")));
+                                        values.insert((id, port_idx + 2), PortValue::Float(hub.get_value("joystick", *did, "btn")));
+                                        port_idx += 3;
+                                    }
+                                    "encoder" => {
+                                        values.insert((id, port_idx), PortValue::Float(hub.get_value("encoder", *did, "turn")));
+                                        values.insert((id, port_idx + 1), PortValue::Float(hub.get_value("encoder", *did, "click")));
+                                        values.insert((id, port_idx + 2), PortValue::Float(hub.get_value("encoder", *did, "position")));
+                                        port_idx += 3;
+                                    }
+                                    _ => { port_idx += 1; }
+                                }
+                            }
+                        }
+                        ob_injected = true;
+                    }
+                    NodeType::ObJoystick { device_id, hub_node_id } => {
+                        let find = if *hub_node_id != 0 {
+                            self.ob.get_hub(*hub_node_id).and_then(|h| h.get_device("joystick", *device_id))
+                        } else {
+                            self.ob.find_device("joystick", *device_id).map(|(_, d)| d)
+                        };
+                        if let Some(dev) = find {
+                            values.insert((id, 0), PortValue::Float(dev.values.get("x").copied().unwrap_or(0.0)));
+                            values.insert((id, 1), PortValue::Float(dev.values.get("y").copied().unwrap_or(0.0)));
+                            values.insert((id, 2), PortValue::Float(dev.values.get("btn").copied().unwrap_or(0.0)));
+                        }
+                        ob_injected = true;
+                    }
+                    NodeType::ObEncoder { device_id, hub_node_id } => {
+                        let find = if *hub_node_id != 0 {
+                            self.ob.get_hub(*hub_node_id).and_then(|h| h.get_device("encoder", *device_id))
+                        } else {
+                            self.ob.find_device("encoder", *device_id).map(|(_, d)| d)
+                        };
+                        if let Some(dev) = find {
+                            values.insert((id, 0), PortValue::Float(dev.values.get("turn").copied().unwrap_or(0.0)));
+                            values.insert((id, 1), PortValue::Float(dev.values.get("click").copied().unwrap_or(0.0)));
+                            values.insert((id, 2), PortValue::Float(dev.values.get("position").copied().unwrap_or(0.0)));
+                        }
+                        ob_injected = true;
+                    }
+                    _ => {}
+                }
+            }
+            // Re-evaluate to propagate OB values through downstream nodes (Add, Multiply, etc.)
+            if ob_injected {
+                self.graph.evaluate_with_existing(&mut values);
+            }
+        }
+
+        // Evaluate Rust Plugin nodes
+        {
+            let plugin_ids: Vec<NodeId> = self.graph.nodes.iter()
+                .filter(|(_, n)| matches!(n.node_type, NodeType::RustPlugin { .. }))
+                .map(|(&id, _)| id)
+                .collect();
+            for id in plugin_ids {
+                let inputs: Vec<PortValue> = self.graph.collect_inputs(id, &values);
+                let node = match self.graph.nodes.get_mut(&id) { Some(n) => n, None => continue };
+                let outputs = nodes::rust_plugin::evaluate(id, &mut node.node_type, &inputs, ctx);
+                for (port, val) in outputs {
+                    values.insert((id, port), val);
+                }
+            }
+        }
+
         // Sync OB Hub detected_devices from ObManager + auto-connect saved ports
         {
             let hub_nodes: Vec<(NodeId, String)> = self.graph.nodes.iter()
@@ -1610,74 +1692,12 @@ impl eframe::App for PatchworkApp {
             }
         }
 
+        // Inject Monitor values (these don't need re-evaluation since they're output-only)
         for (&id, node) in &self.graph.nodes {
-            match &node.node_type {
-                NodeType::Monitor => {
-                    values.insert((id, 0), PortValue::Float(self.monitor.fps));
-                    values.insert((id, 1), PortValue::Float(self.monitor.frame_ms));
-                    values.insert((id, 2), PortValue::Float(self.monitor.node_count as f32));
-                }
-                NodeType::ObHub { detected_devices, .. } => {
-                    // Dynamic outputs: generate values for each device port
-                    let mut port_idx = 0usize;
-                    let mut sorted = detected_devices.clone();
-                    sorted.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-                    for (dtype, did) in &sorted {
-                        if let Some(hub) = self.ob.get_hub(id) {
-                            match dtype.as_str() {
-                                "joystick" => {
-                                    let x = hub.get_value("joystick", *did, "x");
-                                    let y = hub.get_value("joystick", *did, "y");
-                                    let btn = hub.get_value("joystick", *did, "btn");
-                                    values.insert((id, port_idx), PortValue::Float(x));
-                                    values.insert((id, port_idx + 1), PortValue::Float(y));
-                                    values.insert((id, port_idx + 2), PortValue::Float(btn));
-                                    port_idx += 3;
-                                }
-                                "encoder" => {
-                                    let turn = hub.get_value("encoder", *did, "turn");
-                                    let click = hub.get_value("encoder", *did, "click");
-                                    let pos = hub.get_value("encoder", *did, "position");
-                                    values.insert((id, port_idx), PortValue::Float(turn));
-                                    values.insert((id, port_idx + 1), PortValue::Float(click));
-                                    values.insert((id, port_idx + 2), PortValue::Float(pos));
-                                    port_idx += 3;
-                                }
-                                _ => {
-                                    values.insert((id, port_idx), PortValue::Float(0.0));
-                                    port_idx += 1;
-                                }
-                            }
-                        }
-                    }
-                }
-                NodeType::ObJoystick { device_id, hub_node_id } => {
-                    let did = *device_id;
-                    let find = if *hub_node_id != 0 {
-                        self.ob.get_hub(*hub_node_id).and_then(|h| h.get_device("joystick", did))
-                    } else {
-                        self.ob.find_device("joystick", did).map(|(_, d)| d)
-                    };
-                    if let Some(dev) = find {
-                        values.insert((id, 0), PortValue::Float(dev.values.get("x").copied().unwrap_or(0.0)));
-                        values.insert((id, 1), PortValue::Float(dev.values.get("y").copied().unwrap_or(0.0)));
-                        values.insert((id, 2), PortValue::Float(dev.values.get("btn").copied().unwrap_or(0.0)));
-                    }
-                }
-                NodeType::ObEncoder { device_id, hub_node_id } => {
-                    let did = *device_id;
-                    let find = if *hub_node_id != 0 {
-                        self.ob.get_hub(*hub_node_id).and_then(|h| h.get_device("encoder", did))
-                    } else {
-                        self.ob.find_device("encoder", did).map(|(_, d)| d)
-                    };
-                    if let Some(dev) = find {
-                        values.insert((id, 0), PortValue::Float(dev.values.get("turn").copied().unwrap_or(0.0)));
-                        values.insert((id, 1), PortValue::Float(dev.values.get("click").copied().unwrap_or(0.0)));
-                        values.insert((id, 2), PortValue::Float(dev.values.get("position").copied().unwrap_or(0.0)));
-                    }
-                }
-                _ => {}
+            if matches!(node.node_type, NodeType::Monitor) {
+                values.insert((id, 0), PortValue::Float(self.monitor.fps));
+                values.insert((id, 1), PortValue::Float(self.monitor.frame_ms));
+                values.insert((id, 2), PortValue::Float(self.monitor.node_count as f32));
             }
         }
 

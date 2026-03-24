@@ -27,6 +27,7 @@ pub mod zoom_control;
 pub mod ob_hub;
 pub mod ob_joystick;
 pub mod ob_encoder;
+pub mod rust_plugin;
 
 use crate::graph::*;
 use crate::midi::MidiAction;
@@ -119,6 +120,8 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
             factory: || NodeType::ObJoystick { device_id: 1, hub_node_id: 0 } },
         NodeCatalogEntry { label: "OB Encoder", category: "Hardware",
             factory: || NodeType::ObEncoder { device_id: 1, hub_node_id: 0 } },
+        NodeCatalogEntry { label: "Rust Plugin", category: "Custom",
+            factory: || NodeType::RustPlugin { input_names: vec!["in0".into()], output_names: vec!["out0".into()], code: String::new(), last_values: vec![0.0], error: String::new() } },
     ]
 }
 
@@ -204,6 +207,7 @@ pub fn render_content(
         NodeType::ObHub { .. } => ob_hub::render(ui, node_id, node_type, ob_manager),
         NodeType::ObJoystick { .. } => ob_joystick::render(ui, node_id, node_type, values, connections, ob_manager),
         NodeType::ObEncoder { .. } => ob_encoder::render(ui, node_id, node_type, values, connections, ob_manager),
+        NodeType::RustPlugin { .. } => rust_plugin::render(ui, node_id, node_type, values, connections),
     }
 }
 

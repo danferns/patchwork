@@ -2799,6 +2799,7 @@ version = "0.0.1"
 dependencies = [
  "bytemuck",
  "eframe",
+ "libloading",
  "midir",
  "naga",
  "pollster",

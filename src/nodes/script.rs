@@ -82,8 +82,16 @@ pub fn render(
     }
 
     // ── Code ──
+    // Check if code is coming from input port
+    let code_port_idx: usize = if *continuous { 0 } else { 1 };
+    let code_connected = _values.iter().any(|((nid, _), _)| *nid == _node_id) ||
+        false; // simplified check
+    // Check connections for the Code port
     ui.separator();
-    ui.label(egui::RichText::new("Code").small().strong());
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Code").small().strong());
+        ui.label(egui::RichText::new("(or connect Text to Code port ↑)").small().color(egui::Color32::GRAY));
+    });
     ui.add(
         egui::TextEdit::multiline(code)
             .desired_rows(4)

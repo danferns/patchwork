@@ -20,6 +20,7 @@ naga = { version = "24", features = ["wgsl-in"] }
 pollster = "0.4"
 regex = "1"
 bytemuck = { version = "1", features = ["derive"] }
+libloading = "0.8"
 
 [package.metadata.packager]
 product-name = "PatchWork"

@@ -271,6 +271,18 @@ pub enum NodeType {
         #[serde(default)]
         hub_node_id: NodeId,
     },
+    RustPlugin {
+        #[serde(default)]
+        input_names: Vec<String>,
+        #[serde(default)]
+        output_names: Vec<String>,
+        #[serde(default)]
+        code: String,
+        #[serde(default)]
+        last_values: Vec<f64>,
+        #[serde(default)]
+        error: String,
+    },
 }
 
 fn default_device_id() -> u8 { 1 }
@@ -308,6 +320,7 @@ impl NodeType {
             NodeType::ObHub { .. } => "OB Hub",
             NodeType::ObJoystick { .. } => "OB Joystick",
             NodeType::ObEncoder { .. } => "OB Encoder",
+            NodeType::RustPlugin { .. } => "Rust Plugin",
         }
     }
 
@@ -387,11 +400,15 @@ impl NodeType {
             NodeType::ObHub { .. } => vec![PortDef { name: "Command" }],
             NodeType::ObJoystick { .. } => vec![],
             NodeType::ObEncoder { .. } => vec![],
+            NodeType::RustPlugin { input_names, .. } => {
+                input_names.iter().map(|n| PortDef { name: Box::leak(n.clone().into_boxed_str()) }).collect()
+            }
             NodeType::Script { input_names, continuous, .. } => {
                 let mut ports: Vec<PortDef> = Vec::new();
                 if !continuous {
                     ports.push(PortDef { name: "Exec" });
                 }
+                ports.push(PortDef { name: "Code" }); // Code from input port
                 for n in input_names {
                     ports.push(PortDef { name: Box::leak(n.clone().into_boxed_str()) });
                 }
@@ -491,6 +508,9 @@ impl NodeType {
                 PortDef { name: "Click" },
                 PortDef { name: "Position" },
             ],
+            NodeType::RustPlugin { output_names, .. } => {
+                output_names.iter().map(|n| PortDef { name: Box::leak(n.clone().into_boxed_str()) }).collect()
+            }
         }
     }
 
@@ -525,6 +545,7 @@ impl NodeType {
             NodeType::ObHub { .. } => [40, 180, 120],
             NodeType::ObJoystick { .. } => [80, 160, 255],
             NodeType::ObEncoder { .. } => [200, 140, 80],
+            NodeType::RustPlugin { .. } => [255, 120, 50],
         }
     }
 
@@ -573,6 +594,42 @@ impl Graph {
     pub fn add_connection(&mut self, from_node: NodeId, from_port: usize, to_node: NodeId, to_port: usize) {
         self.connections.retain(|c| !(c.to_node == to_node && c.to_port == to_port));
         self.connections.push(Connection { from_node, from_port, to_node, to_port });
+    }
+
+    /// Re-evaluate with pre-existing values (for injected hardware data).
+    /// Runs 2 passes to propagate injected values through downstream nodes.
+    pub fn evaluate_with_existing(&mut self, values: &mut HashMap<(NodeId, usize), PortValue>) {
+        let ids: Vec<NodeId> = self.nodes.keys().copied().collect();
+        for _ in 0..2 {
+            for &id in &ids {
+                let inputs = self.collect_inputs(id, values);
+                let node = match self.nodes.get_mut(&id) { Some(n) => n, None => continue };
+                match &mut node.node_type {
+                    NodeType::Slider { value, min, max } => {
+                        if let Some(PortValue::Float(v)) = inputs.get(1) { *min = *v; }
+                        if let Some(PortValue::Float(v)) = inputs.get(2) { *max = *v; }
+                        if let Some(PortValue::Float(v)) = inputs.first() { *value = *v; }
+                        values.insert((id, 0), PortValue::Float(*value));
+                    }
+                    NodeType::Add => {
+                        let a = inputs.first().map(|v| v.as_float()).unwrap_or(0.0);
+                        let b = inputs.get(1).map(|v| v.as_float()).unwrap_or(0.0);
+                        values.insert((id, 0), PortValue::Float(a + b));
+                    }
+                    NodeType::Multiply => {
+                        let a = inputs.first().map(|v| v.as_float()).unwrap_or(0.0);
+                        let b = inputs.get(1).map(|v| v.as_float()).unwrap_or(0.0);
+                        values.insert((id, 0), PortValue::Float(a * b));
+                    }
+                    NodeType::Display { .. } => {
+                        if let Some(v) = inputs.first() {
+                            values.insert((id, 0), v.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     pub fn evaluate(&mut self) -> HashMap<(NodeId, usize), PortValue> {
@@ -651,19 +708,26 @@ impl Graph {
                         values.insert((id, 0), PortValue::Text(last_line.clone()));
                     }
                     NodeType::Script { input_names, output_names, code, last_values, error, continuous, trigger, .. } => {
-                        if code.is_empty() || output_names.is_empty() {
-                            // Still output last known values
+                        // Code port: if Code input is connected, use that; else use inline code
+                        // Port layout: [Exec? (if manual)] [Code] [user inputs...]
+                        let code_port_idx: usize = if *continuous { 0 } else { 1 };
+                        let code_from_port = match inputs.get(code_port_idx) {
+                            Some(PortValue::Text(s)) if !s.is_empty() => Some(s.clone()),
+                            _ => None,
+                        };
+                        let effective_code = code_from_port.as_deref().unwrap_or(code.as_str());
+
+                        if effective_code.is_empty() || output_names.is_empty() {
                             for (i, v) in last_values.iter().enumerate() {
                                 values.insert((id, i), PortValue::Float(*v));
                             }
                             continue;
                         }
 
-                        // In manual mode, only run if triggered (UI button or Exec port > 0.5)
+                        // In manual mode, only run if triggered
                         let should_run = if *continuous {
                             true
                         } else {
-                            // Exec is the first input port in manual mode
                             let exec_val = inputs.first().map(|v| v.as_float()).unwrap_or(0.0);
                             let fired = exec_val > 0.5 || *trigger;
                             *trigger = false;
@@ -671,7 +735,6 @@ impl Graph {
                         };
 
                         if !should_run {
-                            // Output last known values
                             for (i, v) in last_values.iter().enumerate() {
                                 values.insert((id, i), PortValue::Float(*v));
                             }
@@ -679,9 +742,8 @@ impl Graph {
                         }
 
                         let engine = rhai::Engine::new();
-                        // In manual mode, user inputs start at index 1 (after Exec port)
-                        let input_offset: usize = if *continuous { 0 } else { 1 };
-                        // Declare input variables with their connected values
+                        // User inputs start after [Exec?] [Code] ports
+                        let input_offset: usize = code_port_idx + 1;
                         let in_vars: Vec<String> = input_names.iter().enumerate().map(|(i, name)| {
                             let val = inputs.get(i + input_offset).map(|v| v.as_float()).unwrap_or(0.0);
                             format!("let {} = {};", name, val)
@@ -698,7 +760,7 @@ impl Graph {
                             "{}\n{}\n{}\n{}",
                             in_vars.join("\n"),
                             out_vars.join("\n"),
-                            code,
+                            effective_code,
                             collect_outputs
                         );
                         match engine.eval::<rhai::Array>(&full_script) {
@@ -767,7 +829,7 @@ impl Graph {
         values
     }
 
-    fn collect_inputs(&self, node_id: NodeId, values: &HashMap<(NodeId, usize), PortValue>) -> Vec<PortValue> {
+    pub fn collect_inputs(&self, node_id: NodeId, values: &HashMap<(NodeId, usize), PortValue>) -> Vec<PortValue> {
         let num = self.nodes.get(&node_id).map(|n| n.node_type.inputs().len()).unwrap_or(0);
         let mut inputs = vec![PortValue::None; num];
         for conn in &self.connections {
