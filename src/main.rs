@@ -3,6 +3,7 @@ mod graph;
 mod http;
 mod midi;
 mod nodes;
+mod ob;
 mod osc;
 mod serial;
 

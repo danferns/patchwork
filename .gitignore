@@ -3,4 +3,4 @@
 *.icns
 icons/icon.iconset/
 .claude/
-examples/api-test/api-key.json
+examples/api-test/

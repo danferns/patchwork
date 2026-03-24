@@ -249,7 +249,31 @@ pub enum NodeType {
         #[serde(default)]
         zoom_value: f32,
     },
+    ObHub {
+        #[serde(default)]
+        port_name: String,
+        #[serde(default)]
+        selected_port: String,
+        /// (device_type, id) pairs discovered from the hub — updated each frame
+        #[serde(default)]
+        detected_devices: Vec<(String, u8)>,
+    },
+    ObJoystick {
+        #[serde(default = "default_device_id")]
+        device_id: u8,
+        /// Which Hub node this device belongs to (set by spawn button, 0 = auto-find)
+        #[serde(default)]
+        hub_node_id: NodeId,
+    },
+    ObEncoder {
+        #[serde(default = "default_device_id")]
+        device_id: u8,
+        #[serde(default)]
+        hub_node_id: NodeId,
+    },
 }
+
+fn default_device_id() -> u8 { 1 }
 
 impl NodeType {
     pub fn title(&self) -> &str {
@@ -281,6 +305,9 @@ impl NodeType {
             NodeType::JsonExtract { .. } => "JSON Extract",
             NodeType::FileMenu => "File",
             NodeType::ZoomControl { .. } => "Zoom",
+            NodeType::ObHub { .. } => "OB Hub",
+            NodeType::ObJoystick { .. } => "OB Joystick",
+            NodeType::ObEncoder { .. } => "OB Encoder",
         }
     }
 
@@ -357,6 +384,9 @@ impl NodeType {
             NodeType::JsonExtract { .. } => vec![PortDef { name: "JSON" }],
             NodeType::FileMenu => vec![],
             NodeType::ZoomControl { .. } => vec![PortDef { name: "Zoom" }],
+            NodeType::ObHub { .. } => vec![PortDef { name: "Command" }],
+            NodeType::ObJoystick { .. } => vec![],
+            NodeType::ObEncoder { .. } => vec![],
             NodeType::Script { input_names, continuous, .. } => {
                 let mut ports: Vec<PortDef> = Vec::new();
                 if !continuous {
@@ -425,6 +455,42 @@ impl NodeType {
             NodeType::JsonExtract { .. } => vec![PortDef { name: "Value" }],
             NodeType::FileMenu => vec![],
             NodeType::ZoomControl { .. } => vec![PortDef { name: "Zoom" }],
+            NodeType::ObHub { detected_devices, .. } => {
+                let mut ports = Vec::new();
+                let mut sorted = detected_devices.clone();
+                sorted.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+                for (dtype, id) in &sorted {
+                    match dtype.as_str() {
+                        "joystick" => {
+                            ports.push(PortDef { name: Box::leak(format!("j{}_x", id).into_boxed_str()) });
+                            ports.push(PortDef { name: Box::leak(format!("j{}_y", id).into_boxed_str()) });
+                            ports.push(PortDef { name: Box::leak(format!("j{}_btn", id).into_boxed_str()) });
+                        }
+                        "encoder" => {
+                            ports.push(PortDef { name: Box::leak(format!("e{}_turn", id).into_boxed_str()) });
+                            ports.push(PortDef { name: Box::leak(format!("e{}_click", id).into_boxed_str()) });
+                            ports.push(PortDef { name: Box::leak(format!("e{}_pos", id).into_boxed_str()) });
+                        }
+                        other => {
+                            ports.push(PortDef { name: Box::leak(format!("{}{}_{}", &other[..1], id, "val").into_boxed_str()) });
+                        }
+                    }
+                }
+                if ports.is_empty() {
+                    ports.push(PortDef { name: "(no devices)" });
+                }
+                ports
+            },
+            NodeType::ObJoystick { .. } => vec![
+                PortDef { name: "X" },
+                PortDef { name: "Y" },
+                PortDef { name: "Button" },
+            ],
+            NodeType::ObEncoder { .. } => vec![
+                PortDef { name: "Turn" },
+                PortDef { name: "Click" },
+                PortDef { name: "Position" },
+            ],
         }
     }
 
@@ -456,6 +522,9 @@ impl NodeType {
             NodeType::JsonExtract { .. } => [200, 160, 60],
             NodeType::FileMenu => [200, 200, 200],
             NodeType::ZoomControl { .. } => [160, 160, 160],
+            NodeType::ObHub { .. } => [40, 180, 120],
+            NodeType::ObJoystick { .. } => [80, 160, 255],
+            NodeType::ObEncoder { .. } => [200, 140, 80],
         }
     }
 

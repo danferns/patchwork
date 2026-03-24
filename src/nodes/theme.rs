@@ -190,6 +190,64 @@ pub fn render(
     port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
     dragging_from: &mut Option<(NodeId, usize, bool)>,
 ) {
+    // Save / Open
+    ui.horizontal(|ui| {
+        if ui.small_button("Save...").clicked() {
+            let data = serde_json::json!({
+                "dark_mode": *dark_mode,
+                "bg_color": *bg_color,
+                "text_color": *text_color,
+                "accent": *accent,
+                "window_bg": *window_bg,
+                "window_alpha": *window_alpha,
+                "grid_color": *grid_color,
+                "font_size": *font_size,
+                "rounding": *rounding,
+                "spacing": *spacing,
+                "use_hsl": *use_hsl,
+            });
+            if let Some(path) = rfd::FileDialog::new()
+                .set_file_name("theme.json")
+                .add_filter("JSON", &["json"])
+                .save_file()
+            {
+                let _ = std::fs::write(&path, serde_json::to_string_pretty(&data).unwrap_or_default());
+            }
+        }
+        if ui.small_button("Open...").clicked() {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("JSON", &["json"])
+                .pick_file()
+            {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if let Some(b) = v.get("dark_mode").and_then(|v| v.as_bool()) { *dark_mode = b; }
+                        if let Some(a) = v.get("bg_color").and_then(|v| v.as_array()) {
+                            if a.len() == 3 { *bg_color = [a[0].as_u64().unwrap_or(0) as u8, a[1].as_u64().unwrap_or(0) as u8, a[2].as_u64().unwrap_or(0) as u8]; }
+                        }
+                        if let Some(a) = v.get("text_color").and_then(|v| v.as_array()) {
+                            if a.len() == 3 { *text_color = [a[0].as_u64().unwrap_or(0) as u8, a[1].as_u64().unwrap_or(0) as u8, a[2].as_u64().unwrap_or(0) as u8]; }
+                        }
+                        if let Some(a) = v.get("accent").and_then(|v| v.as_array()) {
+                            if a.len() == 3 { *accent = [a[0].as_u64().unwrap_or(0) as u8, a[1].as_u64().unwrap_or(0) as u8, a[2].as_u64().unwrap_or(0) as u8]; }
+                        }
+                        if let Some(a) = v.get("window_bg").and_then(|v| v.as_array()) {
+                            if a.len() == 3 { *window_bg = [a[0].as_u64().unwrap_or(0) as u8, a[1].as_u64().unwrap_or(0) as u8, a[2].as_u64().unwrap_or(0) as u8]; }
+                        }
+                        if let Some(n) = v.get("window_alpha").and_then(|v| v.as_u64()) { *window_alpha = n as u8; }
+                        if let Some(a) = v.get("grid_color").and_then(|v| v.as_array()) {
+                            if a.len() == 3 { *grid_color = [a[0].as_u64().unwrap_or(0) as u8, a[1].as_u64().unwrap_or(0) as u8, a[2].as_u64().unwrap_or(0) as u8]; }
+                        }
+                        if let Some(n) = v.get("font_size").and_then(|v| v.as_f64()) { *font_size = n as f32; }
+                        if let Some(n) = v.get("rounding").and_then(|v| v.as_f64()) { *rounding = n as f32; }
+                        if let Some(n) = v.get("spacing").and_then(|v| v.as_f64()) { *spacing = n as f32; }
+                        if let Some(b) = v.get("use_hsl").and_then(|v| v.as_bool()) { *use_hsl = b; }
+                    }
+                }
+            }
+        }
+    });
+
     // Presets
     ui.horizontal(|ui| {
         if ui.small_button("Dark").clicked() {

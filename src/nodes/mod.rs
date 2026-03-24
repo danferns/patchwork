@@ -24,12 +24,16 @@ pub mod ai_request;
 pub mod json_extract;
 pub mod file_menu;
 pub mod zoom_control;
+pub mod ob_hub;
+pub mod ob_joystick;
+pub mod ob_encoder;
 
 use crate::graph::*;
 use crate::midi::MidiAction;
 use crate::serial::SerialAction;
 use crate::osc::OscAction;
 use crate::http::HttpAction;
+use crate::ob::ObManager;
 use eframe::egui;
 use std::collections::HashMap;
 
@@ -109,6 +113,12 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
             factory: || NodeType::FileMenu },
         NodeCatalogEntry { label: "Zoom Control", category: "System",
             factory: || NodeType::ZoomControl { zoom_value: 1.0 } },
+        NodeCatalogEntry { label: "OB Hub", category: "Hardware",
+            factory: || NodeType::ObHub { port_name: String::new(), selected_port: String::new(), detected_devices: Vec::new() } },
+        NodeCatalogEntry { label: "OB Joystick", category: "Hardware",
+            factory: || NodeType::ObJoystick { device_id: 1, hub_node_id: 0 } },
+        NodeCatalogEntry { label: "OB Encoder", category: "Hardware",
+            factory: || NodeType::ObEncoder { device_id: 1, hub_node_id: 0 } },
     ]
 }
 
@@ -137,6 +147,7 @@ pub fn render_content(
     api_keys: &HashMap<String, String>,
     wgpu_render_state: &Option<eframe::egui_wgpu::RenderState>,
     pending_disconnects: &mut Vec<(NodeId, usize)>,
+    ob_manager: &mut ObManager,
 ) {
     match node_type {
         NodeType::Slider { value, min, max } => slider::render(ui, value, min, max),
@@ -190,6 +201,9 @@ pub fn render_content(
                 ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("zoom_action"), new_zoom));
             }
         }
+        NodeType::ObHub { .. } => ob_hub::render(ui, node_id, node_type, ob_manager),
+        NodeType::ObJoystick { .. } => ob_joystick::render(ui, node_id, node_type, values, connections, ob_manager),
+        NodeType::ObEncoder { .. } => ob_encoder::render(ui, node_id, node_type, values, connections, ob_manager),
     }
 }
 

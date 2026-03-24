@@ -3,6 +3,7 @@ use crate::http::{HttpAction, HttpManager};
 use crate::midi::{MidiAction, MidiManager};
 use crate::serial::{SerialAction, SerialManager};
 use crate::osc::{OscAction, OscManager};
+use crate::ob::ObManager;
 use crate::nodes;
 use eframe::egui;
 use eframe::egui_wgpu;
@@ -13,6 +14,55 @@ const PORT_RADIUS: f32 = 5.0;
 const PORT_INTERACT: f32 = 14.0;
 const CONN_COLOR: egui::Color32 = egui::Color32::from_rgb(180, 180, 180);
 const CONN_ACTIVE: egui::Color32 = egui::Color32::from_rgb(80, 170, 255);
+
+// ── Undo / Redo ─────────────────────────────────────────────────────────────
+
+struct UndoSnapshot {
+    graph: Graph,
+    pinned_nodes: std::collections::HashSet<NodeId>,
+}
+
+struct UndoHistory {
+    undo_stack: Vec<UndoSnapshot>,
+    redo_stack: Vec<UndoSnapshot>,
+    max: usize,
+}
+
+impl UndoHistory {
+    fn new(max: usize) -> Self {
+        Self { undo_stack: Vec::new(), redo_stack: Vec::new(), max }
+    }
+
+    fn push(&mut self, snap: UndoSnapshot) {
+        self.redo_stack.clear();
+        self.undo_stack.push(snap);
+        if self.undo_stack.len() > self.max {
+            self.undo_stack.remove(0);
+        }
+    }
+
+    fn undo(&mut self, current: UndoSnapshot) -> Option<UndoSnapshot> {
+        if let Some(prev) = self.undo_stack.pop() {
+            self.redo_stack.push(current);
+            Some(prev)
+        } else {
+            None
+        }
+    }
+
+    fn redo(&mut self, current: UndoSnapshot) -> Option<UndoSnapshot> {
+        if let Some(next) = self.redo_stack.pop() {
+            self.undo_stack.push(current);
+            Some(next)
+        } else {
+            None
+        }
+    }
+
+    fn can_undo(&self) -> bool { !self.undo_stack.is_empty() }
+    fn can_redo(&self) -> bool { !self.redo_stack.is_empty() }
+    fn clear(&mut self) { self.undo_stack.clear(); self.redo_stack.clear(); }
+}
 
 pub struct PatchworkApp {
     graph: Graph,
@@ -30,8 +80,11 @@ pub struct PatchworkApp {
     monitor: nodes::monitor::MonitorState,
     osc: OscManager,
     // Selection & clipboard
-    selected_node: Option<NodeId>,
+    selected_nodes: std::collections::HashSet<NodeId>,
     selected_connection: Option<usize>,
+    // Box selection
+    box_select_start: Option<egui::Pos2>,
+    box_select_end: Option<egui::Pos2>,
     clipboard: Option<NodeType>,
     context_menu_node: Option<NodeId>,
     show_context_menu: bool,
@@ -48,8 +101,13 @@ pub struct PatchworkApp {
     // HTTP & API
     http: HttpManager,
     api_keys: HashMap<String, String>,
+    // OB Hardware
+    ob: ObManager,
     // WGPU render state for shader nodes
     wgpu_render_state: Option<egui_wgpu::RenderState>,
+    // Undo / Redo
+    undo_history: UndoHistory,
+    drag_undo_pushed: bool,
 }
 
 impl PatchworkApp {
@@ -70,8 +128,10 @@ impl PatchworkApp {
             console_messages: Vec::new(),
             monitor: nodes::monitor::MonitorState::default(),
             osc: OscManager::new(),
-            selected_node: None,
+            selected_nodes: std::collections::HashSet::new(),
             selected_connection: None,
+            box_select_start: None,
+            box_select_end: None,
             clipboard: None,
             context_menu_node: None,
             show_context_menu: false,
@@ -85,10 +145,57 @@ impl PatchworkApp {
             pinned_nodes: std::collections::HashSet::new(),
             http: HttpManager::new(),
             api_keys: HashMap::new(),
+            ob: ObManager::new(),
             wgpu_render_state,
+            undo_history: UndoHistory::new(100),
+            drag_undo_pushed: false,
         };
         app.spawn_default_nodes();
         app
+    }
+
+    // ── Undo helpers ──────────────────────────────────────────────────────
+
+    fn push_undo(&mut self) {
+        let snap = UndoSnapshot {
+            graph: self.graph.clone(),
+            pinned_nodes: self.pinned_nodes.clone(),
+        };
+        self.undo_history.push(snap);
+    }
+
+    fn perform_undo(&mut self) {
+        let current = UndoSnapshot {
+            graph: self.graph.clone(),
+            pinned_nodes: self.pinned_nodes.clone(),
+        };
+        if let Some(prev) = self.undo_history.undo(current) {
+            self.graph = prev.graph;
+            self.pinned_nodes = prev.pinned_nodes;
+            self.port_positions.clear();
+            self.node_rects.clear();
+            self.selected_nodes.clear();
+            self.selected_connection = None;
+        }
+    }
+
+    fn perform_redo(&mut self) {
+        let current = UndoSnapshot {
+            graph: self.graph.clone(),
+            pinned_nodes: self.pinned_nodes.clone(),
+        };
+        if let Some(next) = self.undo_history.redo(current) {
+            self.graph = next.graph;
+            self.pinned_nodes = next.pinned_nodes;
+            self.port_positions.clear();
+            self.node_rects.clear();
+            self.selected_nodes.clear();
+            self.selected_connection = None;
+        }
+    }
+
+    fn primary_selected(&self) -> Option<NodeId> {
+        self.selected_nodes.iter().next().copied()
     }
 
     fn log_message(&mut self, msg: String) {
@@ -119,6 +226,7 @@ impl PatchworkApp {
 
     fn handle_file_drop(&mut self, ctx: &egui::Context) {
         let dropped: Vec<_> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
+        if !dropped.is_empty() { self.push_undo(); }
         for path in dropped {
             let content = std::fs::read_to_string(&path).unwrap_or_default();
             let pos = ctx.pointer_latest_pos().unwrap_or(egui::pos2(200.0, 200.0));
@@ -274,6 +382,7 @@ impl PatchworkApp {
             self.graph = Graph::new();
             self.project_path = None;
             self.pinned_nodes.clear();
+            self.undo_history.clear();
             self.spawn_default_nodes();
         }
         if load_project { self.load_project(); }
@@ -332,6 +441,14 @@ impl PatchworkApp {
                     ui.label(egui::RichText::new("Double-click to add a node  \u{2022}  Drag & drop a file").size(16.0).color(egui::Color32::from_rgb(100, 100, 100)));
                 });
             }
+
+            // Draw box selection rectangle
+            if let (Some(start), Some(end)) = (self.box_select_start, self.box_select_end) {
+                let sel_rect = egui::Rect::from_two_pos(start, end);
+                let painter = ui.painter();
+                painter.rect_filled(sel_rect, 0.0, egui::Color32::from_rgba_unmultiplied(80, 170, 255, 25));
+                painter.rect_stroke(sel_rect, 0.0, egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(80, 170, 255, 150)), egui::StrokeKind::Outside);
+            }
         });
     }
 
@@ -365,7 +482,9 @@ impl PatchworkApp {
         let mut midi_actions: Vec<MidiAction> = Vec::new();
         let mut serial_actions: Vec<SerialAction> = Vec::new();
         let mut pending_disconnects: Vec<(NodeId, usize)> = Vec::new();
+        let mut ob_manager = std::mem::replace(&mut self.ob, ObManager::new());
         let mut http_actions: Vec<HttpAction> = Vec::new();
+        let mut multi_drag: Option<(NodeId, egui::Vec2)> = None; // (dragged_node, delta)
         let api_keys = self.api_keys.clone();
         let wgpu_render_state = self.wgpu_render_state.clone();
 
@@ -466,7 +585,7 @@ impl PatchworkApp {
                         &serial_ports, serial_conn, &mut serial_actions, &monitor_state,
                         osc_listening, &mut osc_actions, &mut port_positions, &mut dragging_from,
                         &mut http_actions, http_pending, &api_keys, &wgpu_render_state,
-                        &mut pending_disconnects);
+                        &mut pending_disconnects, &mut ob_manager);
 
                     // Check if a Palette node wants to spawn new nodes
                     if matches!(node.node_type, NodeType::Palette { .. }) {
@@ -516,9 +635,19 @@ impl PatchworkApp {
                 }
                 node_rects.insert(node_id, r.response.rect);
 
-                // Selection on click
+                // Selection on click (Shift = toggle, no Shift = replace)
                 if r.response.clicked() || r.response.drag_started() {
-                    self.selected_node = Some(node_id);
+                    let shift = ctx.input(|i| i.modifiers.shift);
+                    if shift {
+                        if self.selected_nodes.contains(&node_id) {
+                            self.selected_nodes.remove(&node_id);
+                        } else {
+                            self.selected_nodes.insert(node_id);
+                        }
+                    } else if !self.selected_nodes.contains(&node_id) {
+                        self.selected_nodes.clear();
+                        self.selected_nodes.insert(node_id);
+                    }
                     self.selected_connection = None;
                 }
 
@@ -527,14 +656,17 @@ impl PatchworkApp {
                     i.pointer.button_clicked(egui::PointerButton::Secondary)
                 }) && ctx.pointer_latest_pos().map(|p| r.response.rect.contains(p)).unwrap_or(false);
                 if r.response.secondary_clicked() || secondary_in_rect {
-                    self.selected_node = Some(node_id);
+                    if !self.selected_nodes.contains(&node_id) {
+                        self.selected_nodes.clear();
+                        self.selected_nodes.insert(node_id);
+                    }
                     self.context_menu_node = Some(node_id);
                     self.show_context_menu = true;
                     self.context_menu_pos = ctx.pointer_latest_pos().unwrap_or(r.response.rect.center());
                 }
 
                 // Draw selection highlight
-                if self.selected_node == Some(node_id) {
+                if self.selected_nodes.contains(&node_id) {
                     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("selection")));
                     painter.rect_stroke(r.response.rect.expand(2.0), 4.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 170, 255)), egui::StrokeKind::Outside);
                 }
@@ -571,12 +703,46 @@ impl PatchworkApp {
                     }
                 }
 
+                // Undo snapshot on drag start (coalesced — one per gesture)
+                if r.response.drag_started() && !ctx.input(|i| i.modifiers.alt) && !self.drag_undo_pushed {
+                    self.push_undo();
+                    self.drag_undo_pushed = true;
+                }
+                if r.response.drag_stopped() {
+                    self.drag_undo_pushed = false;
+                }
+
+                // Track drag delta for multi-node movement
+                if r.response.dragged() && self.selected_nodes.contains(&node_id) && self.selected_nodes.len() > 1 {
+                    multi_drag = Some((node_id, r.response.drag_delta()));
+                }
+
                 // Option+drag to duplicate
                 if r.response.drag_started() && ctx.input(|i| i.modifiers.alt) {
                     self.opt_drag_source = Some(node_id);
                 }
             }
             if open { self.graph.nodes.insert(node_id, node); } else { nodes_to_delete.push(node_id); }
+        }
+
+        // Apply multi-node drag: move all other selected nodes by the same delta
+        if let Some((dragged_id, delta)) = multi_drag {
+            if delta.length() > 0.0 {
+                for &nid in &self.selected_nodes {
+                    if nid != dragged_id {
+                        if let Some(node) = self.graph.nodes.get_mut(&nid) {
+                            if self.pinned_nodes.contains(&nid) {
+                                node.pos[0] += delta.x * zoom;
+                                node.pos[1] += delta.y * zoom;
+                            } else {
+                                // delta is in egui logical coords; convert to canvas coords
+                                node.pos[0] += delta.x;
+                                node.pos[1] += delta.y;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         if let Some((src_node, src_port, is_output)) = dragging_from {
@@ -598,7 +764,13 @@ impl PatchworkApp {
         self.port_positions = port_positions;
         self.node_rects = node_rects;
         self.monitor = monitor_state;
-        for id in nodes_to_delete { self.midi.cleanup_node(id); self.serial.cleanup_node(id); self.osc.cleanup_node(id); self.graph.remove_node(id); }
+        self.ob = ob_manager;
+        // Push undo snapshot if any graph mutations are pending
+        if !nodes_to_delete.is_empty() || !pending_disconnects.is_empty()
+            || !pending_connections.is_empty() || !palette_spawns.is_empty() {
+            self.push_undo();
+        }
+        for id in nodes_to_delete { self.midi.cleanup_node(id); self.serial.cleanup_node(id); self.osc.cleanup_node(id); self.ob.cleanup_node(id); self.graph.remove_node(id); }
         for (nid, port) in pending_disconnects { self.graph.remove_connections_to_port(nid, port); }
         for (fn_, fp, tn, tp) in pending_connections { self.graph.add_connection(fn_, fp, tn, tp); }
         // Spawn nodes from Palette clicks (place to the right of the palette node)
@@ -645,7 +817,7 @@ impl PatchworkApp {
                 }).unwrap_or(false);
                 if !near_port {
                     self.selected_connection = Some(idx);
-                    self.selected_node = None;
+                    self.selected_nodes.clear();
                 }
             }
         }
@@ -655,6 +827,32 @@ impl PatchworkApp {
                 if let Some(ptr) = ctx.pointer_latest_pos() {
                     if is_output { draw_bezier(&painter, from, ptr, CONN_ACTIVE, 2.5); }
                     else { draw_bezier(&painter, ptr, from, CONN_ACTIVE, 2.5); }
+                }
+            }
+        }
+
+        // Draw dashed association lines between OB Hub and its device nodes
+        let dash_color = egui::Color32::from_rgba_unmultiplied(80, 200, 120, 100);
+        for (&dev_id, dev_node) in &self.graph.nodes {
+            let hub_id = match &dev_node.node_type {
+                NodeType::ObJoystick { hub_node_id, .. } if *hub_node_id != 0 => *hub_node_id,
+                NodeType::ObEncoder { hub_node_id, .. } if *hub_node_id != 0 => *hub_node_id,
+                _ => continue,
+            };
+            if let (Some(hub_rect), Some(dev_rect)) = (self.node_rects.get(&hub_id), self.node_rects.get(&dev_id)) {
+                let from = egui::pos2(hub_rect.right(), hub_rect.center().y);
+                let to = egui::pos2(dev_rect.left(), dev_rect.center().y);
+                // Draw dashed line
+                let total = from.distance(to);
+                let dash_len = 6.0;
+                let gap_len = 4.0;
+                let dir = (to - from) / total;
+                let mut d = 0.0;
+                while d < total {
+                    let seg_start = from + dir * d;
+                    let seg_end = from + dir * (d + dash_len).min(total);
+                    painter.line_segment([seg_start, seg_end], egui::Stroke::new(1.5, dash_color));
+                    d += dash_len + gap_len;
                 }
             }
         }
@@ -722,10 +920,10 @@ impl PatchworkApp {
                 let mut last_cat = "";
                 let mut any_shown = false;
 
-                // Place new nodes to the right of the menu
+                // Place new node at the original double-click position
                 // canvas_pos = (screen_pos - offset) / zoom
-                let spawn_x = (pos.x - self.canvas_offset.x + 220.0) / self.canvas_zoom;
-                let mut spawn_y_base = (pos.y - self.canvas_offset.y) / self.canvas_zoom;
+                let spawn_x = (self.node_menu_pos.x - self.canvas_offset.x) / self.canvas_zoom;
+                let mut spawn_y_base = (self.node_menu_pos.y - self.canvas_offset.y) / self.canvas_zoom;
 
                 for entry in &catalog {
                     if !query.is_empty()
@@ -754,6 +952,7 @@ impl PatchworkApp {
                     );
 
                     if btn.clicked() {
+                        self.push_undo();
                         self.graph.add_node((entry.factory)(), [spawn_x, spawn_y_base]);
                         spawn_y_base += 40.0;
                         keep_open = false;
@@ -916,13 +1115,54 @@ impl PatchworkApp {
                 }
             }
         }
-        // Click on empty canvas deselects
-        if ctx.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary)) {
+        // Box selection & click-on-empty deselect
+        let primary_down = ctx.input(|i| i.pointer.button_down(egui::PointerButton::Primary));
+        let primary_pressed = ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
+        let primary_released = ctx.input(|i| i.pointer.any_released());
+        let on_empty = ctx.pointer_latest_pos().map(|p| !self.node_rects.values().any(|r| r.contains(p))).unwrap_or(false);
+        let not_dragging_wire = self.dragging_from.is_none();
+        let not_panning = !self.panning;
+        let not_menu = !self.show_node_menu && !self.show_context_menu;
+
+        if primary_pressed && on_empty && not_dragging_wire && not_panning && not_menu {
             if let Some(pos) = ctx.pointer_latest_pos() {
-                if !self.node_rects.values().any(|r| r.contains(pos)) {
-                    self.selected_node = None;
-                    self.selected_connection = None;
+                self.box_select_start = Some(pos);
+                self.box_select_end = Some(pos);
+            }
+        }
+
+        if let Some(_start) = self.box_select_start {
+            if primary_down {
+                if let Some(pos) = ctx.pointer_latest_pos() {
+                    self.box_select_end = Some(pos);
                 }
+            }
+            if primary_released {
+                // Compute selection rect
+                if let (Some(start), Some(end)) = (self.box_select_start, self.box_select_end) {
+                    let sel_rect = egui::Rect::from_two_pos(start, end);
+                    let shift = ctx.input(|i| i.modifiers.shift);
+                    // Only select if drag was meaningful (> 4px), otherwise treat as click-deselect
+                    if sel_rect.width() > 4.0 || sel_rect.height() > 4.0 {
+                        let hits: std::collections::HashSet<NodeId> = self.node_rects.iter()
+                            .filter(|(_, rect)| sel_rect.intersects(**rect))
+                            .map(|(id, _)| *id)
+                            .collect();
+                        if shift {
+                            for id in hits { self.selected_nodes.insert(id); }
+                        } else {
+                            self.selected_nodes = hits;
+                        }
+                    } else {
+                        // Small click on empty = deselect
+                        if !ctx.input(|i| i.modifiers.shift) {
+                            self.selected_nodes.clear();
+                        }
+                        self.selected_connection = None;
+                    }
+                }
+                self.box_select_start = None;
+                self.box_select_end = None;
             }
         }
         if self.show_node_menu && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -977,9 +1217,17 @@ impl PatchworkApp {
         let cmd = modifiers.mac_cmd || modifiers.ctrl;
         let text_focused = ctx.wants_keyboard_input();
 
+        // Cmd+Z = undo, Cmd+Shift+Z = redo
+        if cmd && !modifiers.shift && !text_focused && ctx.input(|i| i.key_pressed(egui::Key::Z)) {
+            self.perform_undo();
+        }
+        if cmd && modifiers.shift && !text_focused && ctx.input(|i| i.key_pressed(egui::Key::Z)) {
+            self.perform_redo();
+        }
+
         // Cmd+C = copy node (only when no text field is focused)
         if cmd && !text_focused && ctx.input(|i| i.key_pressed(egui::Key::C)) {
-            if let Some(id) = self.selected_node {
+            if let Some(id) = self.primary_selected() {
                 if let Some(node) = self.graph.nodes.get(&id) {
                     self.clipboard = Some(node.node_type.clone());
                 }
@@ -987,9 +1235,8 @@ impl PatchworkApp {
         }
         // Cmd+V = paste node (only when no text field is focused)
         if cmd && !text_focused && ctx.input(|i| i.key_pressed(egui::Key::V)) {
-            if let Some(nt) = &self.clipboard {
-                // Place near the selected node if one exists, otherwise at pointer
-                let (cx, cy) = if let Some(id) = self.selected_node {
+            if let Some(nt) = self.clipboard.clone() {
+                let (cx, cy) = if let Some(id) = self.primary_selected() {
                     if let Some(node) = self.graph.nodes.get(&id) {
                         (node.pos[0] + 30.0, node.pos[1] + 30.0)
                     } else {
@@ -1002,8 +1249,10 @@ impl PatchworkApp {
                     let off_e = self.canvas_offset / self.canvas_zoom;
                     (pos.x - off_e.x + 20.0, pos.y - off_e.y + 20.0)
                 };
-                let new_id = self.graph.add_node(nt.clone(), [cx, cy]);
-                self.selected_node = Some(new_id);
+                self.push_undo();
+                let new_id = self.graph.add_node(nt, [cx, cy]);
+                self.selected_nodes.clear();
+                self.selected_nodes.insert(new_id);
             }
         }
         // Cmd+D = duplicate (only when no text field is focused)
@@ -1014,13 +1263,19 @@ impl PatchworkApp {
         if !text_focused && ctx.input(|i| i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete)) {
             if let Some(conn_idx) = self.selected_connection.take() {
                 if conn_idx < self.graph.connections.len() {
+                    self.push_undo();
                     self.graph.connections.remove(conn_idx);
                 }
-            } else if let Some(id) = self.selected_node.take() {
-                self.midi.cleanup_node(id);
-                self.serial.cleanup_node(id);
-                self.osc.cleanup_node(id);
-                self.graph.remove_node(id);
+            } else if !self.selected_nodes.is_empty() {
+                self.push_undo();
+                let to_delete: Vec<NodeId> = self.selected_nodes.drain().collect();
+                for id in to_delete {
+                    self.midi.cleanup_node(id);
+                    self.serial.cleanup_node(id);
+                    self.osc.cleanup_node(id);
+                    self.ob.cleanup_node(id);
+                    self.graph.remove_node(id);
+                }
             }
         }
     }
@@ -1032,9 +1287,11 @@ impl PatchworkApp {
                 if let Some(node) = self.graph.nodes.get(&source_id) {
                     let nt = node.node_type.clone();
                     let pos = node.pos;
+                    self.push_undo();
                     let new_id = self.graph.add_node(nt, [pos[0] + 30.0, pos[1] + 30.0]);
                     self.opt_drag_created = Some(new_id);
-                    self.selected_node = Some(new_id);
+                    self.selected_nodes.clear();
+                    self.selected_nodes.insert(new_id);
                 }
             }
             if ctx.input(|i| i.pointer.any_released()) {
@@ -1045,14 +1302,19 @@ impl PatchworkApp {
     }
 
     fn duplicate_selected(&mut self) {
-        if let Some(id) = self.selected_node {
+        let ids: Vec<NodeId> = self.selected_nodes.iter().copied().collect();
+        if ids.is_empty() { return; }
+        self.push_undo();
+        let mut new_ids = std::collections::HashSet::new();
+        for id in ids {
             if let Some(node) = self.graph.nodes.get(&id) {
                 let nt = node.node_type.clone();
                 let pos = node.pos;
                 let new_id = self.graph.add_node(nt, [pos[0] + 30.0, pos[1] + 30.0]);
-                self.selected_node = Some(new_id);
+                new_ids.insert(new_id);
             }
         }
+        self.selected_nodes = new_ids;
     }
 
     fn context_menu(&mut self, ctx: &egui::Context) {
@@ -1068,6 +1330,21 @@ impl PatchworkApp {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_min_width(120.0 / self.canvas_zoom);
 
+                    // Undo / Redo
+                    ui.add_enabled_ui(self.undo_history.can_undo(), |ui| {
+                        if ui.button("Undo  ⌘Z").clicked() {
+                            self.perform_undo();
+                            keep_open = false;
+                        }
+                    });
+                    ui.add_enabled_ui(self.undo_history.can_redo(), |ui| {
+                        if ui.button("Redo  ⌘⇧Z").clicked() {
+                            self.perform_redo();
+                            keep_open = false;
+                        }
+                    });
+                    ui.separator();
+
                     if ui.button("Copy").clicked() {
                         if let Some(id) = self.context_menu_node {
                             if let Some(node) = self.graph.nodes.get(&id) {
@@ -1078,10 +1355,12 @@ impl PatchworkApp {
                     }
                     if self.clipboard.is_some() {
                         if ui.button("Paste").clicked() {
-                            if let Some(nt) = &self.clipboard {
+                            if let Some(nt) = self.clipboard.clone() {
+                                self.push_undo();
                                 let off_e = self.canvas_offset / self.canvas_zoom;
-                                let new_id = self.graph.add_node(nt.clone(), [pos.x - off_e.x + 20.0, pos.y - off_e.y + 20.0]);
-                                self.selected_node = Some(new_id);
+                                let new_id = self.graph.add_node(nt, [pos.x - off_e.x + 20.0, pos.y - off_e.y + 20.0]);
+                                self.selected_nodes.clear();
+                                self.selected_nodes.insert(new_id);
                             }
                             keep_open = false;
                         }
@@ -1091,8 +1370,10 @@ impl PatchworkApp {
                             if let Some(node) = self.graph.nodes.get(&id) {
                                 let nt = node.node_type.clone();
                                 let p = node.pos;
+                                self.push_undo();
                                 let new_id = self.graph.add_node(nt, [p[0] + 30.0, p[1] + 30.0]);
-                                self.selected_node = Some(new_id);
+                                self.selected_nodes.clear();
+                                self.selected_nodes.insert(new_id);
                             }
                         }
                         keep_open = false;
@@ -1103,6 +1384,7 @@ impl PatchworkApp {
                         let is_pinned = self.pinned_nodes.contains(&id);
                         let pin_label = if is_pinned { "Unpin from screen" } else { "Pin to screen" };
                         if ui.button(pin_label).clicked() {
+                            self.push_undo();
                             if is_pinned {
                                 // Unpin: pos is currently screen pixels, convert to canvas
                                 // canvas = (screen - offset) / zoom
@@ -1126,13 +1408,28 @@ impl PatchworkApp {
                         }
                     }
                     ui.separator();
-                    if ui.button(egui::RichText::new("Delete").color(egui::Color32::from_rgb(255, 100, 100))).clicked() {
-                        if let Some(id) = self.context_menu_node {
+                    let del_label = if self.selected_nodes.len() > 1 {
+                        format!("Delete {} nodes", self.selected_nodes.len())
+                    } else {
+                        "Delete".to_string()
+                    };
+                    if ui.button(egui::RichText::new(del_label).color(egui::Color32::from_rgb(255, 100, 100))).clicked() {
+                        self.push_undo();
+                        // Delete all selected nodes (or just the context menu node if not in selection)
+                        let to_delete: Vec<NodeId> = if self.selected_nodes.len() > 1 {
+                            self.selected_nodes.drain().collect()
+                        } else if let Some(id) = self.context_menu_node {
+                            self.selected_nodes.remove(&id);
+                            vec![id]
+                        } else {
+                            vec![]
+                        };
+                        for id in to_delete {
                             self.midi.cleanup_node(id);
                             self.serial.cleanup_node(id);
                             self.osc.cleanup_node(id);
+                            self.ob.cleanup_node(id);
                             self.graph.remove_node(id);
-                            if self.selected_node == Some(id) { self.selected_node = None; }
                         }
                         keep_open = false;
                     }
@@ -1221,6 +1518,7 @@ impl PatchworkApp {
                     self.graph = graph;
                     self.port_positions.clear();
                     self.node_rects.clear();
+                    self.undo_history.clear();
                 }
             }
             // Load api_keys from the same folder
@@ -1268,6 +1566,7 @@ impl eframe::App for PatchworkApp {
         self.poll_serial_inputs();
         self.poll_osc_inputs();
         self.poll_http_responses();
+        self.ob.poll_all();
 
         self.frame_count += 1;
         if self.frame_count % 60 == 0 {
@@ -1281,11 +1580,104 @@ impl eframe::App for PatchworkApp {
 
         let mut values = self.graph.evaluate();
 
+        // Sync OB Hub detected_devices from ObManager + auto-connect saved ports
+        {
+            let hub_nodes: Vec<(NodeId, String)> = self.graph.nodes.iter()
+                .filter_map(|(&id, n)| {
+                    if let NodeType::ObHub { port_name, .. } = &n.node_type {
+                        Some((id, port_name.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            for (hub_id, port_name) in &hub_nodes {
+                // Auto-connect: if port_name is set but hub not connected, try to reconnect
+                if !port_name.is_empty() && self.ob.get_hub(*hub_id).is_none() {
+                    let _ = self.ob.connect_hub(*hub_id, port_name);
+                }
+
+                // Sync detected_devices into NodeType
+                let detected: Vec<(String, u8)> = self.ob.get_hub(*hub_id)
+                    .map(|h| h.devices.keys().cloned().collect())
+                    .unwrap_or_default();
+                if let Some(node) = self.graph.nodes.get_mut(hub_id) {
+                    if let NodeType::ObHub { detected_devices, .. } = &mut node.node_type {
+                        *detected_devices = detected;
+                    }
+                }
+            }
+        }
+
         for (&id, node) in &self.graph.nodes {
-            if matches!(node.node_type, NodeType::Monitor) {
-                values.insert((id, 0), PortValue::Float(self.monitor.fps));
-                values.insert((id, 1), PortValue::Float(self.monitor.frame_ms));
-                values.insert((id, 2), PortValue::Float(self.monitor.node_count as f32));
+            match &node.node_type {
+                NodeType::Monitor => {
+                    values.insert((id, 0), PortValue::Float(self.monitor.fps));
+                    values.insert((id, 1), PortValue::Float(self.monitor.frame_ms));
+                    values.insert((id, 2), PortValue::Float(self.monitor.node_count as f32));
+                }
+                NodeType::ObHub { detected_devices, .. } => {
+                    // Dynamic outputs: generate values for each device port
+                    let mut port_idx = 0usize;
+                    let mut sorted = detected_devices.clone();
+                    sorted.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+                    for (dtype, did) in &sorted {
+                        if let Some(hub) = self.ob.get_hub(id) {
+                            match dtype.as_str() {
+                                "joystick" => {
+                                    let x = hub.get_value("joystick", *did, "x");
+                                    let y = hub.get_value("joystick", *did, "y");
+                                    let btn = hub.get_value("joystick", *did, "btn");
+                                    values.insert((id, port_idx), PortValue::Float(x));
+                                    values.insert((id, port_idx + 1), PortValue::Float(y));
+                                    values.insert((id, port_idx + 2), PortValue::Float(btn));
+                                    port_idx += 3;
+                                }
+                                "encoder" => {
+                                    let turn = hub.get_value("encoder", *did, "turn");
+                                    let click = hub.get_value("encoder", *did, "click");
+                                    let pos = hub.get_value("encoder", *did, "position");
+                                    values.insert((id, port_idx), PortValue::Float(turn));
+                                    values.insert((id, port_idx + 1), PortValue::Float(click));
+                                    values.insert((id, port_idx + 2), PortValue::Float(pos));
+                                    port_idx += 3;
+                                }
+                                _ => {
+                                    values.insert((id, port_idx), PortValue::Float(0.0));
+                                    port_idx += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                NodeType::ObJoystick { device_id, hub_node_id } => {
+                    let did = *device_id;
+                    let find = if *hub_node_id != 0 {
+                        self.ob.get_hub(*hub_node_id).and_then(|h| h.get_device("joystick", did))
+                    } else {
+                        self.ob.find_device("joystick", did).map(|(_, d)| d)
+                    };
+                    if let Some(dev) = find {
+                        values.insert((id, 0), PortValue::Float(dev.values.get("x").copied().unwrap_or(0.0)));
+                        values.insert((id, 1), PortValue::Float(dev.values.get("y").copied().unwrap_or(0.0)));
+                        values.insert((id, 2), PortValue::Float(dev.values.get("btn").copied().unwrap_or(0.0)));
+                    }
+                }
+                NodeType::ObEncoder { device_id, hub_node_id } => {
+                    let did = *device_id;
+                    let find = if *hub_node_id != 0 {
+                        self.ob.get_hub(*hub_node_id).and_then(|h| h.get_device("encoder", did))
+                    } else {
+                        self.ob.find_device("encoder", did).map(|(_, d)| d)
+                    };
+                    if let Some(dev) = find {
+                        values.insert((id, 0), PortValue::Float(dev.values.get("turn").copied().unwrap_or(0.0)));
+                        values.insert((id, 1), PortValue::Float(dev.values.get("click").copied().unwrap_or(0.0)));
+                        values.insert((id, 2), PortValue::Float(dev.values.get("position").copied().unwrap_or(0.0)));
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -1295,6 +1687,29 @@ impl eframe::App for PatchworkApp {
         self.render_nodes_filtered(ctx, &values, true);
         self.sync_console_messages();
         self.handle_system_node_actions(ctx);
+
+        // Handle OB Hub spawn requests (create device node auto-connected to hub)
+        {
+            let hub_ids: Vec<NodeId> = self.graph.nodes.keys().copied()
+                .filter(|id| matches!(self.graph.nodes.get(id).map(|n| &n.node_type), Some(NodeType::ObHub { .. })))
+                .collect();
+            for hub_id in hub_ids {
+                let spawn_id = egui::Id::new(("ob_spawn", hub_id));
+                if let Some((dtype, did)) = ctx.data_mut(|d| d.get_temp::<(String, u8)>(spawn_id)) {
+                    ctx.data_mut(|d| d.remove::<(String, u8)>(spawn_id));
+                    let hub_pos = self.graph.nodes.get(&hub_id).map(|n| n.pos).unwrap_or([200.0, 200.0]);
+                    let nt = match dtype.as_str() {
+                        "joystick" => NodeType::ObJoystick { device_id: did, hub_node_id: hub_id },
+                        "encoder" => NodeType::ObEncoder { device_id: did, hub_node_id: hub_id },
+                        _ => continue,
+                    };
+                    self.push_undo();
+                    let new_id = self.graph.add_node(nt, [hub_pos[0] + 250.0, hub_pos[1]]);
+                    self.selected_nodes.clear();
+                    self.selected_nodes.insert(new_id);
+                }
+            }
+        }
         self.node_menu(ctx);
         self.context_menu(ctx);
         self.handle_pan_zoom(ctx);
