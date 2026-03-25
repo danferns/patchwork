@@ -25,6 +25,7 @@ cpal = "0.15"
 rodio = "0.20"
 sysinfo = "0.33"
 libc = "0.2"
+open = "5"
 
 [package.metadata.packager]
 product-name = "PatchWork"

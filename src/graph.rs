@@ -315,6 +315,7 @@ pub enum NodeType {
     },
     McpServer,
     Profiler,
+    HtmlViewer,
 }
 
 fn default_device_id() -> u8 { 1 }
@@ -363,6 +364,7 @@ impl NodeType {
             NodeType::RustPlugin { .. } => "Rust Plugin",
             NodeType::McpServer => "MCP Server",
             NodeType::Profiler => "System Profiler",
+            NodeType::HtmlViewer => "HTML Viewer",
         }
     }
 
@@ -454,7 +456,9 @@ impl NodeType {
                 input_names.iter().map(|n| PortDef { name: Box::leak(n.clone().into_boxed_str()) }).collect()
             }
             NodeType::McpServer => vec![],
+            NodeType::HtmlViewer => vec![PortDef { name: "URL" }],
             NodeType::Profiler => vec![],
+            NodeType::HtmlViewer => vec![PortDef { name: "HTML" }],
             NodeType::Script { input_names, continuous, .. } => {
                 let mut ports: Vec<PortDef> = Vec::new();
                 if !continuous {
@@ -568,6 +572,7 @@ impl NodeType {
                 output_names.iter().map(|n| PortDef { name: Box::leak(n.clone().into_boxed_str()) }).collect()
             }
             NodeType::McpServer => vec![],
+            NodeType::HtmlViewer => vec![PortDef { name: "URL" }],
             NodeType::Profiler => vec![
                 PortDef { name: "FPS" },
                 PortDef { name: "CPU %" },
@@ -615,6 +620,7 @@ impl NodeType {
             NodeType::RustPlugin { .. } => [255, 120, 50],
             NodeType::McpServer => [120, 200, 255],
             NodeType::Profiler => [255, 160, 60],
+            NodeType::HtmlViewer => [60, 180, 220],
         }
     }
 

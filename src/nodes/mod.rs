@@ -27,6 +27,7 @@ pub mod zoom_control;
 pub mod ob_hub;
 pub mod ob_joystick;
 pub mod ob_encoder;
+pub mod html_viewer;
 pub mod mcp_server;
 pub mod profiler;
 pub mod rust_plugin;
@@ -141,6 +142,8 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
             factory: || NodeType::McpServer },
         NodeCatalogEntry { label: "System Profiler", category: "Utility",
             factory: || NodeType::Profiler },
+        NodeCatalogEntry { label: "HTML Viewer", category: "Output",
+            factory: || NodeType::HtmlViewer },
     ]
 }
 
@@ -234,6 +237,7 @@ pub fn render_content(
         NodeType::AudioDevice { .. } => audio_device::render(ui, node_id, node_type, audio_manager),
         NodeType::AudioFx { .. } => audio_fx::render(ui, node_id, node_type, values, connections, audio_manager),
         NodeType::RustPlugin { .. } => rust_plugin::render(ui, node_id, node_type, values, connections),
+        NodeType::HtmlViewer => html_viewer::render(ui, node_id, node_type, values, connections),
         NodeType::McpServer => mcp_server::render(ui, mcp_log, mcp_active),
         NodeType::Profiler => {
             // Profiler state is managed externally via egui temp data
