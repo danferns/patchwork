@@ -271,6 +271,36 @@ pub enum NodeType {
         #[serde(default)]
         hub_node_id: NodeId,
     },
+    Synth {
+        #[serde(default)]
+        waveform: crate::audio::Waveform,
+        #[serde(default = "default_440")]
+        frequency: f32,
+        #[serde(default = "default_half")]
+        amplitude: f32,
+        #[serde(default = "default_true")]
+        active: bool,
+    },
+    AudioPlayer {
+        #[serde(default)]
+        file_path: String,
+        #[serde(default = "default_one")]
+        volume: f32,
+        #[serde(default)]
+        looping: bool,
+    },
+    AudioDevice {
+        #[serde(default)]
+        selected_output: String,
+        #[serde(default)]
+        selected_input: String,
+        #[serde(default = "default_point_eight")]
+        master_volume: f32,
+    },
+    AudioFx {
+        #[serde(default)]
+        effects: Vec<crate::audio::AudioEffect>,
+    },
     RustPlugin {
         #[serde(default)]
         input_names: Vec<String>,
@@ -286,6 +316,10 @@ pub enum NodeType {
 }
 
 fn default_device_id() -> u8 { 1 }
+fn default_440() -> f32 { 440.0 }
+fn default_half() -> f32 { 0.5 }
+fn default_one() -> f32 { 1.0 }
+fn default_point_eight() -> f32 { 0.8 }
 
 impl NodeType {
     pub fn title(&self) -> &str {
@@ -320,6 +354,10 @@ impl NodeType {
             NodeType::ObHub { .. } => "OB Hub",
             NodeType::ObJoystick { .. } => "OB Joystick",
             NodeType::ObEncoder { .. } => "OB Encoder",
+            NodeType::Synth { .. } => "Synth",
+            NodeType::AudioPlayer { .. } => "Audio Player",
+            NodeType::AudioDevice { .. } => "Audio Device",
+            NodeType::AudioFx { .. } => "Audio FX",
             NodeType::RustPlugin { .. } => "Rust Plugin",
         }
     }
@@ -400,6 +438,14 @@ impl NodeType {
             NodeType::ObHub { .. } => vec![PortDef { name: "Command" }],
             NodeType::ObJoystick { .. } => vec![],
             NodeType::ObEncoder { .. } => vec![],
+            NodeType::Synth { .. } => vec![
+                PortDef { name: "Freq" },
+                PortDef { name: "Amp" },
+                PortDef { name: "Gate" },
+            ],
+            NodeType::AudioPlayer { .. } => vec![],
+            NodeType::AudioDevice { .. } => vec![],
+            NodeType::AudioFx { .. } => vec![PortDef { name: "Source" }],
             NodeType::RustPlugin { input_names, .. } => {
                 input_names.iter().map(|n| PortDef { name: Box::leak(n.clone().into_boxed_str()) }).collect()
             }
@@ -508,6 +554,10 @@ impl NodeType {
                 PortDef { name: "Click" },
                 PortDef { name: "Position" },
             ],
+            NodeType::Synth { .. } => vec![PortDef { name: "Audio" }],
+            NodeType::AudioPlayer { .. } => vec![],
+            NodeType::AudioDevice { .. } => vec![],
+            NodeType::AudioFx { .. } => vec![PortDef { name: "Audio" }],
             NodeType::RustPlugin { output_names, .. } => {
                 output_names.iter().map(|n| PortDef { name: Box::leak(n.clone().into_boxed_str()) }).collect()
             }
@@ -545,6 +595,10 @@ impl NodeType {
             NodeType::ObHub { .. } => [40, 180, 120],
             NodeType::ObJoystick { .. } => [80, 160, 255],
             NodeType::ObEncoder { .. } => [200, 140, 80],
+            NodeType::Synth { .. } => [100, 220, 180],
+            NodeType::AudioPlayer { .. } => [180, 100, 220],
+            NodeType::AudioDevice { .. } => [220, 180, 100],
+            NodeType::AudioFx { .. } => [200, 100, 160],
             NodeType::RustPlugin { .. } => [255, 120, 50],
         }
     }

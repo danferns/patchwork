@@ -28,6 +28,10 @@ pub mod ob_hub;
 pub mod ob_joystick;
 pub mod ob_encoder;
 pub mod rust_plugin;
+pub mod synth;
+pub mod audio_player;
+pub mod audio_device;
+pub mod audio_fx;
 
 use crate::graph::*;
 use crate::midi::MidiAction;
@@ -35,6 +39,7 @@ use crate::serial::SerialAction;
 use crate::osc::OscAction;
 use crate::http::HttpAction;
 use crate::ob::ObManager;
+use crate::audio::AudioManager;
 use eframe::egui;
 use std::collections::HashMap;
 
@@ -120,6 +125,14 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
             factory: || NodeType::ObJoystick { device_id: 1, hub_node_id: 0 } },
         NodeCatalogEntry { label: "OB Encoder", category: "Hardware",
             factory: || NodeType::ObEncoder { device_id: 1, hub_node_id: 0 } },
+        NodeCatalogEntry { label: "Synth", category: "Audio",
+            factory: || NodeType::Synth { waveform: crate::audio::Waveform::Sine, frequency: 440.0, amplitude: 0.5, active: true } },
+        NodeCatalogEntry { label: "Audio Player", category: "Audio",
+            factory: || NodeType::AudioPlayer { file_path: String::new(), volume: 1.0, looping: false } },
+        NodeCatalogEntry { label: "Audio Device", category: "Audio",
+            factory: || NodeType::AudioDevice { selected_output: String::new(), selected_input: String::new(), master_volume: 0.8 } },
+        NodeCatalogEntry { label: "Audio FX", category: "Audio",
+            factory: || NodeType::AudioFx { effects: Vec::new() } },
         NodeCatalogEntry { label: "Rust Plugin", category: "Custom",
             factory: || NodeType::RustPlugin { input_names: vec!["in0".into()], output_names: vec!["out0".into()], code: String::new(), last_values: vec![0.0], error: String::new() } },
     ]
@@ -151,6 +164,7 @@ pub fn render_content(
     wgpu_render_state: &Option<eframe::egui_wgpu::RenderState>,
     pending_disconnects: &mut Vec<(NodeId, usize)>,
     ob_manager: &mut ObManager,
+    audio_manager: &mut AudioManager,
 ) {
     match node_type {
         NodeType::Slider { value, min, max } => slider::render(ui, value, min, max),
@@ -207,6 +221,10 @@ pub fn render_content(
         NodeType::ObHub { .. } => ob_hub::render(ui, node_id, node_type, ob_manager),
         NodeType::ObJoystick { .. } => ob_joystick::render(ui, node_id, node_type, values, connections, ob_manager),
         NodeType::ObEncoder { .. } => ob_encoder::render(ui, node_id, node_type, values, connections, ob_manager),
+        NodeType::Synth { .. } => synth::render(ui, node_id, node_type, values, connections, audio_manager),
+        NodeType::AudioPlayer { .. } => audio_player::render(ui, node_id, node_type, values, connections, audio_manager),
+        NodeType::AudioDevice { .. } => audio_device::render(ui, node_id, node_type, audio_manager),
+        NodeType::AudioFx { .. } => audio_fx::render(ui, node_id, node_type, values, connections, audio_manager),
         NodeType::RustPlugin { .. } => rust_plugin::render(ui, node_id, node_type, values, connections),
     }
 }

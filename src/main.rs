@@ -1,6 +1,8 @@
 mod app;
+mod audio;
 mod graph;
 mod http;
+mod mcp;
 mod midi;
 mod nodes;
 mod ob;
@@ -20,6 +22,7 @@ fn main() -> eframe::Result {
             .with_inner_size([1280.0, 800.0])
             .with_title("Patchwork"),
         renderer: eframe::Renderer::Wgpu,
+        vsync: false,
         ..Default::default()
     };
 

@@ -21,6 +21,8 @@ pollster = "0.4"
 regex = "1"
 bytemuck = { version = "1", features = ["derive"] }
 libloading = "0.8"
+cpal = "0.15"
+rodio = "0.20"
 
 [package.metadata.packager]
 product-name = "PatchWork"

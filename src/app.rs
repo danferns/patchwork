@@ -4,6 +4,7 @@ use crate::midi::{MidiAction, MidiManager};
 use crate::serial::{SerialAction, SerialManager};
 use crate::osc::{OscAction, OscManager};
 use crate::ob::ObManager;
+use crate::audio::AudioManager;
 use crate::nodes;
 use eframe::egui;
 use eframe::egui_wgpu;
@@ -103,6 +104,10 @@ pub struct PatchworkApp {
     api_keys: HashMap<String, String>,
     // OB Hardware
     ob: ObManager,
+    // Audio
+    audio: AudioManager,
+    // MCP server
+    mcp_rx: Option<std::sync::mpsc::Receiver<crate::mcp::McpRequest>>,
     // WGPU render state for shader nodes
     wgpu_render_state: Option<egui_wgpu::RenderState>,
     // Undo / Redo
@@ -146,6 +151,17 @@ impl PatchworkApp {
             http: HttpManager::new(),
             api_keys: HashMap::new(),
             ob: ObManager::new(),
+            audio: AudioManager::new(),
+            mcp_rx: {
+                let mcp_enabled = std::env::args().any(|a| a == "--mcp") || std::env::var("PATCHWORK_MCP").is_ok();
+                if mcp_enabled {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || crate::mcp::run_mcp_thread(tx));
+                    Some(rx)
+                } else {
+                    None
+                }
+            },
             wgpu_render_state,
             undo_history: UndoHistory::new(100),
             drag_undo_pushed: false,
@@ -365,6 +381,19 @@ impl PatchworkApp {
         }
     }
 
+    /// Process pending MCP commands from the MCP server thread
+    fn process_mcp_commands(&mut self, values: &HashMap<(NodeId, usize), PortValue>) {
+        let rx = match &self.mcp_rx {
+            Some(rx) => rx,
+            None => return,
+        };
+        // Drain all pending requests (non-blocking)
+        while let Ok(request) = rx.try_recv() {
+            let result = crate::mcp::execute_command(request.command, &mut self.graph, values);
+            let _ = request.response_tx.send(result);
+        }
+    }
+
     /// Check for file/zoom actions from system nodes (communicated via egui temp data).
     fn handle_system_node_actions(&mut self, ctx: &egui::Context) {
         let new_project = ctx.data_mut(|d| d.get_temp::<bool>(egui::Id::new("file_action_new")).unwrap_or(false));
@@ -483,6 +512,7 @@ impl PatchworkApp {
         let mut serial_actions: Vec<SerialAction> = Vec::new();
         let mut pending_disconnects: Vec<(NodeId, usize)> = Vec::new();
         let mut ob_manager = std::mem::replace(&mut self.ob, ObManager::new());
+        let mut audio_manager = std::mem::replace(&mut self.audio, AudioManager::placeholder());
         let mut http_actions: Vec<HttpAction> = Vec::new();
         let mut multi_drag: Option<(NodeId, egui::Vec2)> = None; // (dragged_node, delta)
         let api_keys = self.api_keys.clone();
@@ -585,7 +615,7 @@ impl PatchworkApp {
                         &serial_ports, serial_conn, &mut serial_actions, &monitor_state,
                         osc_listening, &mut osc_actions, &mut port_positions, &mut dragging_from,
                         &mut http_actions, http_pending, &api_keys, &wgpu_render_state,
-                        &mut pending_disconnects, &mut ob_manager);
+                        &mut pending_disconnects, &mut ob_manager, &mut audio_manager);
 
                     // Check if a Palette node wants to spawn new nodes
                     if matches!(node.node_type, NodeType::Palette { .. }) {
@@ -765,12 +795,13 @@ impl PatchworkApp {
         self.node_rects = node_rects;
         self.monitor = monitor_state;
         self.ob = ob_manager;
+        self.audio = audio_manager;
         // Push undo snapshot if any graph mutations are pending
         if !nodes_to_delete.is_empty() || !pending_disconnects.is_empty()
             || !pending_connections.is_empty() || !palette_spawns.is_empty() {
             self.push_undo();
         }
-        for id in nodes_to_delete { self.midi.cleanup_node(id); self.serial.cleanup_node(id); self.osc.cleanup_node(id); self.ob.cleanup_node(id); self.graph.remove_node(id); }
+        for id in nodes_to_delete { self.midi.cleanup_node(id); self.serial.cleanup_node(id); self.osc.cleanup_node(id); self.ob.cleanup_node(id); self.audio.cleanup_node(id); self.graph.remove_node(id); }
         for (nid, port) in pending_disconnects { self.graph.remove_connections_to_port(nid, port); }
         for (fn_, fp, tn, tp) in pending_connections { self.graph.add_connection(fn_, fp, tn, tp); }
         // Spawn nodes from Palette clicks (place to the right of the palette node)
@@ -1274,6 +1305,7 @@ impl PatchworkApp {
                     self.serial.cleanup_node(id);
                     self.osc.cleanup_node(id);
                     self.ob.cleanup_node(id);
+                    self.audio.cleanup_node(id);
                     self.graph.remove_node(id);
                 }
             }
@@ -1429,6 +1461,7 @@ impl PatchworkApp {
                             self.serial.cleanup_node(id);
                             self.osc.cleanup_node(id);
                             self.ob.cleanup_node(id);
+                            self.audio.cleanup_node(id);
                             self.graph.remove_node(id);
                         }
                         keep_open = false;
@@ -1572,6 +1605,7 @@ impl eframe::App for PatchworkApp {
         if self.frame_count % 60 == 0 {
             self.midi.refresh_ports();
             self.serial.refresh_ports();
+            self.audio.refresh_devices();
         }
 
         let node_count = self.graph.nodes.len();
@@ -1692,14 +1726,24 @@ impl eframe::App for PatchworkApp {
             }
         }
 
-        // Inject Monitor values (these don't need re-evaluation since they're output-only)
+        // Inject Monitor + Audio node values
         for (&id, node) in &self.graph.nodes {
-            if matches!(node.node_type, NodeType::Monitor) {
-                values.insert((id, 0), PortValue::Float(self.monitor.fps));
-                values.insert((id, 1), PortValue::Float(self.monitor.frame_ms));
-                values.insert((id, 2), PortValue::Float(self.monitor.node_count as f32));
+            match &node.node_type {
+                NodeType::Monitor => {
+                    values.insert((id, 0), PortValue::Float(self.monitor.fps));
+                    values.insert((id, 1), PortValue::Float(self.monitor.frame_ms));
+                    values.insert((id, 2), PortValue::Float(self.monitor.node_count as f32));
+                }
+                // Synth and AudioPlayer output their NodeId so FX nodes can reference them
+                NodeType::Synth { .. } | NodeType::AudioPlayer { .. } => {
+                    values.insert((id, 0), PortValue::Float(id as f32));
+                }
+                _ => {}
             }
         }
+
+        // Process MCP commands (if MCP server is active)
+        self.process_mcp_commands(&values);
 
         self.canvas(ctx);
         self.render_connections(ctx);
