@@ -108,11 +108,23 @@ pub struct PatchworkApp {
     audio: AudioManager,
     // MCP server
     mcp_rx: Option<std::sync::mpsc::Receiver<crate::mcp::McpRequest>>,
+    mcp_log: crate::mcp::McpLog,
+    // Background device refresh
+    device_refresh_rx: std::sync::mpsc::Receiver<DeviceRefreshResult>,
     // WGPU render state for shader nodes
     wgpu_render_state: Option<egui_wgpu::RenderState>,
     // Undo / Redo
     undo_history: UndoHistory,
     drag_undo_pushed: bool,
+}
+
+/// Results from background device enumeration thread
+struct DeviceRefreshResult {
+    midi_in: Vec<String>,
+    midi_out: Vec<String>,
+    serial: Vec<String>,
+    audio_output: Vec<String>,
+    audio_input: Vec<String>,
 }
 
 impl PatchworkApp {
@@ -152,20 +164,49 @@ impl PatchworkApp {
             api_keys: HashMap::new(),
             ob: ObManager::new(),
             audio: AudioManager::new(),
-            mcp_rx: {
-                let mcp_enabled = std::env::args().any(|a| a == "--mcp") || std::env::var("PATCHWORK_MCP").is_ok();
-                if mcp_enabled {
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    std::thread::spawn(move || crate::mcp::run_mcp_thread(tx));
-                    Some(rx)
-                } else {
-                    None
-                }
+            mcp_log: crate::mcp::new_log(),
+            mcp_rx: None,
+            device_refresh_rx: {
+                let (tx, rx) = std::sync::mpsc::channel();
+                // Background thread enumerates devices every 5 seconds — never blocks UI
+                std::thread::spawn(move || {
+                    loop {
+                        let midi_in = midir::MidiInput::new("patchwork-scan")
+                            .map(|m| m.ports().iter().filter_map(|p| m.port_name(p).ok()).collect())
+                            .unwrap_or_default();
+                        let midi_out = midir::MidiOutput::new("patchwork-scan")
+                            .map(|m| m.ports().iter().filter_map(|p| m.port_name(p).ok()).collect())
+                            .unwrap_or_default();
+                        let serial = serialport::available_ports()
+                            .unwrap_or_default().into_iter().map(|p| p.port_name).collect();
+                        let (audio_output, audio_input) = {
+                            use cpal::traits::{HostTrait, DeviceTrait};
+                            let host = cpal::default_host();
+                            let out = host.output_devices().map(|devs|
+                                devs.filter_map(|d| d.name().ok()).collect()).unwrap_or_default();
+                            let inp = host.input_devices().map(|devs|
+                                devs.filter_map(|d| d.name().ok()).collect()).unwrap_or_default();
+                            (out, inp)
+                        };
+                        let _ = tx.send(DeviceRefreshResult { midi_in, midi_out, serial, audio_output, audio_input });
+                        std::thread::sleep(std::time::Duration::from_secs(5));
+                    }
+                });
+                rx
             },
             wgpu_render_state,
             undo_history: UndoHistory::new(100),
             drag_undo_pushed: false,
         };
+        // Always start MCP server thread — auto-detects if stdin is a pipe (Claude Desktop)
+        // vs terminal (normal launch). If stdin is a terminal, the thread exits immediately.
+        {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let log = app.mcp_log.clone();
+            std::thread::spawn(move || crate::mcp::run_mcp_thread(tx, log));
+            app.mcp_rx = Some(rx);
+        }
+
         app.spawn_default_nodes();
         app
     }
@@ -615,7 +656,8 @@ impl PatchworkApp {
                         &serial_ports, serial_conn, &mut serial_actions, &monitor_state,
                         osc_listening, &mut osc_actions, &mut port_positions, &mut dragging_from,
                         &mut http_actions, http_pending, &api_keys, &wgpu_render_state,
-                        &mut pending_disconnects, &mut ob_manager, &mut audio_manager);
+                        &mut pending_disconnects, &mut ob_manager, &mut audio_manager,
+                        &self.mcp_log, self.mcp_rx.is_some());
 
                     // Check if a Palette node wants to spawn new nodes
                     if matches!(node.node_type, NodeType::Palette { .. }) {
@@ -1602,10 +1644,11 @@ impl eframe::App for PatchworkApp {
         self.ob.poll_all();
 
         self.frame_count += 1;
-        if self.frame_count % 60 == 0 {
-            self.midi.refresh_ports();
-            self.serial.refresh_ports();
-            self.audio.refresh_devices();
+        // Receive device lists from background enumeration thread (non-blocking)
+        if let Ok(devices) = self.device_refresh_rx.try_recv() {
+            self.midi.set_port_lists(devices.midi_in, devices.midi_out);
+            self.serial.set_port_list(devices.serial);
+            self.audio.set_device_lists(devices.audio_output, devices.audio_input);
         }
 
         let node_count = self.graph.nodes.len();
@@ -1677,6 +1720,28 @@ impl eframe::App for PatchworkApp {
             // Re-evaluate to propagate OB values through downstream nodes (Add, Multiply, etc.)
             if ob_injected {
                 self.graph.evaluate_with_existing(&mut values);
+            }
+        }
+
+        // Profiler output values
+        for (&id, node) in &self.graph.nodes {
+            if matches!(node.node_type, NodeType::Profiler) {
+                let profiler_id = egui::Id::new(("profiler_state", id));
+                let state = ctx.data_mut(|d| {
+                    d.get_temp_mut_or_insert_with::<std::sync::Arc<std::sync::Mutex<crate::nodes::profiler::ProfilerState>>>(
+                        profiler_id,
+                        || std::sync::Arc::new(std::sync::Mutex::new(crate::nodes::profiler::ProfilerState::new()))
+                    ).clone()
+                });
+                if let Ok(s) = state.lock() {
+                    let fps = s.fps_history.back().copied().unwrap_or(0.0);
+                    if let Ok(m) = s.metrics.lock() {
+                        values.insert((id, 0), PortValue::Float(fps));
+                        values.insert((id, 1), PortValue::Float(m.cpu_usage));
+                        values.insert((id, 2), PortValue::Float(m.mem_percent));
+                        values.insert((id, 3), PortValue::Float(m.process_mem_mb));
+                    }
+                }
             }
         }
 

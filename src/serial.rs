@@ -39,6 +39,10 @@ impl SerialManager {
             .collect();
     }
 
+    pub fn set_port_list(&mut self, ports: Vec<String>) {
+        self.cached_ports = ports;
+    }
+
     pub fn is_connected(&self, node_id: NodeId) -> bool {
         self.connections.contains_key(&node_id)
     }

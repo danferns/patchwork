@@ -41,6 +41,12 @@ impl MidiManager {
         self.cached_input_ports = Self::scan_input_ports();
     }
 
+    /// Set port lists from background thread (avoids blocking UI)
+    pub fn set_port_lists(&mut self, input_ports: Vec<String>, output_ports: Vec<String>) {
+        self.cached_input_ports = input_ports;
+        self.cached_output_ports = output_ports;
+    }
+
     fn scan_output_ports() -> Vec<String> {
         let Ok(midi_out) = MidiOutput::new("patchwork-scan") else {
             return vec![];

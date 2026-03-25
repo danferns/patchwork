@@ -27,6 +27,8 @@ pub mod zoom_control;
 pub mod ob_hub;
 pub mod ob_joystick;
 pub mod ob_encoder;
+pub mod mcp_server;
+pub mod profiler;
 pub mod rust_plugin;
 pub mod synth;
 pub mod audio_player;
@@ -135,6 +137,10 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
             factory: || NodeType::AudioFx { effects: Vec::new() } },
         NodeCatalogEntry { label: "Rust Plugin", category: "Custom",
             factory: || NodeType::RustPlugin { input_names: vec!["in0".into()], output_names: vec!["out0".into()], code: String::new(), last_values: vec![0.0], error: String::new() } },
+        NodeCatalogEntry { label: "MCP Server", category: "System",
+            factory: || NodeType::McpServer },
+        NodeCatalogEntry { label: "System Profiler", category: "Utility",
+            factory: || NodeType::Profiler },
     ]
 }
 
@@ -165,6 +171,8 @@ pub fn render_content(
     pending_disconnects: &mut Vec<(NodeId, usize)>,
     ob_manager: &mut ObManager,
     audio_manager: &mut AudioManager,
+    mcp_log: &crate::mcp::McpLog,
+    mcp_active: bool,
 ) {
     match node_type {
         NodeType::Slider { value, min, max } => slider::render(ui, value, min, max),
@@ -226,6 +234,21 @@ pub fn render_content(
         NodeType::AudioDevice { .. } => audio_device::render(ui, node_id, node_type, audio_manager),
         NodeType::AudioFx { .. } => audio_fx::render(ui, node_id, node_type, values, connections, audio_manager),
         NodeType::RustPlugin { .. } => rust_plugin::render(ui, node_id, node_type, values, connections),
+        NodeType::McpServer => mcp_server::render(ui, mcp_log, mcp_active),
+        NodeType::Profiler => {
+            // Profiler state is managed externally via egui temp data
+            let profiler_id = egui::Id::new(("profiler_state", node_id));
+            let state = ui.ctx().data_mut(|d| {
+                d.get_temp_mut_or_insert_with::<std::sync::Arc<std::sync::Mutex<profiler::ProfilerState>>>(
+                    profiler_id,
+                    || std::sync::Arc::new(std::sync::Mutex::new(profiler::ProfilerState::new()))
+                ).clone()
+            });
+            if let Ok(mut s) = state.lock() {
+                s.tick();
+                profiler::render(ui, &s);
+            }
+        }
     }
 }
 

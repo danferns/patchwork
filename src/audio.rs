@@ -281,6 +281,11 @@ impl AudioManager {
             .unwrap_or_default();
     }
 
+    pub fn set_device_lists(&mut self, output: Vec<String>, input: Vec<String>) {
+        self.cached_output_devices = output;
+        self.cached_input_devices = input;
+    }
+
     /// Start audio output on the default (or named) device
     pub fn start_output(&mut self, device_name: Option<&str>) -> Result<(), String> {
         // Stop existing stream

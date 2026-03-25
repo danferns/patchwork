@@ -313,6 +313,8 @@ pub enum NodeType {
         #[serde(default)]
         error: String,
     },
+    McpServer,
+    Profiler,
 }
 
 fn default_device_id() -> u8 { 1 }
@@ -359,6 +361,8 @@ impl NodeType {
             NodeType::AudioDevice { .. } => "Audio Device",
             NodeType::AudioFx { .. } => "Audio FX",
             NodeType::RustPlugin { .. } => "Rust Plugin",
+            NodeType::McpServer => "MCP Server",
+            NodeType::Profiler => "System Profiler",
         }
     }
 
@@ -449,6 +453,8 @@ impl NodeType {
             NodeType::RustPlugin { input_names, .. } => {
                 input_names.iter().map(|n| PortDef { name: Box::leak(n.clone().into_boxed_str()) }).collect()
             }
+            NodeType::McpServer => vec![],
+            NodeType::Profiler => vec![],
             NodeType::Script { input_names, continuous, .. } => {
                 let mut ports: Vec<PortDef> = Vec::new();
                 if !continuous {
@@ -561,6 +567,13 @@ impl NodeType {
             NodeType::RustPlugin { output_names, .. } => {
                 output_names.iter().map(|n| PortDef { name: Box::leak(n.clone().into_boxed_str()) }).collect()
             }
+            NodeType::McpServer => vec![],
+            NodeType::Profiler => vec![
+                PortDef { name: "FPS" },
+                PortDef { name: "CPU %" },
+                PortDef { name: "RAM %" },
+                PortDef { name: "Proc MB" },
+            ],
         }
     }
 
@@ -600,6 +613,8 @@ impl NodeType {
             NodeType::AudioDevice { .. } => [220, 180, 100],
             NodeType::AudioFx { .. } => [200, 100, 160],
             NodeType::RustPlugin { .. } => [255, 120, 50],
+            NodeType::McpServer => [120, 200, 255],
+            NodeType::Profiler => [255, 160, 60],
         }
     }
 

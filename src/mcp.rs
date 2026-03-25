@@ -9,7 +9,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
+
+/// Shared MCP log accessible from both MCP thread and GUI
+pub type McpLog = Arc<Mutex<Vec<String>>>;
+
+pub fn new_log() -> McpLog {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
+fn log_msg(log: &McpLog, msg: String) {
+    if let Ok(mut l) = log.lock() {
+        l.push(msg);
+        if l.len() > 200 { l.drain(0..100); }
+    }
+}
 
 // ── Commands & Results ───────────────────────────────────────────────────────
 
@@ -443,7 +457,22 @@ pub fn execute_command(
 
 // ── MCP Thread (JSON-RPC over stdio) ─────────────────────────────────────────
 
-pub fn run_mcp_thread(command_tx: mpsc::Sender<McpRequest>) {
+pub fn run_mcp_thread(command_tx: mpsc::Sender<McpRequest>, log: McpLog) {
+    // Check if stdin is a pipe (Claude Desktop) or terminal (normal launch)
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let stdin_fd = std::io::stdin().as_raw_fd();
+        let is_tty = unsafe { libc::isatty(stdin_fd) } != 0;
+        if is_tty {
+            log_msg(&log, "MCP: stdin is terminal, waiting for pipe connection...".into());
+            // Block on stdin — if someone pipes data later, we'll process it
+            // If the app exits, this thread exits too
+        }
+    }
+
+    log_msg(&log, "MCP: Server thread started, listening on stdin".into());
+
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let reader = std::io::BufReader::new(stdin.lock());
@@ -451,7 +480,10 @@ pub fn run_mcp_thread(command_tx: mpsc::Sender<McpRequest>) {
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
-            Err(_) => break,
+            Err(_) => {
+                log_msg(&log, "MCP: stdin closed".into());
+                break;
+            }
         };
         if line.trim().is_empty() { continue; }
 
@@ -482,7 +514,7 @@ pub fn run_mcp_thread(command_tx: mpsc::Sender<McpRequest>) {
             }
 
             "notifications/initialized" => {
-                // Client acknowledged initialization — no response needed
+                log_msg(&log, "✓ Client initialized".into());
             }
 
             "tools/list" => {
@@ -497,6 +529,7 @@ pub fn run_mcp_thread(command_tx: mpsc::Sender<McpRequest>) {
             "tools/call" => {
                 let tool_name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
                 let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+                log_msg(&log, format!("→ {} {}", tool_name, serde_json::to_string(&arguments).unwrap_or_default()));
 
                 let cmd = match parse_tool_call(tool_name, &arguments) {
                     Ok(cmd) => cmd,
@@ -530,6 +563,8 @@ pub fn run_mcp_thread(command_tx: mpsc::Sender<McpRequest>) {
                             McpResult::Error { error } => format!("Error: {}", error),
                         };
                         let is_error = matches!(result, McpResult::Error { .. });
+                        let short = if text.len() > 80 { format!("{}...", &text[..80]) } else { text.clone() };
+                        log_msg(&log, format!("← {}{}", if is_error { "ERR " } else { "" }, short));
                         let response = json!({
                             "jsonrpc": "2.0",
                             "id": id,
