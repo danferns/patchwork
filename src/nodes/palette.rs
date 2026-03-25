@@ -25,8 +25,8 @@ pub fn render(
     let mut any_shown = false;
 
     for entry in &cat {
-        // Skip palette itself to avoid infinite recursion
-        if entry.label == "Node Palette" { continue; }
+        // Skip system nodes (File Menu, Zoom, Palette, MCP — auto-created)
+        if entry.category == "System" { continue; }
 
         if !query.is_empty()
             && !entry.label.to_lowercase().contains(&query)

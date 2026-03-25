@@ -35,6 +35,14 @@ pub mod synth;
 pub mod audio_player;
 pub mod audio_device;
 pub mod audio_fx;
+pub mod image_node;
+pub mod image_effects;
+pub mod blend;
+pub mod curve;
+pub mod draw;
+pub mod noise;
+pub mod color_curves;
+pub mod ml_model;
 
 use crate::graph::*;
 use crate::midi::MidiAction;
@@ -54,36 +62,122 @@ pub struct NodeCatalogEntry {
 
 pub fn catalog() -> Vec<NodeCatalogEntry> {
     vec![
+        // ── Input ────────────────────────────────────────────
         NodeCatalogEntry { label: "Slider", category: "Input",
             factory: || NodeType::Slider { value: 0.5, min: 0.0, max: 1.0 } },
+        NodeCatalogEntry { label: "Time", category: "Input",
+            factory: || NodeType::Time { elapsed: 0.0, speed: 1.0, running: true } },
+        NodeCatalogEntry { label: "Color", category: "Input",
+            factory: || NodeType::Color { r: 128, g: 128, b: 255 } },
         NodeCatalogEntry { label: "Mouse Tracker", category: "Input",
             factory: || NodeType::MouseTracker { x: 0.0, y: 0.0 } },
         NodeCatalogEntry { label: "Key Input", category: "Input",
             factory: || NodeType::KeyInput { key_name: String::new(), pressed: false, toggle_mode: false, toggled_on: false } },
+
+        // ── Math ─────────────────────────────────────────────
         NodeCatalogEntry { label: "Add", category: "Math", factory: || NodeType::Add },
         NodeCatalogEntry { label: "Multiply", category: "Math", factory: || NodeType::Multiply },
+
+        // ── IO ───────────────────────────────────────────────
         NodeCatalogEntry { label: "File", category: "IO",
             factory: || NodeType::File { path: String::new(), content: String::new() } },
         NodeCatalogEntry { label: "Text Editor", category: "IO",
             factory: || NodeType::TextEditor { content: String::new() } },
+
+        // ── Output ───────────────────────────────────────────
         NodeCatalogEntry { label: "Display", category: "Output", factory: || NodeType::Display {
             history: Vec::new(), history_max: 200, scope_min: 0.0, scope_max: 1.0, scope_height: 80.0, paused: false,
         } },
+        NodeCatalogEntry { label: "HTML Viewer", category: "Output",
+            factory: || NodeType::HtmlViewer },
+
+        // ── Shader ───────────────────────────────────────────
         NodeCatalogEntry { label: "WGSL Viewer", category: "Shader", factory: || NodeType::WgslViewer {
             wgsl_code: String::new(),
             uniform_names: vec![], uniform_types: vec![], uniform_values: vec![], uniform_min: vec![], uniform_max: vec![],
             canvas_w: 800.0, canvas_h: 600.0, resolution: 120, expanded: false,
         } },
-        NodeCatalogEntry { label: "Time", category: "Input",
-            factory: || NodeType::Time { elapsed: 0.0, speed: 1.0, running: true } },
-        NodeCatalogEntry { label: "Color", category: "Input",
-            factory: || NodeType::Color { r: 128, g: 128, b: 255 } },
+
+        // ── Image ────────────────────────────────────────────
+        NodeCatalogEntry { label: "Image", category: "Image",
+            factory: || NodeType::ImageNode { path: String::new(), save_path: String::new(), image_data: None, preview_size: 150.0, last_save_hash: 0 } },
+        NodeCatalogEntry { label: "Image Effects", category: "Image",
+            factory: || NodeType::ImageEffects { brightness: 1.0, contrast: 1.0, saturation: 1.0, hue: 0.0, exposure: 0.0, gamma: 1.0 } },
+        NodeCatalogEntry { label: "Blend", category: "Image",
+            factory: || NodeType::Blend { mode: 0, mix: 0.5 } },
+        NodeCatalogEntry { label: "Color Curves", category: "Image",
+            factory: || NodeType::ColorCurves { master: vec![[0.0, 0.0], [1.0, 1.0]], red: vec![[0.0, 0.0], [1.0, 1.0]], green: vec![[0.0, 0.0], [1.0, 1.0]], blue: vec![[0.0, 0.0], [1.0, 1.0]], active_channel: 0 } },
+
+        // ── Signal ───────────────────────────────────────────
+        NodeCatalogEntry { label: "Curve", category: "Signal",
+            factory: || NodeType::Curve { points: vec![[0.0, 0.0], [1.0, 1.0]] } },
+        NodeCatalogEntry { label: "Draw", category: "Signal",
+            factory: || NodeType::Draw { strokes: vec![], canvas_size: 200.0, color: [255, 255, 255], line_width: 2.0 } },
+        NodeCatalogEntry { label: "Noise", category: "Signal",
+            factory: || NodeType::Noise { noise_type: 0, mode: 1, scale: 5.0, seed: 0 } },
+
+        // ── Audio ────────────────────────────────────────────
+        NodeCatalogEntry { label: "Synth", category: "Audio",
+            factory: || NodeType::Synth { waveform: crate::audio::Waveform::Sine, frequency: 440.0, amplitude: 0.5, active: true } },
+        NodeCatalogEntry { label: "Audio FX", category: "Audio",
+            factory: || NodeType::AudioFx { effects: Vec::new() } },
+        NodeCatalogEntry { label: "Audio Player", category: "Audio",
+            factory: || NodeType::AudioPlayer { file_path: String::new(), volume: 1.0, looping: false } },
+        NodeCatalogEntry { label: "Audio Device", category: "Audio",
+            factory: || NodeType::AudioDevice { selected_output: String::new(), selected_input: String::new(), master_volume: 0.8 } },
+
+        // ── MIDI ─────────────────────────────────────────────
         NodeCatalogEntry { label: "MIDI Out", category: "MIDI",
             factory: || NodeType::MidiOut { port_name: String::new(), mode: MidiMode::Note, channel: 0 } },
         NodeCatalogEntry { label: "MIDI In", category: "MIDI",
             factory: || NodeType::MidiIn { port_name: String::new(), channel: 0, note: 0, velocity: 0, log: Vec::new() } },
+
+        // ── Serial ───────────────────────────────────────────
         NodeCatalogEntry { label: "Serial", category: "Serial",
             factory: || NodeType::Serial { port_name: String::new(), baud_rate: 115200, log: Vec::new(), last_line: String::new(), send_buf: String::new() } },
+
+        // ── OSC ──────────────────────────────────────────────
+        NodeCatalogEntry { label: "OSC Out", category: "OSC",
+            factory: || NodeType::OscOut { host: "127.0.0.1".to_string(), port: 9000, address: "/patchwork".to_string(), arg_count: 1 } },
+        NodeCatalogEntry { label: "OSC In", category: "OSC",
+            factory: || NodeType::OscIn { port: 8000, address_filter: String::new(), arg_count: 1, last_args: vec![0.0], log: Vec::new(), listening: false } },
+
+        // ── Network / AI ─────────────────────────────────────
+        NodeCatalogEntry { label: "HTTP Request", category: "Network",
+            factory: || NodeType::HttpRequest {
+                url: String::new(), method: "POST".into(), headers: String::new(),
+                response: String::new(), status: String::new(), auto_send: false, last_hash: 0,
+            } },
+        NodeCatalogEntry { label: "AI Request", category: "Network",
+            factory: || NodeType::AiRequest {
+                provider: "anthropic".into(), model: "claude-sonnet-4-20250514".into(),
+                response: String::new(), status: String::new(),
+                max_tokens: 1024, temperature: 0.7, api_key_name: String::new(), custom_url: String::new(),
+            } },
+        NodeCatalogEntry { label: "JSON Extract", category: "Network",
+            factory: || NodeType::JsonExtract { path: String::new() } },
+
+        // ── Hardware ─────────────────────────────────────────
+        NodeCatalogEntry { label: "OB Hub", category: "Hardware",
+            factory: || NodeType::ObHub { port_name: String::new(), selected_port: String::new(), detected_devices: Vec::new() } },
+        NodeCatalogEntry { label: "OB Joystick", category: "Hardware",
+            factory: || NodeType::ObJoystick { device_id: 1, hub_node_id: 0 } },
+        NodeCatalogEntry { label: "OB Encoder", category: "Hardware",
+            factory: || NodeType::ObEncoder { device_id: 1, hub_node_id: 0 } },
+
+        // ── Custom ───────────────────────────────────────────
+        NodeCatalogEntry { label: "Script", category: "Custom",
+            factory: || NodeType::Script { name: "Custom Script".to_string(), input_names: vec![], output_names: vec![], code: String::new(), last_values: vec![], error: String::new(), continuous: true, trigger: false } },
+        NodeCatalogEntry { label: "Rust Plugin", category: "Custom",
+            factory: || NodeType::RustPlugin { input_names: vec!["in0".into()], output_names: vec!["out0".into()], code: String::new(), last_values: vec![0.0], error: String::new() } },
+
+        // ── ML / AI ──────────────────────────────────────────
+        NodeCatalogEntry { label: "ML Model", category: "ML",
+            factory: || NodeType::MlModel { model_path: String::new(), labels_path: String::new(), confidence: 0.05, result_text: String::new(), status: String::new(), last_input_hash: 0 } },
+
+        // ── Utility ──────────────────────────────────────────
+        NodeCatalogEntry { label: "Comment", category: "Utility",
+            factory: || NodeType::Comment { text: String::new() } },
         NodeCatalogEntry { label: "Theme", category: "Utility",
             factory: || NodeType::Theme {
                 dark_mode: true, accent: [80, 160, 255], font_size: 14.0,
@@ -91,59 +185,22 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
                 window_bg: [40, 40, 40], window_alpha: 240,
                 grid_color: [12, 12, 12], rounding: 4.0, spacing: 4.0, use_hsl: false,
             } },
-        NodeCatalogEntry { label: "Comment", category: "Utility",
-            factory: || NodeType::Comment { text: String::new() } },
         NodeCatalogEntry { label: "Console", category: "Utility",
             factory: || NodeType::Console { messages: Vec::new() } },
         NodeCatalogEntry { label: "Monitor", category: "Utility",
             factory: || NodeType::Monitor },
-        NodeCatalogEntry { label: "OSC Out", category: "OSC",
-            factory: || NodeType::OscOut { host: "127.0.0.1".to_string(), port: 9000, address: "/patchwork".to_string(), arg_count: 1 } },
-        NodeCatalogEntry { label: "OSC In", category: "OSC",
-            factory: || NodeType::OscIn { port: 8000, address_filter: String::new(), arg_count: 1, last_args: vec![0.0], log: Vec::new(), listening: false } },
-        NodeCatalogEntry { label: "Script", category: "Custom",
-            factory: || NodeType::Script { name: "Custom Script".to_string(), input_names: vec![], output_names: vec![], code: String::new(), last_values: vec![], error: String::new(), continuous: true, trigger: false } },
-        NodeCatalogEntry { label: "Node Palette", category: "Utility",
-            factory: || NodeType::Palette { search: String::new() } },
-        NodeCatalogEntry { label: "HTTP Request", category: "Web",
-            factory: || NodeType::HttpRequest {
-                url: String::new(), method: "POST".into(), headers: String::new(),
-                response: String::new(), status: String::new(), auto_send: false, last_hash: 0,
-            } },
-        NodeCatalogEntry { label: "AI Request", category: "Web",
-            factory: || NodeType::AiRequest {
-                provider: "anthropic".into(), model: "claude-sonnet-4-20250514".into(),
-                response: String::new(), status: String::new(),
-                max_tokens: 1024, temperature: 0.7, api_key_name: String::new(), custom_url: String::new(),
-            } },
-        NodeCatalogEntry { label: "JSON Extract", category: "Web",
-            factory: || NodeType::JsonExtract { path: String::new() } },
+        NodeCatalogEntry { label: "System Profiler", category: "Utility",
+            factory: || NodeType::Profiler },
+
+        // ── System (hidden from palette, visible in full catalog) ──
         NodeCatalogEntry { label: "File Menu", category: "System",
             factory: || NodeType::FileMenu },
         NodeCatalogEntry { label: "Zoom Control", category: "System",
             factory: || NodeType::ZoomControl { zoom_value: 1.0 } },
-        NodeCatalogEntry { label: "OB Hub", category: "Hardware",
-            factory: || NodeType::ObHub { port_name: String::new(), selected_port: String::new(), detected_devices: Vec::new() } },
-        NodeCatalogEntry { label: "OB Joystick", category: "Hardware",
-            factory: || NodeType::ObJoystick { device_id: 1, hub_node_id: 0 } },
-        NodeCatalogEntry { label: "OB Encoder", category: "Hardware",
-            factory: || NodeType::ObEncoder { device_id: 1, hub_node_id: 0 } },
-        NodeCatalogEntry { label: "Synth", category: "Audio",
-            factory: || NodeType::Synth { waveform: crate::audio::Waveform::Sine, frequency: 440.0, amplitude: 0.5, active: true } },
-        NodeCatalogEntry { label: "Audio Player", category: "Audio",
-            factory: || NodeType::AudioPlayer { file_path: String::new(), volume: 1.0, looping: false } },
-        NodeCatalogEntry { label: "Audio Device", category: "Audio",
-            factory: || NodeType::AudioDevice { selected_output: String::new(), selected_input: String::new(), master_volume: 0.8 } },
-        NodeCatalogEntry { label: "Audio FX", category: "Audio",
-            factory: || NodeType::AudioFx { effects: Vec::new() } },
-        NodeCatalogEntry { label: "Rust Plugin", category: "Custom",
-            factory: || NodeType::RustPlugin { input_names: vec!["in0".into()], output_names: vec!["out0".into()], code: String::new(), last_values: vec![0.0], error: String::new() } },
+        NodeCatalogEntry { label: "Node Palette", category: "System",
+            factory: || NodeType::Palette { search: String::new() } },
         NodeCatalogEntry { label: "MCP Server", category: "System",
             factory: || NodeType::McpServer },
-        NodeCatalogEntry { label: "System Profiler", category: "Utility",
-            factory: || NodeType::Profiler },
-        NodeCatalogEntry { label: "HTML Viewer", category: "Output",
-            factory: || NodeType::HtmlViewer },
     ]
 }
 
@@ -253,6 +310,14 @@ pub fn render_content(
                 profiler::render(ui, &s);
             }
         }
+        NodeType::ImageNode { .. } => image_node::render(ui, node_id, node_type, values, connections),
+        NodeType::ImageEffects { .. } => image_effects::render(ui, node_id, node_type, values, connections),
+        NodeType::Blend { .. } => blend::render(ui, node_id, node_type, values, connections),
+        NodeType::Curve { .. } => curve::render(ui, node_id, node_type, values, connections),
+        NodeType::Draw { .. } => draw::render(ui, node_id, node_type),
+        NodeType::Noise { .. } => noise::render(ui, node_id, node_type, values, connections),
+        NodeType::ColorCurves { .. } => color_curves::render(ui, node_id, node_type, values, connections),
+        NodeType::MlModel { .. } => ml_model::render(ui, node_id, node_type, values, connections),
     }
 }
 

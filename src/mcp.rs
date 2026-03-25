@@ -379,6 +379,7 @@ pub fn execute_command(
                     let v = match val {
                         PortValue::Float(f) => json!(f),
                         PortValue::Text(s) => json!(s),
+                        PortValue::Image(img) => json!(format!("[Image {}x{}]", img.width, img.height)),
                         PortValue::None => json!(null),
                     };
                     result.insert(key, v);

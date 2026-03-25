@@ -169,7 +169,7 @@ pub fn render(
     let html = match &input_val {
         PortValue::Text(s) => s.clone(),
         PortValue::Float(f) => format!("<h1>{}</h1>", f),
-        PortValue::None => String::new(),
+        _ => String::new(),
     };
 
     // Server state (persisted via egui temp storage)

@@ -42,6 +42,10 @@ pub fn render(
             });
             return; // No oscilloscope for text
         }
+        PortValue::Image(img) => {
+            ui.label(format!("Image {}x{}", img.width, img.height));
+            return;
+        }
         PortValue::None => {
             ui.label(egui::RichText::new("\u{2014}").color(egui::Color32::GRAY));
             return;

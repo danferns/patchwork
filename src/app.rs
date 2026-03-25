@@ -109,6 +109,9 @@ pub struct PatchworkApp {
     // MCP server
     mcp_rx: Option<std::sync::mpsc::Receiver<crate::mcp::McpRequest>>,
     mcp_log: crate::mcp::McpLog,
+    // ML inference
+    ml_rx: std::sync::mpsc::Receiver<crate::nodes::ml_model::MlInferenceResult>,
+    ml_tx: std::sync::mpsc::Sender<crate::nodes::ml_model::MlInferenceResult>,
     // Background device refresh
     device_refresh_rx: std::sync::mpsc::Receiver<DeviceRefreshResult>,
     // WGPU render state for shader nodes
@@ -130,6 +133,7 @@ struct DeviceRefreshResult {
 impl PatchworkApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let wgpu_render_state = cc.wgpu_render_state.clone();
+        let (ml_tx, ml_rx) = std::sync::mpsc::channel();
         let mut app = Self {
             graph: Graph::new(),
             port_positions: HashMap::new(),
@@ -166,6 +170,8 @@ impl PatchworkApp {
             audio: AudioManager::new(),
             mcp_log: crate::mcp::new_log(),
             mcp_rx: None,
+            ml_rx: ml_rx,
+            ml_tx: ml_tx,
             device_refresh_rx: {
                 let (tx, rx) = std::sync::mpsc::channel();
                 // Background thread enumerates devices every 5 seconds — never blocks UI
@@ -284,14 +290,28 @@ impl PatchworkApp {
     fn handle_file_drop(&mut self, ctx: &egui::Context) {
         let dropped: Vec<_> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
         if !dropped.is_empty() { self.push_undo(); }
+        let image_exts = ["png", "jpg", "jpeg", "gif", "bmp", "webp"];
         for path in dropped {
-            let content = std::fs::read_to_string(&path).unwrap_or_default();
             let pos = ctx.pointer_latest_pos().unwrap_or(egui::pos2(200.0, 200.0));
-            // pos is in zoomed space; convert to canvas
             let off_e = self.canvas_offset / self.canvas_zoom;
             let canvas_x = pos.x - off_e.x;
             let canvas_y = pos.y - off_e.y;
-            self.graph.add_node(NodeType::File { path: path.display().to_string(), content }, [canvas_x, canvas_y]);
+
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+            if image_exts.contains(&ext.as_str()) {
+                // Create Image node
+                let image_data = crate::nodes::image_node::load_image_from_path(&path.display().to_string());
+                self.graph.add_node(NodeType::ImageNode {
+                    path: path.display().to_string(),
+                    save_path: String::new(),
+                    image_data,
+                    preview_size: 150.0,
+                    last_save_hash: 0,
+                }, [canvas_x, canvas_y]);
+            } else {
+                let content = std::fs::read_to_string(&path).unwrap_or_default();
+                self.graph.add_node(NodeType::File { path: path.display().to_string(), content }, [canvas_x, canvas_y]);
+            }
         }
     }
 
@@ -419,6 +439,33 @@ impl PatchworkApp {
             // Monitor — pinned bottom-right (higher up)
             let monitor_id = self.graph.add_node(NodeType::Monitor, [1100.0, 500.0]);
             self.pinned_nodes.insert(monitor_id);
+        }
+    }
+
+    /// Poll ML inference results and dispatch new requests
+    fn poll_ml_inference(&mut self, ctx: &egui::Context) {
+        // Receive completed results
+        while let Ok(result) = self.ml_rx.try_recv() {
+            if let Some(node) = self.graph.nodes.get_mut(&result.node_id) {
+                if let NodeType::MlModel { result_text, status, .. } = &mut node.node_type {
+                    *result_text = result.result_text;
+                    *status = result.status;
+                }
+            }
+        }
+
+        // Check for new inference requests (stored in egui temp data by ml_model::render)
+        let node_ids: Vec<NodeId> = self.graph.nodes.keys().copied().collect();
+        for nid in node_ids {
+            let inference_id = egui::Id::new(("ml_inference", nid));
+            if let Some(req) = ctx.data_mut(|d| d.get_temp::<crate::nodes::ml_model::MlInferenceRequest>(inference_id)) {
+                ctx.data_mut(|d| d.remove::<crate::nodes::ml_model::MlInferenceRequest>(inference_id));
+                let tx = self.ml_tx.clone();
+                std::thread::spawn(move || {
+                    let result = crate::nodes::ml_model::run_inference(&req);
+                    let _ = tx.send(result);
+                });
+            }
         }
     }
 
@@ -999,6 +1046,9 @@ impl PatchworkApp {
                 let mut spawn_y_base = (self.node_menu_pos.y - self.canvas_offset.y) / self.canvas_zoom;
 
                 for entry in &catalog {
+                    // Hide system nodes (auto-created, not user-addable)
+                    if entry.category == "System" { continue; }
+
                     if !query.is_empty()
                         && !entry.label.to_lowercase().contains(&query)
                         && !entry.category.to_lowercase().contains(&query)
@@ -1642,6 +1692,7 @@ impl eframe::App for PatchworkApp {
         self.poll_osc_inputs();
         self.poll_http_responses();
         self.ob.poll_all();
+        self.poll_ml_inference(ctx);
 
         self.frame_count += 1;
         // Receive device lists from background enumeration thread (non-blocking)
@@ -1760,6 +1811,137 @@ impl eframe::App for PatchworkApp {
                 }
             }
         }
+
+        // Evaluate image nodes (with caching — only reprocess when inputs change)
+        // Run 2 passes so downstream nodes (e.g., Image receiver) see upstream results (e.g., Effects output)
+        for _img_pass in 0..2 {
+            let image_ids: Vec<NodeId> = self.graph.nodes.keys().copied().collect();
+            for id in image_ids {
+                let inputs: Vec<PortValue> = self.graph.collect_inputs(id, &values);
+                let node = match self.graph.nodes.get(&id) { Some(n) => n, None => continue };
+                match &node.node_type {
+                    NodeType::ImageNode { image_data, .. } => {
+                        let out = if let Some(PortValue::Image(img)) = inputs.first() {
+                            PortValue::Image(img.clone())
+                        } else if let Some(img) = image_data {
+                            PortValue::Image(img.clone())
+                        } else {
+                            PortValue::None
+                        };
+                        values.insert((id, 0), out);
+                    }
+                    NodeType::ImageEffects { brightness, contrast, saturation, hue, exposure, gamma } => {
+                        if let Some(PortValue::Image(img)) = inputs.first() {
+                            // Cache key: param hash + image pointer
+                            let param_hash = ((*brightness * 1000.0) as u64) ^ ((*contrast * 1000.0) as u64) << 8
+                                ^ ((*saturation * 1000.0) as u64) << 16 ^ ((*hue * 10.0) as u64) << 24
+                                ^ ((*exposure * 1000.0) as u64) << 32 ^ ((*gamma * 1000.0) as u64) << 40;
+                            let img_ptr = std::sync::Arc::as_ptr(img) as u64;
+                            let cache_key = param_hash ^ img_ptr;
+                            let cache_id = egui::Id::new(("img_fx_cache", id));
+                            let cached: Option<(u64, std::sync::Arc<ImageData>)> = ctx.data_mut(|d| d.get_temp(cache_id));
+                            if let Some((prev_key, prev_result)) = cached {
+                                if prev_key == cache_key {
+                                    values.insert((id, 0), PortValue::Image(prev_result));
+                                    continue;
+                                }
+                            }
+                            let result = nodes::image_effects::process(img, *brightness, *contrast, *saturation, *hue, *exposure, *gamma);
+                            ctx.data_mut(|d| d.insert_temp(cache_id, (cache_key, result.clone())));
+                            values.insert((id, 0), PortValue::Image(result));
+                        }
+                    }
+                    NodeType::Blend { mode, mix } => {
+                        let a = inputs.first().and_then(|v| v.as_image());
+                        let b = inputs.get(1).and_then(|v| v.as_image());
+                        if let (Some(a), Some(b)) = (a, b) {
+                            let cache_key = (std::sync::Arc::as_ptr(a) as u64) ^ (std::sync::Arc::as_ptr(b) as u64)
+                                ^ (*mode as u64) ^ ((*mix * 1000.0) as u64) << 8;
+                            let cache_id = egui::Id::new(("blend_cache", id));
+                            let cached: Option<(u64, std::sync::Arc<ImageData>)> = ctx.data_mut(|d| d.get_temp(cache_id));
+                            if let Some((prev_key, prev_result)) = cached {
+                                if prev_key == cache_key {
+                                    values.insert((id, 0), PortValue::Image(prev_result));
+                                    continue;
+                                }
+                            }
+                            let result = nodes::blend::process(a, b, *mode, *mix);
+                            ctx.data_mut(|d| d.insert_temp(cache_id, (cache_key, result.clone())));
+                            values.insert((id, 0), PortValue::Image(result));
+                        }
+                    }
+                    NodeType::Curve { points } => {
+                        let x = inputs.first().map(|v| v.as_float()).unwrap_or(0.0);
+                        let y = nodes::curve::evaluate_curve(points, x);
+                        values.insert((id, 0), PortValue::Float(y));
+                    }
+                    NodeType::Draw { strokes, canvas_size, .. } => {
+                        // Only regenerate if strokes changed
+                        let stroke_hash = strokes.len() as u64 ^ (*canvas_size as u64);
+                        let cache_id = egui::Id::new(("draw_cache", id));
+                        let cached: Option<(u64, std::sync::Arc<ImageData>)> = ctx.data_mut(|d| d.get_temp(cache_id));
+                        if let Some((prev_hash, prev_img)) = cached {
+                            if prev_hash == stroke_hash {
+                                values.insert((id, 0), PortValue::Image(prev_img));
+                            } else {
+                                let img = nodes::draw::render_to_image(strokes, *canvas_size as u32);
+                                ctx.data_mut(|d| d.insert_temp(cache_id, (stroke_hash, img.clone())));
+                                values.insert((id, 0), PortValue::Image(img));
+                            }
+                        } else {
+                            let img = nodes::draw::render_to_image(strokes, *canvas_size as u32);
+                            ctx.data_mut(|d| d.insert_temp(cache_id, (stroke_hash, img.clone())));
+                            values.insert((id, 0), PortValue::Image(img));
+                        }
+                        let pts_json = serde_json::to_string(strokes).unwrap_or_default();
+                        values.insert((id, 1), PortValue::Text(pts_json));
+                    }
+                    NodeType::Noise { noise_type, mode, scale, seed } => {
+                        let x = inputs.get(2).map(|v| v.as_float()).unwrap_or(0.0);
+                        let val = nodes::noise::perlin_1d(x * *scale, *seed);
+                        values.insert((id, 0), PortValue::Float(val));
+                        if *mode == 1 {
+                            let cache_key = (*seed as u64) ^ ((*scale * 100.0) as u64) << 16 ^ (*noise_type as u64) << 32;
+                            let cache_id = egui::Id::new(("noise_cache", id));
+                            let cached: Option<(u64, std::sync::Arc<ImageData>)> = ctx.data_mut(|d| d.get_temp(cache_id));
+                            if let Some((prev_key, prev_img)) = cached {
+                                if prev_key == cache_key {
+                                    values.insert((id, 1), PortValue::Image(prev_img));
+                                    continue;
+                                }
+                            }
+                            let img = nodes::noise::generate_2d(*scale, *seed, *noise_type, 128);
+                            ctx.data_mut(|d| d.insert_temp(cache_id, (cache_key, img.clone())));
+                            values.insert((id, 1), PortValue::Image(img));
+                        }
+                    }
+                    NodeType::ColorCurves { master, red, green, blue, .. } => {
+                        if let Some(PortValue::Image(img)) = inputs.first() {
+                            let img_ptr = std::sync::Arc::as_ptr(img) as u64;
+                            let curve_hash = master.len() as u64 ^ red.len() as u64 ^ green.len() as u64 ^ blue.len() as u64;
+                            let cache_key = img_ptr ^ curve_hash;
+                            let cache_id = egui::Id::new(("cc_cache", id));
+                            let cached: Option<(u64, std::sync::Arc<ImageData>)> = ctx.data_mut(|d| d.get_temp(cache_id));
+                            if let Some((prev_key, prev_result)) = cached {
+                                if prev_key == cache_key {
+                                    values.insert((id, 0), PortValue::Image(prev_result));
+                                    continue;
+                                }
+                            }
+                            let result = nodes::color_curves::process(img, master, red, green, blue);
+                            ctx.data_mut(|d| d.insert_temp(cache_id, (cache_key, result.clone())));
+                            values.insert((id, 0), PortValue::Image(result));
+                        }
+                    }
+                    NodeType::MlModel { result_text, .. } => {
+                        if !result_text.is_empty() {
+                            values.insert((id, 0), PortValue::Text(result_text.clone()));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        } // end img_pass loop
 
         // Sync OB Hub detected_devices from ObManager + auto-connect saved ports
         {

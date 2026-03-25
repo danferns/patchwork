@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 fn default_true() -> bool { true }
 fn default_bg_color() -> [u8; 3] { [30, 30, 30] }
@@ -21,11 +22,86 @@ fn default_max_tokens() -> u32 { 1024 }
 
 pub type NodeId = u64;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// ── Image Data ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct ImageData {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>, // RGBA8, 4 bytes per pixel
+}
+
+impl ImageData {
+    pub fn new(width: u32, height: u32, pixels: Vec<u8>) -> Self {
+        Self { width, height, pixels }
+    }
+    pub fn solid(width: u32, height: u32, r: u8, g: u8, b: u8, a: u8) -> Self {
+        let pixels = vec![r, g, b, a].repeat((width * height) as usize);
+        Self { width, height, pixels }
+    }
+}
+
+// ── Port Value ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
 pub enum PortValue {
     Float(f32),
     Text(String),
+    Image(Arc<ImageData>),
     None,
+}
+
+// Custom serde: Image serializes as None (pixel data is runtime-only)
+impl Serialize for PortValue {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            PortValue::Float(v) => {
+                use serde::ser::SerializeMap;
+                let mut m = s.serialize_map(Some(1))?;
+                m.serialize_entry("Float", v)?;
+                m.end()
+            }
+            PortValue::Text(v) => {
+                use serde::ser::SerializeMap;
+                let mut m = s.serialize_map(Some(1))?;
+                m.serialize_entry("Text", v)?;
+                m.end()
+            }
+            PortValue::Image(_) | PortValue::None => {
+                s.serialize_str("None")
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PortValue {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = serde_json::Value::deserialize(d)?;
+        match &v {
+            serde_json::Value::Object(m) => {
+                if let Some(f) = m.get("Float") {
+                    Ok(PortValue::Float(f.as_f64().unwrap_or(0.0) as f32))
+                } else if let Some(t) = m.get("Text") {
+                    Ok(PortValue::Text(t.as_str().unwrap_or("").to_string()))
+                } else {
+                    Ok(PortValue::None)
+                }
+            }
+            _ => Ok(PortValue::None),
+        }
+    }
+}
+
+impl PartialEq for PortValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (PortValue::Float(a), PortValue::Float(b)) => a == b,
+            (PortValue::Text(a), PortValue::Text(b)) => a == b,
+            (PortValue::Image(a), PortValue::Image(b)) => Arc::ptr_eq(a, b),
+            (PortValue::None, PortValue::None) => true,
+            _ => false,
+        }
+    }
 }
 
 impl std::fmt::Display for PortValue {
@@ -36,6 +112,7 @@ impl std::fmt::Display for PortValue {
                 if s.len() > 24 { write!(f, "\"{}...\"", &s[..24]) }
                 else { write!(f, "\"{}\"", s) }
             }
+            PortValue::Image(img) => write!(f, "[Image {}x{}]", img.width, img.height),
             PortValue::None => write!(f, "\u{2014}"),
         }
     }
@@ -44,6 +121,9 @@ impl std::fmt::Display for PortValue {
 impl PortValue {
     pub fn as_float(&self) -> f32 {
         match self { PortValue::Float(v) => *v, _ => 0.0 }
+    }
+    pub fn as_image(&self) -> Option<&Arc<ImageData>> {
+        match self { PortValue::Image(img) => Some(img), _ => None }
     }
 }
 
@@ -316,9 +396,107 @@ pub enum NodeType {
     McpServer,
     Profiler,
     HtmlViewer,
+    // ── Image & Signal nodes ────────────────────────────────
+    ImageNode {
+        #[serde(default)]
+        path: String,
+        #[serde(default)]
+        save_path: String,
+        #[serde(skip)]
+        image_data: Option<Arc<ImageData>>,
+        #[serde(default = "default_preview_size")]
+        preview_size: f32,
+        /// Hash of last saved image to avoid re-saving unchanged data
+        #[serde(skip)]
+        last_save_hash: u64,
+    },
+    ImageEffects {
+        #[serde(default = "default_one")]
+        brightness: f32,
+        #[serde(default = "default_one")]
+        contrast: f32,
+        #[serde(default = "default_one")]
+        saturation: f32,
+        #[serde(default)]
+        hue: f32,
+        #[serde(default)]
+        exposure: f32,
+        #[serde(default = "default_one")]
+        gamma: f32,
+    },
+    Blend {
+        #[serde(default)]
+        mode: u8,
+        #[serde(default = "default_half")]
+        mix: f32,
+    },
+    Curve {
+        #[serde(default = "default_curve_points")]
+        points: Vec<[f32; 2]>,
+    },
+    Draw {
+        #[serde(default)]
+        strokes: Vec<DrawStroke>,
+        #[serde(default = "default_draw_size")]
+        canvas_size: f32,
+        #[serde(default)]
+        color: [u8; 3],
+        #[serde(default = "default_draw_width")]
+        line_width: f32,
+    },
+    Noise {
+        #[serde(default)]
+        noise_type: u8,
+        #[serde(default)]
+        mode: u8,
+        #[serde(default = "default_noise_scale")]
+        scale: f32,
+        #[serde(default)]
+        seed: u32,
+    },
+    ColorCurves {
+        #[serde(default = "default_curve_points")]
+        master: Vec<[f32; 2]>,
+        #[serde(default = "default_curve_points")]
+        red: Vec<[f32; 2]>,
+        #[serde(default = "default_curve_points")]
+        green: Vec<[f32; 2]>,
+        #[serde(default = "default_curve_points")]
+        blue: Vec<[f32; 2]>,
+        #[serde(default)]
+        active_channel: u8,
+    },
+    MlModel {
+        #[serde(default)]
+        model_path: String,
+        #[serde(default)]
+        labels_path: String,
+        #[serde(default = "default_confidence")]
+        confidence: f32,
+        #[serde(default)]
+        result_text: String,
+        #[serde(default)]
+        status: String,
+        #[serde(skip)]
+        last_input_hash: u64,
+    },
+}
+
+fn default_confidence() -> f32 { 0.05 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DrawStroke {
+    pub points: Vec<[f32; 2]>,
+    pub color: [u8; 3],
+    pub width: f32,
 }
 
 fn default_device_id() -> u8 { 1 }
+fn default_preview_size() -> f32 { 150.0 }
+fn default_draw_size() -> f32 { 200.0 }
+fn default_draw_width() -> f32 { 2.0 }
+fn default_noise_scale() -> f32 { 5.0 }
+fn default_curve_points() -> Vec<[f32; 2]> { vec![[0.0, 0.0], [1.0, 1.0]] }
 fn default_440() -> f32 { 440.0 }
 fn default_half() -> f32 { 0.5 }
 fn default_one() -> f32 { 1.0 }
@@ -365,6 +543,14 @@ impl NodeType {
             NodeType::McpServer => "MCP Server",
             NodeType::Profiler => "System Profiler",
             NodeType::HtmlViewer => "HTML Viewer",
+            NodeType::ImageNode { .. } => "Image",
+            NodeType::ImageEffects { .. } => "Image Effects",
+            NodeType::Blend { .. } => "Blend",
+            NodeType::Curve { .. } => "Curve",
+            NodeType::Draw { .. } => "Draw",
+            NodeType::Noise { .. } => "Noise",
+            NodeType::ColorCurves { .. } => "Color Curves",
+            NodeType::MlModel { .. } => "ML Model",
         }
     }
 
@@ -456,9 +642,19 @@ impl NodeType {
                 input_names.iter().map(|n| PortDef { name: Box::leak(n.clone().into_boxed_str()) }).collect()
             }
             NodeType::McpServer => vec![],
-            NodeType::HtmlViewer => vec![PortDef { name: "URL" }],
             NodeType::Profiler => vec![],
             NodeType::HtmlViewer => vec![PortDef { name: "HTML" }],
+            NodeType::ImageNode { .. } => vec![PortDef { name: "Image In" }],
+            NodeType::ImageEffects { .. } => vec![
+                PortDef { name: "Image" }, PortDef { name: "Brightness" }, PortDef { name: "Contrast" },
+                PortDef { name: "Saturation" }, PortDef { name: "Hue" }, PortDef { name: "Exposure" }, PortDef { name: "Gamma" },
+            ],
+            NodeType::Blend { .. } => vec![PortDef { name: "A" }, PortDef { name: "B" }, PortDef { name: "Mix" }],
+            NodeType::Curve { .. } => vec![PortDef { name: "X" }],
+            NodeType::Draw { .. } => vec![],
+            NodeType::Noise { .. } => vec![PortDef { name: "Seed" }, PortDef { name: "Scale" }, PortDef { name: "X" }, PortDef { name: "Y" }],
+            NodeType::ColorCurves { .. } => vec![PortDef { name: "Image" }],
+            NodeType::MlModel { .. } => vec![PortDef { name: "Image" }],
             NodeType::Script { input_names, continuous, .. } => {
                 let mut ports: Vec<PortDef> = Vec::new();
                 if !continuous {
@@ -579,6 +775,14 @@ impl NodeType {
                 PortDef { name: "RAM %" },
                 PortDef { name: "Proc MB" },
             ],
+            NodeType::ImageNode { .. } => vec![PortDef { name: "Image" }],
+            NodeType::ImageEffects { .. } => vec![PortDef { name: "Image" }],
+            NodeType::Blend { .. } => vec![PortDef { name: "Image" }],
+            NodeType::Curve { .. } => vec![PortDef { name: "Y" }, PortDef { name: "Image" }],
+            NodeType::Draw { .. } => vec![PortDef { name: "Image" }, PortDef { name: "Points" }],
+            NodeType::Noise { .. } => vec![PortDef { name: "Value" }, PortDef { name: "Image" }],
+            NodeType::ColorCurves { .. } => vec![PortDef { name: "Image" }],
+            NodeType::MlModel { .. } => vec![PortDef { name: "Result" }],
         }
     }
 
@@ -621,6 +825,14 @@ impl NodeType {
             NodeType::McpServer => [120, 200, 255],
             NodeType::Profiler => [255, 160, 60],
             NodeType::HtmlViewer => [60, 180, 220],
+            NodeType::ImageNode { .. } => [200, 140, 220],
+            NodeType::ImageEffects { .. } => [180, 120, 200],
+            NodeType::Blend { .. } => [160, 100, 180],
+            NodeType::Curve { .. } => [100, 200, 160],
+            NodeType::Draw { .. } => [200, 180, 100],
+            NodeType::Noise { .. } => [140, 180, 140],
+            NodeType::ColorCurves { .. } => [220, 140, 160],
+            NodeType::MlModel { .. } => [200, 80, 255],
         }
     }
 
