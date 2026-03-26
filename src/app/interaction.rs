@@ -129,6 +129,7 @@ impl super::PatchworkApp {
                     self.context_menu_node = None; // No node → canvas menu
                     self.show_context_menu = true;
                     self.context_menu_pos = pos;
+                    self.context_menu_opened_at = ctx.input(|i| i.time);
                 }
             }
         }
@@ -311,21 +312,40 @@ impl super::PatchworkApp {
 
     pub(super) fn context_menu(&mut self, ctx: &egui::Context) {
         if !self.show_context_menu { return; }
-        let orig_style = self.apply_inverse_zoom_style(ctx);
+
+        // Auto-dismiss after 3 seconds if pointer is not over menu
+        let now = ctx.input(|i| i.time);
+        let elapsed = now - self.context_menu_opened_at;
         let pos = self.context_menu_pos;
+        let menu_rect = egui::Rect::from_min_size(pos, egui::vec2(180.0, 280.0));
+        let pointer_on_menu = ctx.pointer_latest_pos().map(|p| menu_rect.contains(p)).unwrap_or(false);
+
+        if elapsed > 3.0 && !pointer_on_menu {
+            self.show_context_menu = false;
+            self.context_menu_node = None;
+            return;
+        }
+
+        // Reset timer when pointer enters menu
+        if pointer_on_menu {
+            self.context_menu_opened_at = now;
+        }
+
+        let orig_style = self.apply_inverse_zoom_style(ctx);
         let mut keep_open = true;
         let on_node = self.context_menu_node.is_some();
+        use crate::icons;
 
         egui::Area::new(egui::Id::new("node_context_menu"))
             .fixed_pos(pos)
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_min_width(120.0 / self.canvas_zoom);
+                    ui.set_min_width(140.0 / self.canvas_zoom);
 
                     if on_node {
                         // ── Node context menu ──────────────────────────
-                        if ui.button("Copy").clicked() {
+                        if icon_menu_item(ui, icons::COPY, "Copy").clicked() {
                             if let Some(id) = self.context_menu_node {
                                 if let Some(node) = self.graph.nodes.get(&id) {
                                     self.clipboard = Some(node.node_type.clone());
@@ -333,7 +353,7 @@ impl super::PatchworkApp {
                             }
                             keep_open = false;
                         }
-                        if ui.button("Duplicate").clicked() {
+                        if icon_menu_item(ui, icons::COPY, "Duplicate").clicked() {
                             if let Some(id) = self.context_menu_node {
                                 if let Some(node) = self.graph.nodes.get(&id) {
                                     let nt = node.node_type.clone();
@@ -347,11 +367,14 @@ impl super::PatchworkApp {
                             keep_open = false;
                         }
                         ui.separator();
-                        // Pin/Unpin toggle
                         if let Some(id) = self.context_menu_node {
                             let is_pinned = self.pinned_nodes.contains(&id);
-                            let pin_label = if is_pinned { "Unpin from screen" } else { "Pin to screen" };
-                            if ui.button(pin_label).clicked() {
+                            let (icon, label) = if is_pinned {
+                                (icons::LOCK_OPEN, "Unpin")
+                            } else {
+                                (icons::PUSH_PIN, "Pin to screen")
+                            };
+                            if icon_menu_item(ui, icon, label).clicked() {
                                 self.push_undo();
                                 if is_pinned {
                                     if let Some(node) = self.graph.nodes.get_mut(&id) {
@@ -373,11 +396,14 @@ impl super::PatchworkApp {
                         }
                         ui.separator();
                         let del_label = if self.selected_nodes.len() > 1 {
-                            format!("Delete {} nodes", self.selected_nodes.len())
+                            format!("Delete {}", self.selected_nodes.len())
                         } else {
                             "Delete".to_string()
                         };
-                        if ui.button(egui::RichText::new(del_label).color(egui::Color32::from_rgb(255, 100, 100))).clicked() {
+                        if ui.add(egui::Button::new(
+                            egui::RichText::new(format!("{} {}", icons::TRASH, del_label))
+                                .color(egui::Color32::from_rgb(255, 100, 100))
+                        ).frame(false)).clicked() {
                             self.push_undo();
                             let to_delete: Vec<NodeId> = if self.selected_nodes.len() > 1 {
                                 self.selected_nodes.drain().collect()
@@ -399,7 +425,7 @@ impl super::PatchworkApp {
                         }
                     } else {
                         // ── Canvas context menu (empty space) ──────────
-                        if ui.button("Add Node...").clicked() {
+                        if icon_menu_item(ui, icons::PLUS, "Add Node...").clicked() {
                             self.show_node_menu = true;
                             self.node_menu_pos = pos;
                             self.node_menu_search.clear();
@@ -407,20 +433,20 @@ impl super::PatchworkApp {
                         }
                         ui.separator();
                         ui.add_enabled_ui(self.undo_history.can_undo(), |ui| {
-                            if ui.button("Undo  ⌘Z").clicked() {
+                            if icon_menu_item(ui, icons::ARROW_UP, "Undo").clicked() {
                                 self.perform_undo();
                                 keep_open = false;
                             }
                         });
                         ui.add_enabled_ui(self.undo_history.can_redo(), |ui| {
-                            if ui.button("Redo  ⌘⇧Z").clicked() {
+                            if icon_menu_item(ui, icons::ARROW_DOWN, "Redo").clicked() {
                                 self.perform_redo();
                                 keep_open = false;
                             }
                         });
                         if self.clipboard.is_some() {
                             ui.separator();
-                            if ui.button("Paste").clicked() {
+                            if icon_menu_item(ui, icons::COPY, "Paste").clicked() {
                                 if let Some(nt) = self.clipboard.clone() {
                                     self.push_undo();
                                     let off_e = self.canvas_offset / self.canvas_zoom;
@@ -432,11 +458,11 @@ impl super::PatchworkApp {
                             }
                         }
                         ui.separator();
-                        if ui.button("Fit All  ⌘1").clicked() {
+                        if icon_menu_item(ui, icons::ARROWS_OUT, "Fit All").clicked() {
                             self.fit_all_nodes(ctx);
                             keep_open = false;
                         }
-                        if ui.button("Reset Zoom  ⌘0").clicked() {
+                        if icon_menu_item(ui, icons::FUNNEL, "Reset Zoom").clicked() {
                             self.canvas_offset = egui::Vec2::ZERO;
                             self.canvas_zoom = 1.0;
                             keep_open = false;
@@ -454,7 +480,6 @@ impl super::PatchworkApp {
             || i.pointer.button_clicked(egui::PointerButton::Secondary))
         {
             if let Some(ptr) = ctx.pointer_latest_pos() {
-                let menu_rect = egui::Rect::from_min_size(pos, egui::vec2(160.0, 250.0));
                 if !menu_rect.contains(ptr) {
                     self.show_context_menu = false;
                     self.context_menu_node = None;
@@ -491,4 +516,11 @@ impl super::PatchworkApp {
             margin - min_y * self.canvas_zoom,
         );
     }
+}
+
+/// Menu item with Phosphor icon + label
+fn icon_menu_item(ui: &mut egui::Ui, icon: &str, label: &str) -> egui::Response {
+    ui.add(egui::Button::new(
+        egui::RichText::new(format!("{}  {}", icon, label))
+    ).frame(false))
 }

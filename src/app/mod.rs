@@ -49,6 +49,7 @@ pub struct PatchworkApp {
     context_menu_node: Option<NodeId>,
     show_context_menu: bool,
     context_menu_pos: egui::Pos2,
+    context_menu_opened_at: f64, // time when menu was opened (for auto-dismiss)
     // Option+drag duplication
     opt_drag_source: Option<NodeId>,
     opt_drag_created: Option<NodeId>,
@@ -117,6 +118,7 @@ impl PatchworkApp {
             context_menu_node: None,
             show_context_menu: false,
             context_menu_pos: egui::Pos2::ZERO,
+            context_menu_opened_at: 0.0,
             opt_drag_source: None,
             opt_drag_created: None,
             canvas_offset: egui::Vec2::ZERO,
@@ -396,6 +398,7 @@ impl PatchworkApp {
                     self.context_menu_node = Some(node_id);
                     self.show_context_menu = true;
                     self.context_menu_pos = ctx.pointer_latest_pos().unwrap_or(r.response.rect.center());
+                    self.context_menu_opened_at = ctx.input(|i| i.time);
                 }
 
                 // Draw selection highlight

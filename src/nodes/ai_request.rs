@@ -41,7 +41,40 @@ pub fn render(
     is_pending: bool,
     actions: &mut Vec<HttpAction>,
     _api_keys: &HashMap<String, String>,
+    port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
+    dragging_from: &mut Option<(NodeId, usize, bool)>,
 ) {
+    // Inline input ports
+    let cfg_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 0);
+    let sys_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 1);
+    let prm_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 2);
+
+    for (port, label, wired) in [(0, "Config", cfg_wired), (1, "System", sys_wired), (2, "Prompt", prm_wired)] {
+        ui.horizontal(|ui| {
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
+            let col = if resp.hovered() || resp.dragged() { egui::Color32::YELLOW }
+                else if wired { egui::Color32::from_rgb(80, 170, 255) }
+                else { egui::Color32::from_rgb(140, 140, 140) };
+            ui.painter().circle_filled(rect.center(), 4.0, col);
+            ui.painter().circle_stroke(rect.center(), 4.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
+            port_positions.insert((node_id, port, true), rect.center());
+            if resp.drag_started() {
+                if let Some(existing) = connections.iter().find(|c| c.to_node == node_id && c.to_port == port) {
+                    *dragging_from = Some((existing.from_node, existing.from_port, true));
+                } else {
+                    *dragging_from = Some((node_id, port, false));
+                }
+            }
+            ui.label(egui::RichText::new(format!("{}:", label)).small());
+            if wired {
+                ui.label(egui::RichText::new("connected").small().color(egui::Color32::from_rgb(80, 170, 255)));
+            } else {
+                ui.label(egui::RichText::new("—").small().color(egui::Color32::GRAY));
+            }
+        });
+    }
+    ui.separator();
+
     // Input 0 = Config JSON, Input 1 = System, Input 2 = Prompt
     let config_input = Graph::static_input_value(connections, values, node_id, 0);
     let system_input = Graph::static_input_value(connections, values, node_id, 1);
@@ -167,15 +200,34 @@ pub fn render(
         });
     }
 
-    // Response preview
+    // Output ports
+    ui.separator();
+    for (port, label) in [(0, "Response"), (1, "Status")] {
+        ui.horizontal(|ui| {
+            let val_str = match port {
+                0 => if response.is_empty() { "—".to_string() } else { format!("{} chars", response.len()) },
+                1 => if status.is_empty() { "—".to_string() } else { status.to_string() },
+                _ => "—".to_string(),
+            };
+            ui.label(egui::RichText::new(format!("{}: {}", label, val_str)).small());
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
+            let col = if resp.hovered() || resp.dragged() { egui::Color32::YELLOW } else { egui::Color32::from_rgb(80, 170, 255) };
+            ui.painter().circle_filled(rect.center(), 5.0, col);
+            ui.painter().circle_stroke(rect.center(), 5.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
+            port_positions.insert((node_id, port, false), rect.center());
+            if resp.drag_started() { *dragging_from = Some((node_id, port, true)); }
+        });
+    }
+
+    // Response preview (collapsible)
     if !response.is_empty() {
-        ui.separator();
-        ui.label(format!("Response ({} chars)", response.len()));
-        egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
-            ui.add(egui::TextEdit::multiline(&mut response.to_string())
-                .code_editor()
-                .desired_width(f32::INFINITY)
-                .interactive(false));
+        ui.collapsing("Response Body", |ui| {
+            egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+                ui.add(egui::TextEdit::multiline(&mut response.to_string())
+                    .code_editor()
+                    .desired_width(f32::INFINITY)
+                    .interactive(false));
+            });
         });
     }
 }

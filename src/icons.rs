@@ -145,7 +145,7 @@ pub fn node_icon(label: &str) -> &'static str {
         // Input
         "Slider" => SLIDERS,
         "Mouse Tracker" => CURSOR_CLICK,
-        "Key Input" => KEYBOARD,
+        "Key Input" | "Keyboard Input" => KEYBOARD,
         "Time" => TIMER,
         "Color" => PALETTE,
         // Math

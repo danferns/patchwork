@@ -570,7 +570,7 @@ impl NodeType {
             NodeType::Monitor => "Monitor",
             NodeType::OscOut { .. } => "OSC Out",
             NodeType::OscIn { .. } => "OSC In",
-            NodeType::KeyInput { .. } => "Key Input",
+            NodeType::KeyInput { .. } => "Keyboard Input",
             NodeType::Palette { .. } => "Node Palette",
             NodeType::HttpRequest { .. } => "HTTP Request",
             NodeType::AiRequest { .. } => "AI Request",
@@ -625,7 +625,7 @@ impl NodeType {
                 ports
             }
             NodeType::Time { .. } => vec![],
-            NodeType::Color { .. } => vec![],
+            NodeType::Color { .. } => vec![PortDef { name: "R" }, PortDef { name: "G" }, PortDef { name: "B" }],
             NodeType::MouseTracker { .. } => vec![],
             NodeType::MidiOut { mode, .. } => match mode {
                 MidiMode::Note => vec![
@@ -893,7 +893,7 @@ impl NodeType {
     /// Whether this node renders its ports inline within the content
     /// instead of as separate lists at top/bottom.
     pub fn inline_ports(&self) -> bool {
-        matches!(self, NodeType::Theme { .. } | NodeType::MidiOut { .. } | NodeType::Synth { .. } | NodeType::WgslViewer { .. })
+        matches!(self, NodeType::Theme { .. } | NodeType::MidiOut { .. } | NodeType::Synth { .. } | NodeType::WgslViewer { .. } | NodeType::Color { .. } | NodeType::ImageEffects { .. } | NodeType::Slider { .. } | NodeType::Blend { .. } | NodeType::HttpRequest { .. } | NodeType::AiRequest { .. })
     }
 }
 

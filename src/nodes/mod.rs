@@ -72,7 +72,7 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
             factory: || NodeType::Color { r: 128, g: 128, b: 255 } },
         NodeCatalogEntry { label: "Mouse Tracker", category: "Input",
             factory: || NodeType::MouseTracker { x: 0.0, y: 0.0 } },
-        NodeCatalogEntry { label: "Key Input", category: "Input",
+        NodeCatalogEntry { label: "Keyboard Input", category: "Input",
             factory: || NodeType::KeyInput { key_name: String::new(), pressed: false, toggle_mode: false, toggled_on: false } },
 
         // ── Math ─────────────────────────────────────────────
@@ -243,7 +243,7 @@ pub fn render_content(
     mcp_active: bool,
 ) {
     match node_type {
-        NodeType::Slider { value, min, max } => slider::render(ui, value, min, max),
+        NodeType::Slider { value, min, max } => slider::render(ui, value, min, max, node_id, values, connections, port_positions, dragging_from),
         NodeType::Display { history, history_max, scope_min, scope_max, scope_height, paused } =>
             display::render(ui, node_id, values, connections, history, history_max, scope_min, scope_max, scope_height, paused),
         NodeType::Add | NodeType::Multiply => math::render(ui, node_id, values),
@@ -252,7 +252,7 @@ pub fn render_content(
         NodeType::WgslViewer { wgsl_code, uniform_names, uniform_types, uniform_values, canvas_w, canvas_h, .. } =>
             wgsl_viewer::render(ui, wgsl_code, uniform_names, uniform_types, uniform_values, canvas_w, canvas_h, node_id, values, connections, wgpu_render_state, pending_disconnects, port_positions, dragging_from),
         NodeType::Time { elapsed, speed, running } => time::render(ui, elapsed, speed, running),
-        NodeType::Color { r, g, b } => color::render(ui, r, g, b),
+        NodeType::Color { r, g, b } => color::render(ui, r, g, b, node_id, values, connections, port_positions, dragging_from),
         NodeType::MouseTracker { x, y } => mouse_tracker::render(ui, *x, *y),
         NodeType::MidiOut { port_name, mode, channel, manual_d1, manual_d2 } =>
             midi_out::render(ui, port_name, mode, channel, node_id, values, connections, midi_out_ports, midi_connected_out, midi_actions, port_positions, dragging_from, pending_disconnects, manual_d1, manual_d2),
@@ -276,9 +276,9 @@ pub fn render_content(
         NodeType::Palette { search } =>
             palette::render(ui, search, node_id),
         NodeType::HttpRequest { url, method, headers, response, status, auto_send, last_hash } =>
-            http_request::render(ui, url, method, headers, response, status, auto_send, last_hash, node_id, values, connections, http_pending, http_actions),
+            http_request::render(ui, url, method, headers, response, status, auto_send, last_hash, node_id, values, connections, http_pending, http_actions, port_positions, dragging_from),
         NodeType::AiRequest { provider, model, response, status, max_tokens, temperature, api_key_name, custom_url } =>
-            ai_request::render(ui, provider, model, response, status, max_tokens, temperature, api_key_name, custom_url, node_id, values, connections, http_pending, http_actions, api_keys),
+            ai_request::render(ui, provider, model, response, status, max_tokens, temperature, api_key_name, custom_url, node_id, values, connections, http_pending, http_actions, api_keys, port_positions, dragging_from),
         NodeType::JsonExtract { path } =>
             json_extract::render(ui, path, node_id, values, connections),
         NodeType::FileMenu => {
@@ -319,8 +319,8 @@ pub fn render_content(
             }
         }
         NodeType::ImageNode { .. } => image_node::render(ui, node_id, node_type, values, connections),
-        NodeType::ImageEffects { .. } => image_effects::render(ui, node_id, node_type, values, connections),
-        NodeType::Blend { .. } => blend::render(ui, node_id, node_type, values, connections, wgpu_render_state),
+        NodeType::ImageEffects { .. } => image_effects::render(ui, node_id, node_type, values, connections, port_positions, dragging_from),
+        NodeType::Blend { .. } => blend::render(ui, node_id, node_type, values, connections, wgpu_render_state, port_positions, dragging_from),
         NodeType::Curve { .. } => curve::render(ui, node_id, node_type, values, connections),
         NodeType::Draw { .. } => draw::render(ui, node_id, node_type),
         NodeType::Noise { .. } => noise::render(ui, node_id, node_type, values, connections),
