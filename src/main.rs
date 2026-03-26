@@ -3,6 +3,7 @@ mod audio;
 mod gpu_image;
 mod graph;
 mod http;
+pub mod icons;
 mod mcp;
 mod midi;
 mod nodes;

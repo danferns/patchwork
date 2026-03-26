@@ -1,5 +1,6 @@
 use crate::audio::{AudioEffect, AudioManager};
 use crate::graph::*;
+use crate::icons;
 use eframe::egui;
 use std::collections::HashMap;
 
@@ -65,15 +66,15 @@ pub fn render(
     for i in 0..num_effects {
         let effect = &mut effects[i];
         ui.horizontal(|ui| {
-            if i > 0 && ui.small_button("↑").clicked() {
+            if i > 0 && icons::icon_button(ui, icons::CARET_UP, "Move up") {
                 swap = Some((i, i - 1));
             }
-            if i < num_effects - 1 && ui.small_button("↓").clicked() {
+            if i < num_effects - 1 && icons::icon_button(ui, icons::CARET_DOWN, "Move down") {
                 swap = Some((i, i + 1));
             }
             ui.label(egui::RichText::new(format!("{}.", i + 1)).small().strong());
             ui.label(egui::RichText::new(effect.name()).strong());
-            if ui.small_button("✕").clicked() {
+            if icons::icon_button(ui, icons::TRASH, "Remove effect") {
                 remove_idx = Some(i);
             }
         });

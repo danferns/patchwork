@@ -91,6 +91,7 @@ struct DeviceRefreshResult {
 
 impl PatchworkApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        crate::icons::setup(&cc.egui_ctx);
         let wgpu_render_state = cc.wgpu_render_state.clone();
         let (ml_tx, ml_rx) = std::sync::mpsc::channel();
         let mut app = Self {

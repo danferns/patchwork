@@ -262,7 +262,37 @@ pub fn render(
     connections: &[Connection],
     wgpu_render_state: &Option<egui_wgpu::RenderState>,
     pending_disconnects: &mut Vec<(NodeId, usize)>,
+    port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
+    dragging_from: &mut Option<(NodeId, usize, bool)>,
 ) {
+    // ── Port 0: WGSL code input (inline) ────────────────────────────
+    {
+        let is_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 0);
+        ui.horizontal(|ui| {
+            let (rect, response) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
+            let col = if response.hovered() || response.dragged() { egui::Color32::YELLOW }
+                else if is_wired { egui::Color32::from_rgb(80, 170, 255) }
+                else { egui::Color32::from_rgb(170, 170, 170) };
+            ui.painter().circle_filled(rect.center(), 5.0, col);
+            ui.painter().circle_stroke(rect.center(), 5.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
+            port_positions.insert((node_id, 0, true), rect.center());
+            if response.drag_started() {
+                if let Some(existing) = connections.iter().find(|c| c.to_node == node_id && c.to_port == 0) {
+                    *dragging_from = Some((existing.from_node, existing.from_port, true));
+                    pending_disconnects.push((node_id, 0));
+                } else {
+                    *dragging_from = Some((node_id, 0, false));
+                }
+            }
+            ui.label(egui::RichText::new("WGSL").small());
+            if is_wired {
+                ui.label(egui::RichText::new("⟵ connected").small().color(egui::Color32::from_rgb(80, 170, 255)));
+            } else {
+                ui.colored_label(egui::Color32::GRAY, "—");
+            }
+        });
+    }
+
     // Read shader code from input port 0
     let input_code = Graph::static_input_value(connections, values, node_id, 0);
     let code = match &input_code {
@@ -363,7 +393,7 @@ pub fn render(
         ui.ctx().data_mut(|d| d.insert_temp(popout_id, popout_open));
     }
 
-    // Inline uniform editing
+    // ── Uniform ports (inline — each with connector + DragValue) ────
     if !uniform_names.is_empty() {
         ui.separator();
         ui.label(egui::RichText::new("Uniforms").small().strong());
@@ -371,40 +401,70 @@ pub fn render(
         let mut pi = 1usize;
         let names_clone = uniform_names.clone();
         let types_clone = uniform_types.clone();
+        let ch_labels = ["R", "G", "B"];
+
         for (i, name) in names_clone.iter().enumerate() {
             let t = types_clone.get(i).map(|s| s.as_str()).unwrap_or("float");
             if t == "color" {
+                // Color group: label row, then ● R [val] ● G [val] ● B [val]
+                ui.label(egui::RichText::new(format!("u.{}", name)).small());
                 ui.horizontal(|ui| {
-                    ui.label(format!("u.{}", name));
                     for c in 0..3 {
-                        let port_connected = connections.iter().any(|cn| cn.to_node == node_id && cn.to_port == pi);
-                        if port_connected {
+                        let port = pi;
+                        let is_wired = connections.iter().any(|cn| cn.to_node == node_id && cn.to_port == port);
+                        // Port circle
+                        let (rect, response) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::click_and_drag());
+                        let col = if response.hovered() || response.dragged() { egui::Color32::YELLOW }
+                            else if is_wired { egui::Color32::from_rgb(80, 170, 255) }
+                            else { egui::Color32::from_rgb(170, 170, 170) };
+                        ui.painter().circle_filled(rect.center(), 4.0, col);
+                        ui.painter().circle_stroke(rect.center(), 4.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
+                        port_positions.insert((node_id, port, true), rect.center());
+                        if response.drag_started() {
+                            if let Some(existing) = connections.iter().find(|cn| cn.to_node == node_id && cn.to_port == port) {
+                                *dragging_from = Some((existing.from_node, existing.from_port, true));
+                                pending_disconnects.push((node_id, port));
+                            } else { *dragging_from = Some((node_id, port, false)); }
+                        }
+                        ui.label(egui::RichText::new(ch_labels[c]).small());
+                        if is_wired {
                             let v = if vi + c < uniform_values.len() { uniform_values[vi + c] } else { 0.0 };
-                            ui.label(format!("{:.2}", v));
+                            ui.label(egui::RichText::new(format!("{:.2}", v)).small().monospace());
                         } else if vi + c < uniform_values.len() {
-                            let old = uniform_values[vi + c];
                             ui.add(egui::DragValue::new(&mut uniform_values[vi + c]).speed(0.01).range(0.0..=1.0));
-                            if uniform_values[vi + c] != old && port_connected {
-                                pending_disconnects.push((node_id, pi));
-                            }
                         }
                         pi += 1;
                     }
                 });
                 vi += 3;
             } else {
+                // Float: ● label [DragValue]
+                let port = pi;
+                let is_wired = connections.iter().any(|cn| cn.to_node == node_id && cn.to_port == port);
                 ui.horizontal(|ui| {
-                    ui.label(format!("u.{}", name));
-                    let port_connected = connections.iter().any(|cn| cn.to_node == node_id && cn.to_port == pi);
-                    if port_connected {
+                    let (rect, response) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::click_and_drag());
+                    let col = if response.hovered() || response.dragged() { egui::Color32::YELLOW }
+                        else if is_wired { egui::Color32::from_rgb(80, 170, 255) }
+                        else { egui::Color32::from_rgb(170, 170, 170) };
+                    ui.painter().circle_filled(rect.center(), 4.0, col);
+                    ui.painter().circle_stroke(rect.center(), 4.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
+                    port_positions.insert((node_id, port, true), rect.center());
+                    if response.drag_started() {
+                        if let Some(existing) = connections.iter().find(|cn| cn.to_node == node_id && cn.to_port == port) {
+                            *dragging_from = Some((existing.from_node, existing.from_port, true));
+                            pending_disconnects.push((node_id, port));
+                        } else { *dragging_from = Some((node_id, port, false)); }
+                    }
+                    ui.label(egui::RichText::new(format!("u.{}", name)).small());
+                    if is_wired {
                         let v = if vi < uniform_values.len() { uniform_values[vi] } else { 0.0 };
-                        ui.label(egui::RichText::new(format!("{:.3}", v)).monospace());
-                        ui.label(egui::RichText::new("linked").small().color(egui::Color32::GRAY));
+                        ui.label(egui::RichText::new(format!("{:.3}", v)).strong().monospace());
+                        ui.label(egui::RichText::new("⟵").small().color(egui::Color32::from_rgb(80, 170, 255)));
                     } else if vi < uniform_values.len() {
                         ui.add(egui::DragValue::new(&mut uniform_values[vi]).speed(0.01));
                     }
-                    pi += 1;
                 });
+                pi += 1;
                 vi += 1;
             }
         }

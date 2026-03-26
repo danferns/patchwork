@@ -69,50 +69,78 @@ fn color_row(
     if let Some(v) = inline_input_val(values, connections, node_id, in_base + 1) { rgb[1] = v.clamp(0.0, 255.0) as u8; }
     if let Some(v) = inline_input_val(values, connections, node_id, in_base + 2) { rgb[2] = v.clamp(0.0, 255.0) as u8; }
 
+    // Label + color swatch (group header)
     ui.horizontal(|ui| {
-        // Input ports on left
-        inline_input(ui, port_positions, dragging_from, node_id, in_base, values, connections);
-        inline_input(ui, port_positions, dragging_from, node_id, in_base + 1, values, connections);
-        inline_input(ui, port_positions, dragging_from, node_id, in_base + 2, values, connections);
-
         ui.label(egui::RichText::new(label).small());
         let mut color = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
         if ui.color_edit_button_srgba(&mut color).changed() {
             *rgb = [color.r(), color.g(), color.b()];
         }
-
-        // Output ports on right
-        inline_output(ui, port_positions, dragging_from, node_id, out_base);
-        inline_output(ui, port_positions, dragging_from, node_id, out_base + 1);
-        inline_output(ui, port_positions, dragging_from, node_id, out_base + 2);
+        // Output ports
+        if out_base > 0 {
+            inline_output(ui, port_positions, dragging_from, node_id, out_base);
+            inline_output(ui, port_positions, dragging_from, node_id, out_base + 1);
+            inline_output(ui, port_positions, dragging_from, node_id, out_base + 2);
+        }
     });
 
-    // Number editing row
-    if use_hsl {
+    // R G B — each with its own connector dot + DragValue
+    let channel_labels = if use_hsl {
         let (h, s, l) = rgb_to_hsl(rgb[0], rgb[1], rgb[2]);
-        let mut hh = h; let mut ss = s; let mut ll = l;
-        let mut changed = false;
-        ui.horizontal(|ui| {
-            ui.add_space(PORT_SIZE * 3.0 + 12.0); // align with above
-            ui.label(egui::RichText::new("H").small());
-            changed |= ui.add(egui::DragValue::new(&mut hh).range(0.0..=360.0).speed(1.0)).changed();
-            ui.label(egui::RichText::new("S").small());
-            changed |= ui.add(egui::DragValue::new(&mut ss).range(0.0..=100.0).speed(0.5)).changed();
-            ui.label(egui::RichText::new("L").small());
-            changed |= ui.add(egui::DragValue::new(&mut ll).range(0.0..=100.0).speed(0.5)).changed();
-        });
-        if changed {
-            let (r, g, b) = hsl_to_rgb(hh, ss, ll);
-            *rgb = [r, g, b];
-        }
+        vec![("H", h, 0.0f32, 360.0f32), ("S", s, 0.0, 100.0), ("L", l, 0.0, 100.0)]
     } else {
-        ui.horizontal(|ui| {
-            ui.add_space(PORT_SIZE * 3.0 + 12.0);
-            ui.add(egui::DragValue::new(&mut rgb[0]).range(0..=255).speed(1.0).prefix("R "));
-            ui.add(egui::DragValue::new(&mut rgb[1]).range(0..=255).speed(1.0).prefix("G "));
-            ui.add(egui::DragValue::new(&mut rgb[2]).range(0..=255).speed(1.0).prefix("B "));
-        });
-    }
+        vec![("R", rgb[0] as f32, 0.0f32, 255.0f32), ("G", rgb[1] as f32, 0.0, 255.0), ("B", rgb[2] as f32, 0.0, 255.0)]
+    };
+
+    ui.horizontal(|ui| {
+        for (ci, (ch_label, _val, min, max)) in channel_labels.iter().enumerate() {
+            let port = in_base + ci;
+            let is_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == port);
+
+            // Port circle
+            let (rect, response) = ui.allocate_exact_size(egui::vec2(PORT_SIZE, PORT_SIZE), egui::Sense::click_and_drag());
+            let col = if response.hovered() || response.dragged() {
+                egui::Color32::YELLOW
+            } else if is_wired {
+                egui::Color32::from_rgb(80, 170, 255)
+            } else {
+                IN_COLOR
+            };
+            ui.painter().circle_filled(rect.center(), PORT_RADIUS, col);
+            ui.painter().circle_stroke(rect.center(), PORT_RADIUS, egui::Stroke::new(1.0, egui::Color32::WHITE));
+            port_positions.insert((node_id, port, true), rect.center());
+
+            if response.drag_started() {
+                if let Some(existing) = connections.iter().find(|c| c.to_node == node_id && c.to_port == port) {
+                    *dragging_from = Some((existing.from_node, existing.from_port, true));
+                } else {
+                    *dragging_from = Some((node_id, port, false));
+                }
+            }
+
+            // Label + value
+            ui.label(egui::RichText::new(*ch_label).small());
+            if is_wired {
+                let v = inline_input_val(values, connections, node_id, port).unwrap_or(0.0);
+                ui.label(egui::RichText::new(format!("{:.0}", v)).small().monospace());
+            } else if use_hsl {
+                let (h, s, l) = rgb_to_hsl(rgb[0], rgb[1], rgb[2]);
+                let mut vals = [h, s, l];
+                if ui.add(egui::DragValue::new(&mut vals[ci]).range(*min..=*max).speed(1.0)).changed() {
+                    let (r, g, b) = hsl_to_rgb(vals[0], vals[1], vals[2]);
+                    // Only update the changed channel's effect
+                    match ci {
+                        0 => { let (nr, ng, nb) = hsl_to_rgb(vals[0], s, l); *rgb = [nr, ng, nb]; }
+                        1 => { let (nr, ng, nb) = hsl_to_rgb(h, vals[1], l); *rgb = [nr, ng, nb]; }
+                        2 => { let (nr, ng, nb) = hsl_to_rgb(h, s, vals[2]); *rgb = [nr, ng, nb]; }
+                        _ => {}
+                    }
+                }
+            } else {
+                ui.add(egui::DragValue::new(&mut rgb[ci]).range(0..=255).speed(1.0));
+            }
+        }
+    });
 }
 
 /// Float row: [in] label [slider] value
@@ -184,6 +212,7 @@ pub fn render(
     rounding: &mut f32,
     spacing: &mut f32,
     use_hsl: &mut bool,
+    background_path: &mut String,
     node_id: NodeId,
     values: &HashMap<(NodeId, usize), PortValue>,
     connections: &[Connection],
@@ -276,9 +305,9 @@ pub fn render(
     ui.separator();
 
     // Colors with inline ports: in ports (left) ● ● ● label [picker] ● ● ● out ports (right)
-    color_row(ui, "BG", bg_color, *use_hsl, port_positions, dragging_from, node_id, 0, 0, values, connections);
-    color_row(ui, "Text", text_color, *use_hsl, port_positions, dragging_from, node_id, 3, 3, values, connections);
-    color_row(ui, "Accent", accent, *use_hsl, port_positions, dragging_from, node_id, 6, 6, values, connections);
+    color_row(ui, "BG", bg_color, *use_hsl, port_positions, dragging_from, node_id, 0, 1, values, connections);
+    color_row(ui, "Text", text_color, *use_hsl, port_positions, dragging_from, node_id, 3, 0, values, connections);
+    color_row(ui, "Accent", accent, *use_hsl, port_positions, dragging_from, node_id, 6, 0, values, connections);
     color_row(ui, "Window", window_bg, *use_hsl, port_positions, dragging_from, node_id, 9, 0, values, connections);
     color_row(ui, "Grid", grid_color, *use_hsl, port_positions, dragging_from, node_id, 12, 0, values, connections);
 
@@ -289,6 +318,67 @@ pub fn render(
     float_row(ui, "Round", rounding, 0.0..=80.0, "px", port_positions, dragging_from, node_id, 16, values, connections);
     float_row(ui, "Space", spacing, 0.0..=12.0, "px", port_positions, dragging_from, node_id, 17, values, connections);
     u8_row(ui, "Opacity", window_alpha, port_positions, dragging_from, node_id, 18, values, connections);
+
+    ui.separator();
+
+    // ── Background image/video ───────────────────────────────────────
+    // Port 19: Background (accepts Image from Image node, WGSL, Video, Blend)
+    ui.horizontal(|ui| {
+        // Input port circle
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(PORT_SIZE, PORT_SIZE), egui::Sense::click_and_drag());
+        let bg_connected = connections.iter().any(|c| c.to_node == node_id && c.to_port == 19);
+        let col = if response.hovered() || response.dragged() {
+            egui::Color32::YELLOW
+        } else if bg_connected {
+            egui::Color32::from_rgb(80, 170, 255)
+        } else {
+            IN_COLOR
+        };
+        ui.painter().circle_filled(rect.center(), PORT_RADIUS, col);
+        ui.painter().circle_stroke(rect.center(), PORT_RADIUS, egui::Stroke::new(1.0, egui::Color32::WHITE));
+        port_positions.insert((node_id, 19, true), rect.center());
+
+        if response.drag_started() {
+            if let Some(existing) = connections.iter().find(|c| c.to_node == node_id && c.to_port == 19) {
+                *dragging_from = Some((existing.from_node, existing.from_port, true));
+            } else {
+                *dragging_from = Some((node_id, 19, false));
+            }
+        }
+
+        ui.label(egui::RichText::new("BG").small());
+
+        if bg_connected {
+            let val = crate::graph::Graph::static_input_value(connections, values, node_id, 19);
+            match &val {
+                PortValue::Image(img) => {
+                    ui.label(egui::RichText::new(format!("{}x{}", img.width, img.height)).small().monospace());
+                }
+                _ => { ui.label(egui::RichText::new("connected").small().color(egui::Color32::GRAY)); }
+            }
+        } else {
+            // File path input + open button
+            if ui.small_button("Open").clicked() {
+                if let Some(p) = rfd::FileDialog::new()
+                    .add_filter("Images", &["png", "jpg", "jpeg", "gif", "bmp", "webp"])
+                    .pick_file()
+                {
+                    *background_path = p.display().to_string();
+                }
+            }
+        }
+    });
+    if !background_path.is_empty() {
+        ui.horizontal(|ui| {
+            ui.add_space(PORT_SIZE + 4.0);
+            let short = if background_path.len() > 25 {
+                format!("...{}", &background_path[background_path.len()-25..])
+            } else {
+                background_path.clone()
+            };
+            ui.label(egui::RichText::new(short).small().monospace().color(egui::Color32::GRAY));
+        });
+    }
 }
 
 /// Apply theme settings to the egui context.

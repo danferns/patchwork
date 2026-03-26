@@ -122,6 +122,17 @@ impl super::PatchworkApp {
                 }
             }
         }
+        // Right-click on empty canvas → canvas context menu
+        if ctx.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary)) {
+            if let Some(pos) = ctx.pointer_latest_pos() {
+                if !self.node_rects.values().any(|r| r.contains(pos)) && !self.show_context_menu {
+                    self.context_menu_node = None; // No node → canvas menu
+                    self.show_context_menu = true;
+                    self.context_menu_pos = pos;
+                }
+            }
+        }
+
         // Box selection & click-on-empty deselect
         let primary_down = ctx.input(|i| i.pointer.button_down(egui::PointerButton::Primary));
         let primary_pressed = ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
@@ -303,6 +314,7 @@ impl super::PatchworkApp {
         let orig_style = self.apply_inverse_zoom_style(ctx);
         let pos = self.context_menu_pos;
         let mut keep_open = true;
+        let on_node = self.context_menu_node.is_some();
 
         egui::Area::new(egui::Id::new("node_context_menu"))
             .fixed_pos(pos)
@@ -311,109 +323,124 @@ impl super::PatchworkApp {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_min_width(120.0 / self.canvas_zoom);
 
-                    // Undo / Redo
-                    ui.add_enabled_ui(self.undo_history.can_undo(), |ui| {
-                        if ui.button("Undo  ⌘Z").clicked() {
-                            self.perform_undo();
-                            keep_open = false;
-                        }
-                    });
-                    ui.add_enabled_ui(self.undo_history.can_redo(), |ui| {
-                        if ui.button("Redo  ⌘⇧Z").clicked() {
-                            self.perform_redo();
-                            keep_open = false;
-                        }
-                    });
-                    ui.separator();
-
-                    if ui.button("Copy").clicked() {
-                        if let Some(id) = self.context_menu_node {
-                            if let Some(node) = self.graph.nodes.get(&id) {
-                                self.clipboard = Some(node.node_type.clone());
-                            }
-                        }
-                        keep_open = false;
-                    }
-                    if self.clipboard.is_some() {
-                        if ui.button("Paste").clicked() {
-                            if let Some(nt) = self.clipboard.clone() {
-                                self.push_undo();
-                                let off_e = self.canvas_offset / self.canvas_zoom;
-                                let new_id = self.graph.add_node(nt, [pos.x - off_e.x + 20.0, pos.y - off_e.y + 20.0]);
-                                self.selected_nodes.clear();
-                                self.selected_nodes.insert(new_id);
-                            }
-                            keep_open = false;
-                        }
-                    }
-                    if ui.button("Duplicate").clicked() {
-                        if let Some(id) = self.context_menu_node {
-                            if let Some(node) = self.graph.nodes.get(&id) {
-                                let nt = node.node_type.clone();
-                                let p = node.pos;
-                                self.push_undo();
-                                let new_id = self.graph.add_node(nt, [p[0] + 30.0, p[1] + 30.0]);
-                                self.selected_nodes.clear();
-                                self.selected_nodes.insert(new_id);
-                            }
-                        }
-                        keep_open = false;
-                    }
-                    ui.separator();
-                    // Pin/Unpin toggle
-                    if let Some(id) = self.context_menu_node {
-                        let is_pinned = self.pinned_nodes.contains(&id);
-                        let pin_label = if is_pinned { "Unpin from screen" } else { "Pin to screen" };
-                        if ui.button(pin_label).clicked() {
-                            self.push_undo();
-                            if is_pinned {
-                                // Unpin: pos is currently screen pixels, convert to canvas
-                                // canvas = (screen - offset) / zoom
-                                if let Some(node) = self.graph.nodes.get_mut(&id) {
-                                    let cx = (node.pos[0] - self.canvas_offset.x) / self.canvas_zoom;
-                                    let cy = (node.pos[1] - self.canvas_offset.y) / self.canvas_zoom;
-                                    node.pos = [cx, cy];
+                    if on_node {
+                        // ── Node context menu ──────────────────────────
+                        if ui.button("Copy").clicked() {
+                            if let Some(id) = self.context_menu_node {
+                                if let Some(node) = self.graph.nodes.get(&id) {
+                                    self.clipboard = Some(node.node_type.clone());
                                 }
-                                self.pinned_nodes.remove(&id);
-                            } else {
-                                // Pin: pos is currently canvas coords, convert to screen pixels
-                                // screen = canvas * zoom + offset
-                                if let Some(node) = self.graph.nodes.get_mut(&id) {
-                                    let sx = node.pos[0] * self.canvas_zoom + self.canvas_offset.x;
-                                    let sy = node.pos[1] * self.canvas_zoom + self.canvas_offset.y;
-                                    node.pos = [sx, sy];
-                                }
-                                self.pinned_nodes.insert(id);
                             }
                             keep_open = false;
                         }
-                    }
-                    ui.separator();
-                    let del_label = if self.selected_nodes.len() > 1 {
-                        format!("Delete {} nodes", self.selected_nodes.len())
-                    } else {
-                        "Delete".to_string()
-                    };
-                    if ui.button(egui::RichText::new(del_label).color(egui::Color32::from_rgb(255, 100, 100))).clicked() {
-                        self.push_undo();
-                        // Delete all selected nodes (or just the context menu node if not in selection)
-                        let to_delete: Vec<NodeId> = if self.selected_nodes.len() > 1 {
-                            self.selected_nodes.drain().collect()
-                        } else if let Some(id) = self.context_menu_node {
-                            self.selected_nodes.remove(&id);
-                            vec![id]
+                        if ui.button("Duplicate").clicked() {
+                            if let Some(id) = self.context_menu_node {
+                                if let Some(node) = self.graph.nodes.get(&id) {
+                                    let nt = node.node_type.clone();
+                                    let p = node.pos;
+                                    self.push_undo();
+                                    let new_id = self.graph.add_node(nt, [p[0] + 30.0, p[1] + 30.0]);
+                                    self.selected_nodes.clear();
+                                    self.selected_nodes.insert(new_id);
+                                }
+                            }
+                            keep_open = false;
+                        }
+                        ui.separator();
+                        // Pin/Unpin toggle
+                        if let Some(id) = self.context_menu_node {
+                            let is_pinned = self.pinned_nodes.contains(&id);
+                            let pin_label = if is_pinned { "Unpin from screen" } else { "Pin to screen" };
+                            if ui.button(pin_label).clicked() {
+                                self.push_undo();
+                                if is_pinned {
+                                    if let Some(node) = self.graph.nodes.get_mut(&id) {
+                                        let cx = (node.pos[0] - self.canvas_offset.x) / self.canvas_zoom;
+                                        let cy = (node.pos[1] - self.canvas_offset.y) / self.canvas_zoom;
+                                        node.pos = [cx, cy];
+                                    }
+                                    self.pinned_nodes.remove(&id);
+                                } else {
+                                    if let Some(node) = self.graph.nodes.get_mut(&id) {
+                                        let sx = node.pos[0] * self.canvas_zoom + self.canvas_offset.x;
+                                        let sy = node.pos[1] * self.canvas_zoom + self.canvas_offset.y;
+                                        node.pos = [sx, sy];
+                                    }
+                                    self.pinned_nodes.insert(id);
+                                }
+                                keep_open = false;
+                            }
+                        }
+                        ui.separator();
+                        let del_label = if self.selected_nodes.len() > 1 {
+                            format!("Delete {} nodes", self.selected_nodes.len())
                         } else {
-                            vec![]
+                            "Delete".to_string()
                         };
-                        for id in to_delete {
-                            self.midi.cleanup_node(id);
-                            self.serial.cleanup_node(id);
-                            self.osc.cleanup_node(id);
-                            self.ob.cleanup_node(id);
-                            self.audio.cleanup_node(id);
-                            self.graph.remove_node(id);
+                        if ui.button(egui::RichText::new(del_label).color(egui::Color32::from_rgb(255, 100, 100))).clicked() {
+                            self.push_undo();
+                            let to_delete: Vec<NodeId> = if self.selected_nodes.len() > 1 {
+                                self.selected_nodes.drain().collect()
+                            } else if let Some(id) = self.context_menu_node {
+                                self.selected_nodes.remove(&id);
+                                vec![id]
+                            } else {
+                                vec![]
+                            };
+                            for id in to_delete {
+                                self.midi.cleanup_node(id);
+                                self.serial.cleanup_node(id);
+                                self.osc.cleanup_node(id);
+                                self.ob.cleanup_node(id);
+                                self.audio.cleanup_node(id);
+                                self.graph.remove_node(id);
+                            }
+                            keep_open = false;
                         }
-                        keep_open = false;
+                    } else {
+                        // ── Canvas context menu (empty space) ──────────
+                        if ui.button("Add Node...").clicked() {
+                            self.show_node_menu = true;
+                            self.node_menu_pos = pos;
+                            self.node_menu_search.clear();
+                            keep_open = false;
+                        }
+                        ui.separator();
+                        ui.add_enabled_ui(self.undo_history.can_undo(), |ui| {
+                            if ui.button("Undo  ⌘Z").clicked() {
+                                self.perform_undo();
+                                keep_open = false;
+                            }
+                        });
+                        ui.add_enabled_ui(self.undo_history.can_redo(), |ui| {
+                            if ui.button("Redo  ⌘⇧Z").clicked() {
+                                self.perform_redo();
+                                keep_open = false;
+                            }
+                        });
+                        if self.clipboard.is_some() {
+                            ui.separator();
+                            if ui.button("Paste").clicked() {
+                                if let Some(nt) = self.clipboard.clone() {
+                                    self.push_undo();
+                                    let off_e = self.canvas_offset / self.canvas_zoom;
+                                    let new_id = self.graph.add_node(nt, [pos.x - off_e.x + 20.0, pos.y - off_e.y + 20.0]);
+                                    self.selected_nodes.clear();
+                                    self.selected_nodes.insert(new_id);
+                                }
+                                keep_open = false;
+                            }
+                        }
+                        ui.separator();
+                        if ui.button("Fit All  ⌘1").clicked() {
+                            self.fit_all_nodes(ctx);
+                            keep_open = false;
+                        }
+                        if ui.button("Reset Zoom  ⌘0").clicked() {
+                            self.canvas_offset = egui::Vec2::ZERO;
+                            self.canvas_zoom = 1.0;
+                            keep_open = false;
+                        }
                     }
                 });
             });
@@ -422,13 +449,12 @@ impl super::PatchworkApp {
             self.show_context_menu = false;
             self.context_menu_node = None;
         }
-        // Click elsewhere to close (primary or secondary click outside the menu)
+        // Click elsewhere to close
         if ctx.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary)
             || i.pointer.button_clicked(egui::PointerButton::Secondary))
         {
             if let Some(ptr) = ctx.pointer_latest_pos() {
-                // Only dismiss if click is outside the context menu area
-                let menu_rect = egui::Rect::from_min_size(pos, egui::vec2(140.0, 200.0));
+                let menu_rect = egui::Rect::from_min_size(pos, egui::vec2(160.0, 250.0));
                 if !menu_rect.contains(ptr) {
                     self.show_context_menu = false;
                     self.context_menu_node = None;

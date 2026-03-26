@@ -191,6 +191,7 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
                 bg_color: [30, 30, 30], text_color: [220, 220, 220],
                 window_bg: [40, 40, 40], window_alpha: 240,
                 grid_color: [12, 12, 12], rounding: 4.0, spacing: 4.0, use_hsl: false,
+                background_path: String::new(),
             } },
         NodeCatalogEntry { label: "Console", category: "Utility",
             factory: || NodeType::Console { messages: Vec::new() } },
@@ -249,7 +250,7 @@ pub fn render_content(
         NodeType::File { path, content } => file::render(ui, path, content),
         NodeType::TextEditor { content } => text_editor::render(ui, content, node_id, values, connections, pending_disconnects),
         NodeType::WgslViewer { wgsl_code, uniform_names, uniform_types, uniform_values, canvas_w, canvas_h, .. } =>
-            wgsl_viewer::render(ui, wgsl_code, uniform_names, uniform_types, uniform_values, canvas_w, canvas_h, node_id, values, connections, wgpu_render_state, pending_disconnects),
+            wgsl_viewer::render(ui, wgsl_code, uniform_names, uniform_types, uniform_values, canvas_w, canvas_h, node_id, values, connections, wgpu_render_state, pending_disconnects, port_positions, dragging_from),
         NodeType::Time { elapsed, speed, running } => time::render(ui, elapsed, speed, running),
         NodeType::Color { r, g, b } => color::render(ui, r, g, b),
         NodeType::MouseTracker { x, y } => mouse_tracker::render(ui, *x, *y),
@@ -259,8 +260,8 @@ pub fn render_content(
             midi_in::render(ui, port_name, channel, note, velocity, log, node_id, midi_in_ports, midi_connected_in, midi_actions),
         NodeType::Serial { port_name, baud_rate, log, last_line, send_buf } =>
             serial::render(ui, port_name, baud_rate, log, last_line, send_buf, node_id, values, connections, serial_ports, serial_connected, serial_actions),
-        NodeType::Theme { dark_mode, accent, font_size, bg_color, text_color, window_bg, window_alpha, grid_color, rounding, spacing, use_hsl } =>
-            theme::render(ui, dark_mode, accent, font_size, bg_color, text_color, window_bg, window_alpha, grid_color, rounding, spacing, use_hsl, node_id, values, connections, port_positions, dragging_from),
+        NodeType::Theme { dark_mode, accent, font_size, bg_color, text_color, window_bg, window_alpha, grid_color, rounding, spacing, use_hsl, background_path } =>
+            theme::render(ui, dark_mode, accent, font_size, bg_color, text_color, window_bg, window_alpha, grid_color, rounding, spacing, use_hsl, background_path, node_id, values, connections, port_positions, dragging_from),
         NodeType::Comment { text } => comment::render(ui, text),
         NodeType::Console { messages } => console::render(ui, messages),
         NodeType::Monitor => monitor::render(ui, monitor_state),

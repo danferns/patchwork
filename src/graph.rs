@@ -229,6 +229,9 @@ pub enum NodeType {
         spacing: f32,
         #[serde(default)]
         use_hsl: bool,
+        /// Background image/video path (shown on canvas behind nodes)
+        #[serde(default)]
+        background_path: String,
     },
     Serial {
         port_name: String,
@@ -647,6 +650,7 @@ impl NodeType {
                 PortDef { name: "Rounding" },
                 PortDef { name: "Spacing" },
                 PortDef { name: "Win Alpha" },
+                PortDef { name: "Background" },
             ],
             NodeType::Serial { .. } => vec![PortDef { name: "Send" }],
             NodeType::Comment { .. } => vec![],
@@ -889,7 +893,7 @@ impl NodeType {
     /// Whether this node renders its ports inline within the content
     /// instead of as separate lists at top/bottom.
     pub fn inline_ports(&self) -> bool {
-        matches!(self, NodeType::Theme { .. } | NodeType::MidiOut { .. } | NodeType::Synth { .. })
+        matches!(self, NodeType::Theme { .. } | NodeType::MidiOut { .. } | NodeType::Synth { .. } | NodeType::WgslViewer { .. })
     }
 }
 

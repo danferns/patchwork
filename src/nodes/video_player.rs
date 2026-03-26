@@ -308,16 +308,27 @@ pub fn render_video(
     }
 }
 
-/// Get cached camera list (refreshes every 5 seconds, not every frame)
+/// Get cached camera list — uses background thread to avoid blocking UI.
+/// Returns stale data while refresh is in progress.
 fn cached_camera_list() -> Vec<(u32, String)> {
-    CAMERA_LIST_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if cache.0.elapsed().as_secs() >= 5 || cache.1.is_empty() {
-            cache.1 = list_cameras();
-            cache.0 = std::time::Instant::now();
-        }
-        cache.1.clone()
-    })
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<(std::time::Instant, Vec<(u32, String)>, bool)>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new((std::time::Instant::now() - std::time::Duration::from_secs(100), Vec::new(), false)));
+    let mut guard = cache.lock().unwrap();
+    let (last_refresh, ref cameras, ref mut refreshing) = *guard;
+    if last_refresh.elapsed().as_secs() >= 10 && !*refreshing {
+        *refreshing = true;
+        let cache_ref = cache.clone();
+        std::thread::spawn(move || {
+            let result = list_cameras();
+            if let Ok(mut g) = cache_ref.lock() {
+                g.0 = std::time::Instant::now();
+                g.1 = result;
+                g.2 = false;
+            }
+        });
+    }
+    cameras.clone()
 }
 
 // ── Camera Node ──────────────────────────────────────────────────────────────
