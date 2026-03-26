@@ -38,7 +38,7 @@ pub enum ObMessage {
 #[derive(Debug, Clone)]
 pub struct ObDevice {
     pub device_type: String,
-    pub id: u8,
+    pub _id: u8,
     pub is_active: bool,
     pub last_seen: Instant,
     /// Action-keyed values. For joystick: {"x": -0.2, "y": 0.5, "btn": 0.0}
@@ -50,7 +50,7 @@ impl ObDevice {
     pub fn new(device_type: &str, id: u8) -> Self {
         Self {
             device_type: device_type.to_string(),
-            id,
+            _id: id,
             is_active: true,
             last_seen: Instant::now(),
             values: HashMap::new(),
@@ -100,11 +100,14 @@ impl ObDevice {
 
 // ── Hub Instance ─────────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 pub struct ObHub {
     pub port_name: String,
     pub is_connected: bool,
     pub devices: HashMap<(String, u8), ObDevice>,
     pub log: Vec<String>,
+    /// Warning if writer clone failed (read-only mode)
+    pub write_warning: Option<String>,
     rx: mpsc::Receiver<ObMessage>,
     thread: Option<std::thread::JoinHandle<()>>,
     stop_signal: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -143,7 +146,10 @@ impl ObHub {
                 }
             })?;
 
-        let writer = port.try_clone().ok().map(|p| -> Box<dyn std::io::Write + Send> { Box::new(p) });
+        let (writer, write_warning) = match port.try_clone() {
+            Ok(p) => (Some(Box::new(p) as Box<dyn std::io::Write + Send>), None),
+            Err(e) => (None, Some(format!("⚠ Cannot send commands: port clone failed ({}). Read-only mode.", e))),
+        };
 
         let (tx, rx) = mpsc::channel();
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -183,11 +189,15 @@ impl ObHub {
             is_connected: true,
             devices: HashMap::new(),
             log: Vec::new(),
+            write_warning: write_warning.clone(),
             rx,
             thread: Some(thread),
             stop_signal: stop,
             writer,
         };
+        if let Some(ref warn) = write_warning {
+            hub.log_push(warn.clone());
+        }
         hub.send_command("ACK");
         Ok(hub)
     }
@@ -195,8 +205,11 @@ impl ObHub {
     /// Send a command string to the serial port
     pub fn send_command(&mut self, cmd: &str) {
         if let Some(ref mut w) = self.writer {
-            let _ = write!(w, "{}\n", cmd);
+            if let Err(e) = write!(w, "{}\n", cmd) {
+                self.log_push(format!("⚠ Write failed: {}", e));
+            }
         }
+        // No writer = read-only mode (warning already shown in UI)
     }
 
     /// Poll for new messages, update device states
@@ -271,6 +284,7 @@ impl ObHub {
     }
 
     /// List all devices of a given type
+    #[allow(dead_code)]
     pub fn devices_of_type(&self, device_type: &str) -> Vec<&ObDevice> {
         self.devices
             .iter()
@@ -342,6 +356,7 @@ impl ObManager {
     }
 
     /// Get device value from a specific hub
+    #[allow(dead_code)]
     pub fn get_device_value(&self, hub_node_id: NodeId, device_type: &str, id: u8, key: &str) -> f32 {
         self.hubs
             .get(&hub_node_id)

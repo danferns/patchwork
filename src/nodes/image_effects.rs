@@ -47,28 +47,6 @@ pub fn render(
     }
 }
 
-/// Downsample an image for faster preview processing
-fn downsample(img: &ImageData, max_dim: u32) -> ImageData {
-    if img.width <= max_dim && img.height <= max_dim {
-        return img.clone();
-    }
-    let scale = max_dim as f32 / img.width.max(img.height) as f32;
-    let tw = (img.width as f32 * scale).max(1.0) as u32;
-    let th = (img.height as f32 * scale).max(1.0) as u32;
-    let mut pixels = vec![0u8; (tw * th * 4) as usize];
-    for y in 0..th {
-        for x in 0..tw {
-            let sx = (x as f32 / scale) as u32;
-            let sy = (y as f32 / scale) as u32;
-            let si = ((sy * img.width + sx) * 4) as usize;
-            let di = ((y * tw + x) * 4) as usize;
-            if si + 3 < img.pixels.len() && di + 3 < pixels.len() {
-                pixels[di..di+4].copy_from_slice(&img.pixels[si..si+4]);
-            }
-        }
-    }
-    ImageData::new(tw, th, pixels)
-}
 
 /// Process image with effects. Works on full resolution.
 pub fn process(img: &ImageData, brightness: f32, contrast: f32, saturation: f32, hue: f32, exposure: f32, gamma: f32) -> Arc<ImageData> {

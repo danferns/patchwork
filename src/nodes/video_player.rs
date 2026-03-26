@@ -9,8 +9,8 @@ use std::sync::{mpsc, Arc};
 struct VideoDecoder {
     _process: Child,
     frame_rx: mpsc::Receiver<Arc<ImageData>>,
-    width: u32,
-    height: u32,
+    _width: u32,
+    _height: u32,
     frame_changed: bool,
 }
 
@@ -104,8 +104,8 @@ impl VideoDecoder {
         Ok(Self {
             _process: process,
             frame_rx: rx,
-            width,
-            height,
+            _width: width,
+            _height: height,
             frame_changed: false,
         })
     }

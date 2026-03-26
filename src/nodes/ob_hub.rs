@@ -68,6 +68,13 @@ pub fn render(
         ui.label(egui::RichText::new("Close other apps using this port and retry").small().color(egui::Color32::GRAY));
     }
 
+    // Show write warning if port clone failed
+    if let Some(hub) = ob_manager.get_hub(node_id) {
+        if let Some(ref warn) = hub.write_warning {
+            ui.colored_label(egui::Color32::from_rgb(255, 180, 60), warn);
+        }
+    }
+
     // Show connected devices
     if let Some(hub) = ob_manager.get_hub(node_id) {
         let device_count = hub.devices.len();

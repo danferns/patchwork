@@ -86,6 +86,7 @@ struct GpuBlendResources {
     uniform_buffer: wgpu::Buffer,
 }
 
+#[allow(dead_code)]
 struct GpuBlendInstance {
     _bind_group: wgpu::BindGroup,
     output_texture: wgpu::Texture,
@@ -442,6 +443,7 @@ fn upload_texture(device: &wgpu::Device, queue: &wgpu::Queue, img: &ImageData, l
 }
 
 /// Readback GPU texture to CPU ImageData (blocking)
+#[allow(dead_code)]
 pub fn readback_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,

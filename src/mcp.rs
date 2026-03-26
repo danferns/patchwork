@@ -40,6 +40,7 @@ pub enum McpCommand {
     GetPortValues { node_id: Option<NodeId> },
     SaveProject { path: String },
     LoadProject { path: String },
+    #[allow(dead_code)]
     GetGraph,
     CreateWorkflow { nodes: Vec<WorkflowNode>, connections: Vec<WorkflowConn> },
 }

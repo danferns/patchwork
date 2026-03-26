@@ -160,7 +160,7 @@ setTimeout(_pwPoll, 1000);
 pub fn render(
     ui: &mut egui::Ui,
     node_id: NodeId,
-    node_type: &mut NodeType,
+    _node_type: &mut NodeType,
     values: &HashMap<(NodeId, usize), PortValue>,
     connections: &[Connection],
 ) {

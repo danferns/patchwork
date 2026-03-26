@@ -14,7 +14,7 @@ pub fn render(
 
     // Detect state from log content
     let has_client = log_entries.iter().any(|e| e.contains("Client initialized"));
-    let has_commands = log_entries.iter().any(|e| e.starts_with('→'));
+    let _has_commands = log_entries.iter().any(|e| e.starts_with('→'));
 
     // Status
     ui.horizontal(|ui| {

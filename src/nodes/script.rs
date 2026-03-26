@@ -83,8 +83,8 @@ pub fn render(
 
     // ── Code ──
     // Check if code is coming from input port
-    let code_port_idx: usize = if *continuous { 0 } else { 1 };
-    let code_connected = _values.iter().any(|((nid, _), _)| *nid == _node_id) ||
+    let _code_port_idx: usize = if *continuous { 0 } else { 1 };
+    let _code_connected = _values.iter().any(|((nid, _), _)| *nid == _node_id) ||
         false; // simplified check
     // Check connections for the Code port
     ui.separator();

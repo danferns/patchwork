@@ -7,7 +7,7 @@ pub fn render(
     ui: &mut egui::Ui,
     node_id: NodeId,
     node_type: &mut NodeType,
-    values: &HashMap<(NodeId, usize), PortValue>,
+    _values: &HashMap<(NodeId, usize), PortValue>,
     connections: &[Connection],
     audio: &AudioManager,
 ) {

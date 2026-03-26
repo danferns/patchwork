@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 pub fn render(
     ui: &mut egui::Ui,
-    node_id: NodeId,
+    _node_id: NodeId,
     node_type: &mut NodeType,
     _values: &HashMap<(NodeId, usize), PortValue>,
     _connections: &[Connection],

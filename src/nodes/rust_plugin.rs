@@ -2,7 +2,7 @@ use crate::graph::*;
 use eframe::egui;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc;
+
 
 /// Build status from background compilation thread
 #[derive(Clone, Debug)]
@@ -18,8 +18,8 @@ pub fn render(
     ui: &mut egui::Ui,
     node_id: NodeId,
     node_type: &mut NodeType,
-    values: &HashMap<(NodeId, usize), PortValue>,
-    connections: &[Connection],
+    _values: &HashMap<(NodeId, usize), PortValue>,
+    _connections: &[Connection],
 ) {
     let (input_names, output_names, code, error, last_values) = match node_type {
         NodeType::RustPlugin { input_names, output_names, code, error, last_values, .. } =>
@@ -257,7 +257,7 @@ pub fn evaluate(
     };
 
     // Load and call the plugin
-    let lib_id = egui::Id::new(("rust_plugin_lib", node_id));
+    let _lib_id = egui::Id::new(("rust_plugin_lib", node_id));
 
     // Collect input values as f64
     let input_f64: Vec<f64> = inputs.iter().map(|v| v.as_float() as f64).collect();

@@ -225,7 +225,7 @@ pub struct AudioManager {
     pub state: Arc<Mutex<SharedAudioState>>,
     stream: Option<cpal::Stream>,
     pub output_device_name: String,
-    pub input_device_name: String,
+    pub _input_device_name: String,
     // File playback via rodio
     pub rodio_sink: Option<rodio::Sink>,
     rodio_stream: Option<rodio::OutputStream>,
@@ -244,7 +244,7 @@ impl AudioManager {
             state,
             stream: None,
             output_device_name: String::new(),
-            input_device_name: String::new(),
+            _input_device_name: String::new(),
             rodio_sink: None,
             rodio_stream: None,
             _rodio_handle: None,
@@ -260,7 +260,7 @@ impl AudioManager {
             state: Arc::new(Mutex::new(SharedAudioState::default())),
             stream: None,
             output_device_name: String::new(),
-            input_device_name: String::new(),
+            _input_device_name: String::new(),
             rodio_sink: None,
             rodio_stream: None,
             _rodio_handle: None,
@@ -271,6 +271,7 @@ impl AudioManager {
     }
 
     /// Refresh cached device lists (call every ~60 frames, not every frame)
+    #[allow(dead_code)]
     pub fn refresh_devices(&mut self) {
         let host = cpal::default_host();
         self.cached_output_devices = host.output_devices()
@@ -473,7 +474,7 @@ fn audio_callback(
                 }
 
                 for frame in 0..num_frames {
-                    let mut sample = params.waveform.sample(params.phase) * params.amplitude;
+                    let sample = params.waveform.sample(params.phase) * params.amplitude;
 
                     // Advance phase
                     params.phase += params.frequency / sample_rate;

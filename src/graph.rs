@@ -35,6 +35,7 @@ impl ImageData {
     pub fn new(width: u32, height: u32, pixels: Vec<u8>) -> Self {
         Self { width, height, pixels }
     }
+    #[allow(dead_code)]
     pub fn solid(width: u32, height: u32, r: u8, g: u8, b: u8, a: u8) -> Self {
         let pixels = vec![r, g, b, a].repeat((width * height) as usize);
         Self { width, height, pixels }
