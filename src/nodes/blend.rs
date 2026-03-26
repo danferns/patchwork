@@ -1,5 +1,7 @@
 use crate::graph::*;
+use crate::gpu_image::GpuBlendCallback;
 use eframe::egui;
+use eframe::egui_wgpu;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -11,6 +13,7 @@ pub fn render(
     node_type: &mut NodeType,
     values: &HashMap<(NodeId, usize), PortValue>,
     connections: &[Connection],
+    wgpu_render_state: &Option<egui_wgpu::RenderState>,
 ) {
     let (mode, mix) = match node_type {
         NodeType::Blend { mode, mix } => (mode, mix),
@@ -43,6 +46,31 @@ pub fn render(
     let has_b = matches!(&b, PortValue::Image(_));
     if has_a && has_b {
         ui.colored_label(egui::Color32::from_rgb(80, 200, 80), "A + B connected");
+
+        // GPU-accelerated inline preview via wgpu callback
+        if let (PortValue::Image(img_a), PortValue::Image(img_b)) = (&a, &b) {
+            let preview_w = ui.available_width().min(250.0);
+            let aspect = img_a.height as f32 / img_a.width as f32;
+            let preview_h = preview_w * aspect;
+
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(preview_w, preview_h), egui::Sense::hover());
+
+            // Schedule GPU blend + render via egui callback
+            let target_format = wgpu_render_state.as_ref()
+                .map(|rs| rs.target_format)
+                .unwrap_or(eframe::egui_wgpu::wgpu::TextureFormat::Bgra8UnormSrgb);
+            ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+                rect,
+                GpuBlendCallback {
+                    node_id,
+                    mode: *mode as u32,
+                    mix: *mix,
+                    img_a: img_a.clone(),
+                    img_b: img_b.clone(),
+                    target_format,
+                },
+            ));
+        }
     } else {
         if !has_a { ui.colored_label(egui::Color32::GRAY, "Connect Image A"); }
         if !has_b { ui.colored_label(egui::Color32::GRAY, "Connect Image B"); }

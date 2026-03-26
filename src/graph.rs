@@ -466,6 +466,40 @@ pub enum NodeType {
         #[serde(default)]
         active_channel: u8,
     },
+    VideoPlayer {
+        #[serde(default)]
+        path: String,
+        #[serde(default)]
+        playing: bool,
+        #[serde(default)]
+        looping: bool,
+        #[serde(default = "default_video_w")]
+        res_w: u32,
+        #[serde(default = "default_video_h")]
+        res_h: u32,
+        #[serde(skip)]
+        current_frame: Option<Arc<ImageData>>,
+        #[serde(default)]
+        duration: f32,
+        #[serde(default = "default_speed")]
+        speed: f32,
+        #[serde(default)]
+        status: String,
+    },
+    Camera {
+        #[serde(default)]
+        device_index: u32,
+        #[serde(default = "default_video_w")]
+        res_w: u32,
+        #[serde(default = "default_video_h")]
+        res_h: u32,
+        #[serde(default)]
+        active: bool,
+        #[serde(skip)]
+        current_frame: Option<Arc<ImageData>>,
+        #[serde(default)]
+        status: String,
+    },
     MlModel {
         #[serde(default)]
         model_path: String,
@@ -483,6 +517,9 @@ pub enum NodeType {
 }
 
 fn default_confidence() -> f32 { 0.05 }
+fn default_video_w() -> u32 { 640 }
+fn default_video_h() -> u32 { 480 }
+fn default_speed() -> f32 { 1.0 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DrawStroke {
@@ -550,6 +587,8 @@ impl NodeType {
             NodeType::Draw { .. } => "Draw",
             NodeType::Noise { .. } => "Noise",
             NodeType::ColorCurves { .. } => "Color Curves",
+            NodeType::VideoPlayer { .. } => "Video Player",
+            NodeType::Camera { .. } => "Camera",
             NodeType::MlModel { .. } => "ML Model",
         }
     }
@@ -654,6 +693,8 @@ impl NodeType {
             NodeType::Draw { .. } => vec![],
             NodeType::Noise { .. } => vec![PortDef { name: "Seed" }, PortDef { name: "Scale" }, PortDef { name: "X" }, PortDef { name: "Y" }],
             NodeType::ColorCurves { .. } => vec![PortDef { name: "Image" }],
+            NodeType::VideoPlayer { .. } => vec![],
+            NodeType::Camera { .. } => vec![],
             NodeType::MlModel { .. } => vec![PortDef { name: "Image" }],
             NodeType::Script { input_names, continuous, .. } => {
                 let mut ports: Vec<PortDef> = Vec::new();
@@ -782,6 +823,8 @@ impl NodeType {
             NodeType::Draw { .. } => vec![PortDef { name: "Image" }, PortDef { name: "Points" }],
             NodeType::Noise { .. } => vec![PortDef { name: "Value" }, PortDef { name: "Image" }],
             NodeType::ColorCurves { .. } => vec![PortDef { name: "Image" }],
+            NodeType::VideoPlayer { .. } => vec![PortDef { name: "Frame" }, PortDef { name: "Progress" }],
+            NodeType::Camera { .. } => vec![PortDef { name: "Frame" }],
             NodeType::MlModel { .. } => vec![PortDef { name: "Result" }],
         }
     }
@@ -832,6 +875,8 @@ impl NodeType {
             NodeType::Draw { .. } => [200, 180, 100],
             NodeType::Noise { .. } => [140, 180, 140],
             NodeType::ColorCurves { .. } => [220, 140, 160],
+            NodeType::VideoPlayer { .. } => [220, 80, 140],
+            NodeType::Camera { .. } => [80, 200, 140],
             NodeType::MlModel { .. } => [200, 80, 255],
         }
     }

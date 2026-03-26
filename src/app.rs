@@ -291,6 +291,7 @@ impl PatchworkApp {
         let dropped: Vec<_> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
         if !dropped.is_empty() { self.push_undo(); }
         let image_exts = ["png", "jpg", "jpeg", "gif", "bmp", "webp"];
+        let video_exts = ["mp4", "mov", "avi", "webm", "mkv"];
         for path in dropped {
             let pos = ctx.pointer_latest_pos().unwrap_or(egui::pos2(200.0, 200.0));
             let off_e = self.canvas_offset / self.canvas_zoom;
@@ -299,7 +300,6 @@ impl PatchworkApp {
 
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
             if image_exts.contains(&ext.as_str()) {
-                // Create Image node
                 let image_data = crate::nodes::image_node::load_image_from_path(&path.display().to_string());
                 self.graph.add_node(NodeType::ImageNode {
                     path: path.display().to_string(),
@@ -307,6 +307,15 @@ impl PatchworkApp {
                     image_data,
                     preview_size: 150.0,
                     last_save_hash: 0,
+                }, [canvas_x, canvas_y]);
+            } else if video_exts.contains(&ext.as_str()) {
+                self.graph.add_node(NodeType::VideoPlayer {
+                    path: path.display().to_string(),
+                    playing: false, looping: false,
+                    res_w: 640, res_h: 480,
+                    current_frame: None,
+                    duration: 0.0, speed: 1.0,
+                    status: "Loaded".into(),
                 }, [canvas_x, canvas_y]);
             } else {
                 let content = std::fs::read_to_string(&path).unwrap_or_default();
@@ -890,7 +899,7 @@ impl PatchworkApp {
             || !pending_connections.is_empty() || !palette_spawns.is_empty() {
             self.push_undo();
         }
-        for id in nodes_to_delete { self.midi.cleanup_node(id); self.serial.cleanup_node(id); self.osc.cleanup_node(id); self.ob.cleanup_node(id); self.audio.cleanup_node(id); self.graph.remove_node(id); }
+        for id in nodes_to_delete { self.midi.cleanup_node(id); self.serial.cleanup_node(id); self.osc.cleanup_node(id); self.ob.cleanup_node(id); self.audio.cleanup_node(id); crate::nodes::video_player::cleanup_node(id); self.graph.remove_node(id); }
         for (nid, port) in pending_disconnects { self.graph.remove_connections_to_port(nid, port); }
         for (fn_, fp, tn, tp) in pending_connections { self.graph.add_connection(fn_, fp, tn, tp); }
         // Spawn nodes from Palette clicks (place to the right of the palette node)
@@ -1398,6 +1407,7 @@ impl PatchworkApp {
                     self.osc.cleanup_node(id);
                     self.ob.cleanup_node(id);
                     self.audio.cleanup_node(id);
+                    crate::nodes::video_player::cleanup_node(id);
                     self.graph.remove_node(id);
                 }
             }
@@ -1931,6 +1941,20 @@ impl eframe::App for PatchworkApp {
                             let result = nodes::color_curves::process(img, master, red, green, blue);
                             ctx.data_mut(|d| d.insert_temp(cache_id, (cache_key, result.clone())));
                             values.insert((id, 0), PortValue::Image(result));
+                        }
+                    }
+                    NodeType::VideoPlayer { current_frame, duration, .. } => {
+                        if let Some(frame) = current_frame {
+                            values.insert((id, 0), PortValue::Image(frame.clone()));
+                            if *duration > 0.0 {
+                                // Progress output would need frame counting — skip for now
+                                values.insert((id, 1), PortValue::Float(0.0));
+                            }
+                        }
+                    }
+                    NodeType::Camera { current_frame, .. } => {
+                        if let Some(frame) = current_frame {
+                            values.insert((id, 0), PortValue::Image(frame.clone()));
                         }
                     }
                     NodeType::MlModel { result_text, .. } => {

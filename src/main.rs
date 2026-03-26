@@ -1,5 +1,6 @@
 mod app;
 mod audio;
+mod gpu_image;
 mod graph;
 mod http;
 mod mcp;

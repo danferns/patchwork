@@ -43,6 +43,7 @@ pub mod draw;
 pub mod noise;
 pub mod color_curves;
 pub mod ml_model;
+pub mod video_player;
 
 use crate::graph::*;
 use crate::midi::MidiAction;
@@ -115,6 +116,12 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
             factory: || NodeType::Draw { strokes: vec![], canvas_size: 200.0, color: [255, 255, 255], line_width: 2.0 } },
         NodeCatalogEntry { label: "Noise", category: "Signal",
             factory: || NodeType::Noise { noise_type: 0, mode: 1, scale: 5.0, seed: 0 } },
+
+        // ── Video ────────────────────────────────────────────
+        NodeCatalogEntry { label: "Video Player", category: "Video",
+            factory: || NodeType::VideoPlayer { path: String::new(), playing: false, looping: false, res_w: 640, res_h: 480, current_frame: None, duration: 0.0, speed: 1.0, status: String::new() } },
+        NodeCatalogEntry { label: "Camera", category: "Video",
+            factory: || NodeType::Camera { device_index: 0, res_w: 640, res_h: 480, active: false, current_frame: None, status: String::new() } },
 
         // ── Audio ────────────────────────────────────────────
         NodeCatalogEntry { label: "Synth", category: "Audio",
@@ -312,11 +319,13 @@ pub fn render_content(
         }
         NodeType::ImageNode { .. } => image_node::render(ui, node_id, node_type, values, connections),
         NodeType::ImageEffects { .. } => image_effects::render(ui, node_id, node_type, values, connections),
-        NodeType::Blend { .. } => blend::render(ui, node_id, node_type, values, connections),
+        NodeType::Blend { .. } => blend::render(ui, node_id, node_type, values, connections, wgpu_render_state),
         NodeType::Curve { .. } => curve::render(ui, node_id, node_type, values, connections),
         NodeType::Draw { .. } => draw::render(ui, node_id, node_type),
         NodeType::Noise { .. } => noise::render(ui, node_id, node_type, values, connections),
         NodeType::ColorCurves { .. } => color_curves::render(ui, node_id, node_type, values, connections),
+        NodeType::VideoPlayer { .. } => video_player::render_video(ui, node_id, node_type, values, connections),
+        NodeType::Camera { .. } => video_player::render_camera(ui, node_id, node_type, values, connections),
         NodeType::MlModel { .. } => ml_model::render(ui, node_id, node_type, values, connections),
     }
 }
