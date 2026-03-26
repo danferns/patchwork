@@ -135,7 +135,7 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
 
         // ── MIDI ─────────────────────────────────────────────
         NodeCatalogEntry { label: "MIDI Out", category: "MIDI",
-            factory: || NodeType::MidiOut { port_name: String::new(), mode: MidiMode::Note, channel: 0 } },
+            factory: || NodeType::MidiOut { port_name: String::new(), mode: MidiMode::Note, channel: 0, manual_d1: 0, manual_d2: 64 } },
         NodeCatalogEntry { label: "MIDI In", category: "MIDI",
             factory: || NodeType::MidiIn { port_name: String::new(), channel: 0, note: 0, velocity: 0, log: Vec::new() } },
 
@@ -253,8 +253,8 @@ pub fn render_content(
         NodeType::Time { elapsed, speed, running } => time::render(ui, elapsed, speed, running),
         NodeType::Color { r, g, b } => color::render(ui, r, g, b),
         NodeType::MouseTracker { x, y } => mouse_tracker::render(ui, *x, *y),
-        NodeType::MidiOut { port_name, mode, channel } =>
-            midi_out::render(ui, port_name, mode, channel, node_id, values, connections, midi_out_ports, midi_connected_out, midi_actions),
+        NodeType::MidiOut { port_name, mode, channel, manual_d1, manual_d2 } =>
+            midi_out::render(ui, port_name, mode, channel, node_id, values, connections, midi_out_ports, midi_connected_out, midi_actions, port_positions, dragging_from, pending_disconnects, manual_d1, manual_d2),
         NodeType::MidiIn { port_name, channel, note, velocity, log } =>
             midi_in::render(ui, port_name, channel, note, velocity, log, node_id, midi_in_ports, midi_connected_in, midi_actions),
         NodeType::Serial { port_name, baud_rate, log, last_line, send_buf } =>
@@ -296,7 +296,7 @@ pub fn render_content(
         NodeType::ObHub { .. } => ob_hub::render(ui, node_id, node_type, ob_manager),
         NodeType::ObJoystick { .. } => ob_joystick::render(ui, node_id, node_type, values, connections, ob_manager),
         NodeType::ObEncoder { .. } => ob_encoder::render(ui, node_id, node_type, values, connections, ob_manager),
-        NodeType::Synth { .. } => synth::render(ui, node_id, node_type, values, connections, audio_manager),
+        NodeType::Synth { .. } => synth::render(ui, node_id, node_type, values, connections, audio_manager, port_positions, dragging_from, pending_disconnects),
         NodeType::AudioPlayer { .. } => audio_player::render(ui, node_id, node_type, values, connections, audio_manager),
         NodeType::AudioDevice { .. } => audio_device::render(ui, node_id, node_type, audio_manager),
         NodeType::AudioFx { .. } => audio_fx::render(ui, node_id, node_type, values, connections, audio_manager),

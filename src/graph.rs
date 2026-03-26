@@ -196,6 +196,10 @@ pub enum NodeType {
         port_name: String,
         mode: MidiMode,
         channel: u8,
+        #[serde(default)]
+        manual_d1: u8,
+        #[serde(default)]
+        manual_d2: u8,
     },
     MidiIn {
         port_name: String,
@@ -885,7 +889,7 @@ impl NodeType {
     /// Whether this node renders its ports inline within the content
     /// instead of as separate lists at top/bottom.
     pub fn inline_ports(&self) -> bool {
-        matches!(self, NodeType::Theme { .. })
+        matches!(self, NodeType::Theme { .. } | NodeType::MidiOut { .. } | NodeType::Synth { .. })
     }
 }
 
