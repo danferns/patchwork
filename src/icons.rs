@@ -70,7 +70,8 @@ pub const BRAIN: &str = "\u{e110}"; // ML
 pub const TIMER: &str = "\u{e494}"; // Time node
 pub const PALETTE: &str = "\u{e39a}"; // Color node
 pub const CURSOR_CLICK: &str = "\u{e1d8}"; // Mouse tracker
-pub const KEYBOARD: &str = "\u{e2d6}"; // Key Input
+pub const KEYBOARD: &str = "\u{e2d6}"; // Key Input (keyboard icon)
+pub const TEXT_AA: &str = "\u{e484}"; // Alternative: ABC/text style
 pub const CHAT_CIRCLE: &str = "\u{e164}"; // Comment
 pub const TERMINAL: &str = "\u{e486}"; // Console
 pub const LIGHTNING: &str = "\u{e2de}"; // Script
@@ -80,26 +81,49 @@ pub const TEXT_T: &str = "\u{e484}"; // Text Editor
 /// Font family name for Phosphor icons
 pub const FONT_FAMILY: &str = "phosphor";
 
-/// Register Phosphor icon font with egui. Call once during app setup.
+/// Font family name for Satoshi
+pub const SATOSHI_FAMILY: &str = "satoshi";
+
+/// Register Satoshi as primary font + Phosphor icon font. Call once during app setup.
 pub fn setup(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
-    // Load the Phosphor Regular TTF
+    // Load Satoshi Regular as the primary UI font
+    fonts.font_data.insert(
+        SATOSHI_FAMILY.to_string(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../assets/fonts/Satoshi-Regular.ttf"))),
+    );
+
+    // Load the Phosphor icon font
     fonts.font_data.insert(
         FONT_FAMILY.to_string(),
         std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../assets/fonts/Phosphor.ttf"))),
     );
 
-    // Add as fallback to proportional so icons render anywhere
-    fonts.families
+    // Proportional: Satoshi first (primary text), then Phosphor (icon fallback), then system defaults
+    let proportional = fonts.families
         .entry(egui::FontFamily::Proportional)
-        .or_default()
-        .push(FONT_FAMILY.to_string());
+        .or_default();
+    proportional.insert(0, SATOSHI_FAMILY.to_string());
+    proportional.push(FONT_FAMILY.to_string());
 
-    // Also register as its own family for explicit use
+    // Monospace: keep system default but add Satoshi as fallback for missing glyphs
+    let monospace = fonts.families
+        .entry(egui::FontFamily::Monospace)
+        .or_default();
+    monospace.push(SATOSHI_FAMILY.to_string());
+    monospace.push(FONT_FAMILY.to_string());
+
+    // Register Phosphor as its own family for explicit use
     fonts.families.insert(
         egui::FontFamily::Name(FONT_FAMILY.into()),
         vec![FONT_FAMILY.to_string()],
+    );
+
+    // Register Satoshi as its own family for explicit use
+    fonts.families.insert(
+        egui::FontFamily::Name(SATOSHI_FAMILY.into()),
+        vec![SATOSHI_FAMILY.to_string()],
     );
 
     ctx.set_fonts(fonts);

@@ -8,8 +8,11 @@ fn default_text_color() -> [u8; 3] { [220, 220, 220] }
 fn default_window_bg() -> [u8; 3] { [40, 40, 40] }
 fn default_window_alpha() -> u8 { 240 }
 fn default_grid_color() -> [u8; 3] { [12, 12, 12] }
-fn default_rounding() -> f32 { 4.0 }
+fn default_slider_step() -> f32 { 0.01 }
+fn default_slider_color() -> [u8; 3] { [80, 160, 255] }
+fn default_rounding() -> f32 { 16.0 }
 fn default_spacing() -> f32 { 4.0 }
+fn default_wire_thickness() -> f32 { 6.0 }
 fn default_scope_history() -> Vec<f32> { Vec::new() }
 fn default_scope_length() -> usize { 200 }
 fn default_scope_min() -> f32 { 0.0 }
@@ -139,7 +142,17 @@ pub enum MidiMode { Note, CC }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NodeType {
-    Slider { value: f32, min: f32, max: f32 },
+    Slider {
+        value: f32,
+        min: f32,
+        max: f32,
+        #[serde(default = "default_slider_step")]
+        step: f32,
+        #[serde(default = "default_slider_color")]
+        slider_color: [u8; 3],
+        #[serde(default)]
+        label: String,
+    },
     Display {
         #[serde(default = "default_scope_history")]
         history: Vec<f32>,
@@ -229,6 +242,9 @@ pub enum NodeType {
         spacing: f32,
         #[serde(default)]
         use_hsl: bool,
+        /// Wire thickness (default 2.0)
+        #[serde(default = "default_wire_thickness")]
+        wire_thickness: f32,
         /// Background image/video path (shown on canvas behind nodes)
         #[serde(default)]
         background_path: String,
@@ -895,6 +911,11 @@ impl NodeType {
     pub fn inline_ports(&self) -> bool {
         matches!(self, NodeType::Theme { .. } | NodeType::MidiOut { .. } | NodeType::Synth { .. } | NodeType::WgslViewer { .. } | NodeType::Color { .. } | NodeType::ImageEffects { .. } | NodeType::Slider { .. } | NodeType::Blend { .. } | NodeType::HttpRequest { .. } | NodeType::AiRequest { .. })
     }
+
+    /// Whether this node skips the standard egui::Window and renders itself completely custom.
+    pub fn custom_render(&self) -> bool {
+        matches!(self, NodeType::Slider { .. })
+    }
 }
 
 // ── Node & Connection ───────────────────────────────────────────────────────
@@ -906,6 +927,9 @@ pub struct Node { pub id: NodeId, pub node_type: NodeType, pub pos: [f32; 2] }
 pub struct Connection {
     pub from_node: NodeId, pub from_port: usize,
     pub to_node: NodeId, pub to_port: usize,
+    /// Optional user label displayed on the wire
+    #[serde(default)]
+    pub label: String,
 }
 
 // ── Graph ───────────────────────────────────────────────────────────────────
@@ -934,7 +958,7 @@ impl Graph {
     }
     pub fn add_connection(&mut self, from_node: NodeId, from_port: usize, to_node: NodeId, to_port: usize) {
         self.connections.retain(|c| !(c.to_node == to_node && c.to_port == to_port));
-        self.connections.push(Connection { from_node, from_port, to_node, to_port });
+        self.connections.push(Connection { from_node, from_port, to_node, to_port, label: String::new() });
     }
 
     /// Re-evaluate with pre-existing values (for injected hardware data).
@@ -946,7 +970,7 @@ impl Graph {
                 let inputs = self.collect_inputs(id, values);
                 let node = match self.nodes.get_mut(&id) { Some(n) => n, None => continue };
                 match &mut node.node_type {
-                    NodeType::Slider { value, min, max } => {
+                    NodeType::Slider { value, min, max, .. } => {
                         if let Some(PortValue::Float(v)) = inputs.get(1) { *min = *v; }
                         if let Some(PortValue::Float(v)) = inputs.get(2) { *max = *v; }
                         if let Some(PortValue::Float(v)) = inputs.first() { *value = *v; }
@@ -982,7 +1006,7 @@ impl Graph {
                 let inputs = self.collect_inputs(id, &values);
                 let node = match self.nodes.get_mut(&id) { Some(n) => n, None => continue };
                 match &mut node.node_type {
-                    NodeType::Slider { value, min, max } => {
+                    NodeType::Slider { value, min, max, .. } => {
                         // Override min/max from inputs if connected
                         if let Some(PortValue::Float(v)) = inputs.get(1) { *min = *v; }
                         if let Some(PortValue::Float(v)) = inputs.get(2) { *max = *v; }

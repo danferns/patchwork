@@ -253,6 +253,8 @@ impl super::PatchworkApp {
     pub(super) fn apply_theme(&self, ctx: &egui::Context) {
         for node in self.graph.nodes.values() {
             if let NodeType::Theme { dark_mode, accent, font_size, bg_color, text_color, window_bg, window_alpha, grid_color: _, rounding, spacing, .. } = &node.node_type {
+                // Store accent color for other nodes (e.g., slider highlight)
+                ctx.data_mut(|d| d.insert_temp(egui::Id::new("theme_accent"), *accent));
                 nodes::theme::apply(ctx, *dark_mode, *accent, *font_size, *bg_color, *text_color, *window_bg, *window_alpha, *rounding, *spacing);
                 return;
             }

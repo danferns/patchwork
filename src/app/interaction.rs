@@ -31,8 +31,8 @@ impl super::PatchworkApp {
             self.panning = false;
         }
 
-        // Trackpad scroll pan
-        if !modifiers.command {
+        // Trackpad scroll pan — only when pointer is NOT over a node (prevents stealing scroll from node windows)
+        if !modifiers.command && !on_node {
             let scroll = ctx.input(|i| i.smooth_scroll_delta);
             if scroll.length() > 0.5 {
                 self.canvas_offset += scroll * z;

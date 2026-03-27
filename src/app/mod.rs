@@ -11,10 +11,39 @@ use eframe::egui_wgpu;
 use std::collections::HashMap;
 
 
-const PORT_RADIUS: f32 = 5.0;
-const PORT_INTERACT: f32 = 14.0;
+const PORT_RADIUS: f32 = 6.0;    // 12px diameter
+const PORT_INTERACT: f32 = 18.0;
+const PORT_BORDER: f32 = 3.0;    // 3px border stroke
 const CONN_COLOR: egui::Color32 = egui::Color32::from_rgb(180, 180, 180);
 const CONN_ACTIVE: egui::Color32 = egui::Color32::from_rgb(80, 170, 255);
+
+/// Get port fill + border colors based on data type.
+/// Fill is a darker shade, border is a lighter shade — both matching the wire hue.
+fn port_colors_for_value(val: &PortValue, is_output: bool) -> (egui::Color32, egui::Color32) {
+    let base: [u8; 3] = match val {
+        PortValue::Float(_) => [80, 100, 230],      // matches wire blue
+        PortValue::Text(_) => [60, 220, 80],         // matches wire green
+        PortValue::Image(_) => [200, 30, 255],       // matches wire purple
+        PortValue::None => [140, 140, 140],           // gray
+    };
+    let fill = if is_output {
+        egui::Color32::from_rgb(base[0], base[1], base[2])
+    } else {
+        // Input: darker fill
+        egui::Color32::from_rgb(
+            (base[0] as f32 * 0.5) as u8,
+            (base[1] as f32 * 0.5) as u8,
+            (base[2] as f32 * 0.5) as u8,
+        )
+    };
+    // Border: lighter shade of the wire color
+    let border = egui::Color32::from_rgb(
+        (base[0] as u16 + 80).min(255) as u8,
+        (base[1] as u16 + 80).min(255) as u8,
+        (base[2] as u16 + 80).min(255) as u8,
+    );
+    (fill, border)
+}
 
 mod undo;
 mod canvas;
@@ -42,6 +71,8 @@ pub struct PatchworkApp {
     // Selection & clipboard
     selected_nodes: std::collections::HashSet<NodeId>,
     selected_connection: Option<usize>,
+    wire_menu_conn: Option<usize>,      // connection index for wire context menu
+    wire_menu_pos: egui::Pos2,
     // Box selection
     box_select_start: Option<egui::Pos2>,
     box_select_end: Option<egui::Pos2>,
@@ -112,6 +143,8 @@ impl PatchworkApp {
             osc: OscManager::new(),
             selected_nodes: std::collections::HashSet::new(),
             selected_connection: None,
+            wire_menu_conn: None,
+            wire_menu_pos: egui::Pos2::ZERO,
             box_select_start: None,
             box_select_end: None,
             clipboard: None,
@@ -260,7 +293,7 @@ impl PatchworkApp {
             // Pinned: inverse zoom on sizes so they appear at native screen size.
             // Zoom-bucketed ID resets egui's cached window size on zoom changes.
             let inv = 1.0 / zoom;
-            let node_width = if is_pinned { 180.0 * inv } else { 180.0 };
+            let node_width = if node.node_type.custom_render() { 50.0 } else if is_pinned { 180.0 * inv } else { 180.0 };
             let port_sz = if is_pinned { PORT_INTERACT * inv } else { PORT_INTERACT };
             let port_r = if is_pinned { PORT_RADIUS * inv } else { PORT_RADIUS };
             let title_size = if is_pinned { 14.0 * inv } else { 14.0 };
@@ -279,25 +312,29 @@ impl PatchworkApp {
                 style.spacing.window_margin *= inv;
                 ctx.set_style(std::sync::Arc::new(style));
             }
+            let is_custom_render = node.node_type.custom_render();
             let resp = egui::Window::new(title_rt)
                 .id(egui::Id::new(("node", node_id, zoom_bucket)))
                 .current_pos(egui::pos2(egui_x, egui_y))
                 .default_width(node_width)
-                .resizable(true)
+                .resizable(!is_custom_render)
                 .constrain(false)
-                .collapsible(true)
-                .open(&mut open)
+                .collapsible(!is_custom_render)
+                .title_bar(!is_custom_render)
                 .show(ctx, |ui| {
                     // Top input ports (skip for inline-port nodes)
                     if !inline {
                         for (i, pdef) in input_defs.iter().enumerate() {
                             ui.horizontal(|ui| {
                                 let (rect, response) = ui.allocate_exact_size(egui::vec2(port_sz, port_sz), egui::Sense::click_and_drag());
-                                let col = if response.hovered() || response.dragged() { egui::Color32::YELLOW } else { egui::Color32::from_rgb(170, 170, 170) };
-                                ui.painter().circle_filled(rect.center(), port_r, col);
-                                ui.painter().circle_stroke(rect.center(), port_r, egui::Stroke::new(1.0, egui::Color32::WHITE));
-                                port_positions.insert((node_id, i, true), rect.center());
                                 let val = Graph::static_input_value(&connections, values, node_id, i);
+                                let (type_fill, type_border) = port_colors_for_value(&val, false);
+                                let (fill, border) = if response.hovered() || response.dragged() {
+                                    (egui::Color32::YELLOW, egui::Color32::WHITE)
+                                } else { (type_fill, type_border) };
+                                ui.painter().circle_filled(rect.center(), port_r, fill);
+                                ui.painter().circle_stroke(rect.center(), port_r, egui::Stroke::new(PORT_BORDER, border));
+                                port_positions.insert((node_id, i, true), rect.center());
                                 ui.label(format!("{}: {}", pdef.name, val));
                                 if response.drag_started() {
                                     if let Some(existing) = connections.iter().find(|c| c.to_node == node_id && c.to_port == i) {
@@ -336,10 +373,16 @@ impl PatchworkApp {
                             ui.horizontal(|ui| {
                                 let val = values.get(&(node_id, i)).cloned().unwrap_or(PortValue::None);
                                 ui.label(format!("{}: {}", pdef.name, val));
+                                // Push port circle to right edge
+                                let remaining = ui.available_width() - port_sz - 2.0;
+                                if remaining > 0.0 { ui.add_space(remaining); }
                                 let (rect, response) = ui.allocate_exact_size(egui::vec2(port_sz, port_sz), egui::Sense::click_and_drag());
-                                let col = if response.hovered() || response.dragged() { egui::Color32::YELLOW } else { egui::Color32::from_rgb(100, 180, 255) };
-                                ui.painter().circle_filled(rect.center(), port_r, col);
-                                ui.painter().circle_stroke(rect.center(), port_r, egui::Stroke::new(1.0, egui::Color32::WHITE));
+                                let (type_fill, type_border) = port_colors_for_value(&val, true);
+                                let (fill, border) = if response.hovered() || response.dragged() {
+                                    (egui::Color32::YELLOW, egui::Color32::WHITE)
+                                } else { (type_fill, type_border) };
+                                ui.painter().circle_filled(rect.center(), port_r, fill);
+                                ui.painter().circle_stroke(rect.center(), port_r, egui::Stroke::new(PORT_BORDER, border));
                                 port_positions.insert((node_id, i, false), rect.center());
                                 if response.drag_started() { dragging_from = Some((node_id, i, true)); }
                             });
@@ -371,7 +414,13 @@ impl PatchworkApp {
                 node_rects.insert(node_id, r.response.rect);
 
                 // Selection on click (Shift = toggle, no Shift = replace)
-                if r.response.clicked() || r.response.drag_started() {
+                // For custom_render nodes (Slider), only select on drag — click opens their popup
+                let select_trigger = if is_custom_render {
+                    r.response.drag_started()
+                } else {
+                    r.response.clicked() || r.response.drag_started()
+                };
+                if select_trigger {
                     let shift = ctx.input(|i| i.modifiers.shift);
                     if shift {
                         if self.selected_nodes.contains(&node_id) {
@@ -386,11 +435,11 @@ impl PatchworkApp {
                     self.selected_connection = None;
                 }
 
-                // Right-click context menu (check raw secondary click within node rect)
-                let secondary_in_rect = ctx.input(|i| {
+                // Right-click context menu — skip for custom_render nodes (they handle their own UI)
+                let secondary_in_rect = !is_custom_render && ctx.input(|i| {
                     i.pointer.button_clicked(egui::PointerButton::Secondary)
                 }) && ctx.pointer_latest_pos().map(|p| r.response.rect.contains(p)).unwrap_or(false);
-                if r.response.secondary_clicked() || secondary_in_rect {
+                if !is_custom_render && (r.response.secondary_clicked() || secondary_in_rect) {
                     if !self.selected_nodes.contains(&node_id) {
                         self.selected_nodes.clear();
                         self.selected_nodes.insert(node_id);
@@ -401,8 +450,8 @@ impl PatchworkApp {
                     self.context_menu_opened_at = ctx.input(|i| i.time);
                 }
 
-                // Draw selection highlight
-                if self.selected_nodes.contains(&node_id) {
+                // Draw selection highlight (skip for custom_render nodes — they handle their own visual feedback)
+                if self.selected_nodes.contains(&node_id) && !is_custom_render {
                     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("selection")));
                     painter.rect_stroke(r.response.rect.expand(2.0), 4.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 170, 255)), egui::StrokeKind::Outside);
                 }
@@ -429,13 +478,13 @@ impl PatchworkApp {
                         let y_off = if n_in > 1 { (i as f32 - (n_in - 1) as f32 / 2.0) * 4.0 } else { 0.0 };
                         let pos = egui::pos2(rect.left() - PORT_RADIUS, rect.center().y + y_off);
                         port_positions.insert((node_id, i, true), pos);
-                        fg.circle_filled(pos, 3.0, egui::Color32::from_rgb(170, 170, 170));
+                        fg.circle_filled(pos, 3.0, egui::Color32::from_rgb(70, 75, 85));
                     }
                     for i in 0..n_out {
                         let y_off = if n_out > 1 { (i as f32 - (n_out - 1) as f32 / 2.0) * 4.0 } else { 0.0 };
                         let pos = egui::pos2(rect.right() + PORT_RADIUS, rect.center().y + y_off);
                         port_positions.insert((node_id, i, false), pos);
-                        fg.circle_filled(pos, 3.0, egui::Color32::from_rgb(100, 180, 255));
+                        fg.circle_filled(pos, 3.0, egui::Color32::from_rgb(60, 140, 255));
                     }
                 }
 
@@ -458,7 +507,34 @@ impl PatchworkApp {
                     self.opt_drag_source = Some(node_id);
                 }
             }
-            if open { self.graph.nodes.insert(node_id, node); } else { nodes_to_delete.push(node_id); }
+            // Process slider popup actions (pin/delete)
+            let pin_id = egui::Id::new(("slider_pin_action", node_id));
+            if ctx.data_mut(|d| d.get_temp::<bool>(pin_id).unwrap_or(false)) {
+                ctx.data_mut(|d| d.remove::<bool>(pin_id));
+                self.push_undo();
+                if self.pinned_nodes.contains(&node_id) {
+                    // Unpin: current pos is screen pixels stored by pinned rendering
+                    // Convert to canvas coords: canvas = (screen - offset) / zoom
+                    let sx = node.pos[0];
+                    let sy = node.pos[1];
+                    node.pos = [(sx - offset.x) / zoom, (sy - offset.y) / zoom];
+                    self.pinned_nodes.remove(&node_id);
+                } else {
+                    // Pin: current pos is canvas coords
+                    // Convert to screen pixels: screen = canvas * zoom + offset
+                    let cx = node.pos[0];
+                    let cy = node.pos[1];
+                    node.pos = [cx * zoom + offset.x, cy * zoom + offset.y];
+                    self.pinned_nodes.insert(node_id);
+                }
+            }
+            let del_id = egui::Id::new(("slider_delete_action", node_id));
+            if ctx.data_mut(|d| d.get_temp::<bool>(del_id).unwrap_or(false)) {
+                ctx.data_mut(|d| d.remove::<bool>(del_id));
+                nodes_to_delete.push(node_id);
+            }
+
+            self.graph.nodes.insert(node_id, node);
         }
 
         // Apply multi-node drag: move all other selected nodes by the same delta
@@ -851,7 +927,7 @@ impl eframe::App for PatchworkApp {
         self.process_mcp_commands(&values);
 
         self.canvas(ctx);
-        self.render_connections(ctx);
+        self.render_connections(ctx, &values);
         self.render_nodes_filtered(ctx, &values, false);
         self.render_nodes_filtered(ctx, &values, true);
         self.sync_console_messages();

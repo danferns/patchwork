@@ -2,10 +2,15 @@ use crate::graph::{NodeId, PortValue, Connection};
 use std::collections::HashMap;
 use eframe::egui;
 
-const PORT_RADIUS: f32 = 4.0;
-const PORT_SIZE: f32 = 10.0;
-const IN_COLOR: egui::Color32 = egui::Color32::from_rgb(170, 170, 170);
-const OUT_COLOR: egui::Color32 = egui::Color32::from_rgb(100, 180, 255);
+const PORT_RADIUS: f32 = 6.0;
+const PORT_SIZE: f32 = 12.0;
+const IN_COLOR: egui::Color32 = egui::Color32::from_rgb(70, 75, 85);
+const IN_BORDER: egui::Color32 = egui::Color32::from_rgb(120, 125, 135);
+const WIRED_COLOR: egui::Color32 = egui::Color32::from_rgb(60, 140, 255);
+const WIRED_BORDER: egui::Color32 = egui::Color32::from_rgb(120, 180, 255);
+const OUT_COLOR: egui::Color32 = egui::Color32::from_rgb(60, 140, 255);
+const OUT_BORDER: egui::Color32 = egui::Color32::from_rgb(120, 180, 255);
+const PORT_STROKE: f32 = 2.5;
 
 /// Draw a small inline input port, register its position.
 fn inline_input(
@@ -19,9 +24,9 @@ fn inline_input(
 ) -> Option<f32> {
     let connected = connections.iter().any(|c| c.to_node == node_id && c.to_port == port);
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(PORT_SIZE, PORT_SIZE), egui::Sense::click_and_drag());
-    let col = if resp.hovered() || resp.dragged() { egui::Color32::YELLOW } else if connected { egui::Color32::from_rgb(100, 200, 255) } else { IN_COLOR };
-    ui.painter().circle_filled(rect.center(), PORT_RADIUS, col);
-    ui.painter().circle_stroke(rect.center(), PORT_RADIUS, egui::Stroke::new(0.5, egui::Color32::WHITE));
+    let (fill, border) = if resp.hovered() || resp.dragged() { (egui::Color32::YELLOW, egui::Color32::WHITE) } else if connected { (WIRED_COLOR, WIRED_BORDER) } else { (IN_COLOR, IN_BORDER) };
+    ui.painter().circle_filled(rect.center(), PORT_RADIUS, fill);
+    ui.painter().circle_stroke(rect.center(), PORT_RADIUS, egui::Stroke::new(PORT_STROKE, border));
     port_positions.insert((node_id, port, true), rect.center());
     if resp.drag_started() { *dragging_from = Some((node_id, port, false)); }
     if connected {
@@ -43,9 +48,9 @@ fn inline_output(
     port: usize,
 ) {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(PORT_SIZE, PORT_SIZE), egui::Sense::click_and_drag());
-    let col = if resp.hovered() || resp.dragged() { egui::Color32::YELLOW } else { OUT_COLOR };
-    ui.painter().circle_filled(rect.center(), PORT_RADIUS, col);
-    ui.painter().circle_stroke(rect.center(), PORT_RADIUS, egui::Stroke::new(0.5, egui::Color32::WHITE));
+    let (fill, border) = if resp.hovered() || resp.dragged() { (egui::Color32::YELLOW, egui::Color32::WHITE) } else { (OUT_COLOR, OUT_BORDER) };
+    ui.painter().circle_filled(rect.center(), PORT_RADIUS, fill);
+    ui.painter().circle_stroke(rect.center(), PORT_RADIUS, egui::Stroke::new(PORT_STROKE, border));
     port_positions.insert((node_id, port, false), rect.center());
     if resp.drag_started() { *dragging_from = Some((node_id, port, true)); }
 }
@@ -99,15 +104,15 @@ fn color_row(
 
             // Port circle
             let (rect, response) = ui.allocate_exact_size(egui::vec2(PORT_SIZE, PORT_SIZE), egui::Sense::click_and_drag());
-            let col = if response.hovered() || response.dragged() {
-                egui::Color32::YELLOW
+            let (fill, border) = if response.hovered() || response.dragged() {
+                (egui::Color32::YELLOW, egui::Color32::WHITE)
             } else if is_wired {
-                egui::Color32::from_rgb(80, 170, 255)
+                (WIRED_COLOR, WIRED_BORDER)
             } else {
-                IN_COLOR
+                (IN_COLOR, IN_BORDER)
             };
-            ui.painter().circle_filled(rect.center(), PORT_RADIUS, col);
-            ui.painter().circle_stroke(rect.center(), PORT_RADIUS, egui::Stroke::new(1.0, egui::Color32::WHITE));
+            ui.painter().circle_filled(rect.center(), PORT_RADIUS, fill);
+            ui.painter().circle_stroke(rect.center(), PORT_RADIUS, egui::Stroke::new(PORT_STROKE, border));
             port_positions.insert((node_id, port, true), rect.center());
 
             if response.drag_started() {
@@ -212,6 +217,7 @@ pub fn render(
     rounding: &mut f32,
     spacing: &mut f32,
     use_hsl: &mut bool,
+    wire_thickness: &mut f32,
     background_path: &mut String,
     node_id: NodeId,
     values: &HashMap<(NodeId, usize), PortValue>,
@@ -315,7 +321,8 @@ pub fn render(
 
     // Float params with inline input ports
     float_row(ui, "Font", font_size, 8.0..=28.0, "px", port_positions, dragging_from, node_id, 15, values, connections);
-    float_row(ui, "Round", rounding, 0.0..=80.0, "px", port_positions, dragging_from, node_id, 16, values, connections);
+    float_row(ui, "Wire", wire_thickness, 1.0..=16.0, "px", port_positions, dragging_from, node_id, 20, values, connections);
+    float_row(ui, "Round", rounding, 0.0..=32.0, "px", port_positions, dragging_from, node_id, 16, values, connections);
     float_row(ui, "Space", spacing, 0.0..=12.0, "px", port_positions, dragging_from, node_id, 17, values, connections);
     u8_row(ui, "Opacity", window_alpha, port_positions, dragging_from, node_id, 18, values, connections);
 
@@ -327,15 +334,15 @@ pub fn render(
         // Input port circle
         let (rect, response) = ui.allocate_exact_size(egui::vec2(PORT_SIZE, PORT_SIZE), egui::Sense::click_and_drag());
         let bg_connected = connections.iter().any(|c| c.to_node == node_id && c.to_port == 19);
-        let col = if response.hovered() || response.dragged() {
-            egui::Color32::YELLOW
+        let (fill, border) = if response.hovered() || response.dragged() {
+            (egui::Color32::YELLOW, egui::Color32::WHITE)
         } else if bg_connected {
-            egui::Color32::from_rgb(80, 170, 255)
+            (WIRED_COLOR, WIRED_BORDER)
         } else {
-            IN_COLOR
+            (IN_COLOR, IN_BORDER)
         };
-        ui.painter().circle_filled(rect.center(), PORT_RADIUS, col);
-        ui.painter().circle_stroke(rect.center(), PORT_RADIUS, egui::Stroke::new(1.0, egui::Color32::WHITE));
+        ui.painter().circle_filled(rect.center(), PORT_RADIUS, fill);
+        ui.painter().circle_stroke(rect.center(), PORT_RADIUS, egui::Stroke::new(PORT_STROKE, border));
         port_positions.insert((node_id, 19, true), rect.center());
 
         if response.drag_started() {

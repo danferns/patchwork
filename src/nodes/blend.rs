@@ -106,9 +106,9 @@ pub fn render(
             ui.label(egui::RichText::new("—").small());
         }
         let (rect, response) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
-        let col = if response.hovered() || response.dragged() { egui::Color32::YELLOW } else { egui::Color32::from_rgb(80, 170, 255) };
-        ui.painter().circle_filled(rect.center(), 5.0, col);
-        ui.painter().circle_stroke(rect.center(), 5.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
+        let (fill, border) = if response.hovered() || response.dragged() { (egui::Color32::YELLOW, egui::Color32::WHITE) } else { (egui::Color32::from_rgb(60, 140, 255), egui::Color32::from_rgb(120, 180, 255)) };
+        ui.painter().circle_filled(rect.center(), 6.0, fill);
+        ui.painter().circle_stroke(rect.center(), 6.0, egui::Stroke::new(2.5, border));
         port_positions.insert((node_id, 0, false), rect.center());
         if response.drag_started() { *dragging_from = Some((node_id, 0, true)); }
     });
@@ -144,11 +144,11 @@ fn port_circle(
     connections: &[Connection],
 ) {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
-    let col = if response.hovered() || response.dragged() { egui::Color32::YELLOW }
-        else if is_wired { egui::Color32::from_rgb(80, 170, 255) }
-        else { egui::Color32::from_rgb(140, 140, 140) };
-    ui.painter().circle_filled(rect.center(), 4.0, col);
-    ui.painter().circle_stroke(rect.center(), 4.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
+    let (fill, border) = if response.hovered() || response.dragged() { (egui::Color32::YELLOW, egui::Color32::WHITE) }
+        else if is_wired { (egui::Color32::from_rgb(60, 140, 255), egui::Color32::from_rgb(120, 180, 255)) }
+        else { (egui::Color32::from_rgb(70, 75, 85), egui::Color32::from_rgb(120, 125, 135)) };
+    ui.painter().circle_filled(rect.center(), 6.0, fill);
+    ui.painter().circle_stroke(rect.center(), 6.0, egui::Stroke::new(2.5, border));
     port_positions.insert((node_id, port, is_input), rect.center());
     if response.drag_started() {
         if is_input {

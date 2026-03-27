@@ -81,15 +81,15 @@ pub fn render(
         ui.horizontal(|ui| {
             // Port circle
             let (rect, response) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
-            let col = if response.hovered() || response.dragged() {
-                egui::Color32::YELLOW
+            let (fill, border) = if response.hovered() || response.dragged() {
+                (egui::Color32::YELLOW, egui::Color32::WHITE)
             } else if is_wired {
-                egui::Color32::from_rgb(80, 170, 255)
+                (egui::Color32::from_rgb(60, 140, 255), egui::Color32::from_rgb(120, 180, 255))
             } else {
-                egui::Color32::from_rgb(170, 170, 170)
+                (egui::Color32::from_rgb(70, 75, 85), egui::Color32::from_rgb(120, 125, 135))
             };
-            ui.painter().circle_filled(rect.center(), 5.0, col);
-            ui.painter().circle_stroke(rect.center(), 5.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
+            ui.painter().circle_filled(rect.center(), 6.0, fill);
+            ui.painter().circle_stroke(rect.center(), 6.0, egui::Stroke::new(2.5, border));
             port_positions.insert((node_id, i, true), rect.center());
 
             // Port drag handling

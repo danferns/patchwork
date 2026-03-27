@@ -65,7 +65,7 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
     vec![
         // ── Input ────────────────────────────────────────────
         NodeCatalogEntry { label: "Slider", category: "Input",
-            factory: || NodeType::Slider { value: 0.5, min: 0.0, max: 1.0 } },
+            factory: || NodeType::Slider { value: 0.5, min: 0.0, max: 1.0, step: 0.01, slider_color: [80, 160, 255], label: String::new() } },
         NodeCatalogEntry { label: "Time", category: "Input",
             factory: || NodeType::Time { elapsed: 0.0, speed: 1.0, running: true } },
         NodeCatalogEntry { label: "Color", category: "Input",
@@ -190,8 +190,8 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
                 dark_mode: true, accent: [80, 160, 255], font_size: 14.0,
                 bg_color: [30, 30, 30], text_color: [220, 220, 220],
                 window_bg: [40, 40, 40], window_alpha: 240,
-                grid_color: [12, 12, 12], rounding: 4.0, spacing: 4.0, use_hsl: false,
-                background_path: String::new(),
+                grid_color: [12, 12, 12], rounding: 16.0, spacing: 4.0, use_hsl: false,
+                wire_thickness: 5.0, background_path: String::new(),
             } },
         NodeCatalogEntry { label: "Console", category: "Utility",
             factory: || NodeType::Console { messages: Vec::new() } },
@@ -243,7 +243,7 @@ pub fn render_content(
     mcp_active: bool,
 ) {
     match node_type {
-        NodeType::Slider { value, min, max } => slider::render(ui, value, min, max, node_id, values, connections, port_positions, dragging_from),
+        NodeType::Slider { value, min, max, step, slider_color, label } => slider::render(ui, value, min, max, step, slider_color, label, node_id, values, connections, port_positions, dragging_from),
         NodeType::Display { history, history_max, scope_min, scope_max, scope_height, paused } =>
             display::render(ui, node_id, values, connections, history, history_max, scope_min, scope_max, scope_height, paused),
         NodeType::Add | NodeType::Multiply => math::render(ui, node_id, values),
@@ -260,8 +260,8 @@ pub fn render_content(
             midi_in::render(ui, port_name, channel, note, velocity, log, node_id, midi_in_ports, midi_connected_in, midi_actions),
         NodeType::Serial { port_name, baud_rate, log, last_line, send_buf } =>
             serial::render(ui, port_name, baud_rate, log, last_line, send_buf, node_id, values, connections, serial_ports, serial_connected, serial_actions),
-        NodeType::Theme { dark_mode, accent, font_size, bg_color, text_color, window_bg, window_alpha, grid_color, rounding, spacing, use_hsl, background_path } =>
-            theme::render(ui, dark_mode, accent, font_size, bg_color, text_color, window_bg, window_alpha, grid_color, rounding, spacing, use_hsl, background_path, node_id, values, connections, port_positions, dragging_from),
+        NodeType::Theme { dark_mode, accent, font_size, bg_color, text_color, window_bg, window_alpha, grid_color, rounding, spacing, use_hsl, wire_thickness, background_path } =>
+            theme::render(ui, dark_mode, accent, font_size, bg_color, text_color, window_bg, window_alpha, grid_color, rounding, spacing, use_hsl, wire_thickness, background_path, node_id, values, connections, port_positions, dragging_from),
         NodeType::Comment { text } => comment::render(ui, text),
         NodeType::Console { messages } => console::render(ui, messages),
         NodeType::Monitor => monitor::render(ui, monitor_state),
