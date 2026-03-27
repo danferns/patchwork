@@ -13,6 +13,7 @@ fn default_slider_color() -> [u8; 3] { [80, 160, 255] }
 fn default_rounding() -> f32 { 16.0 }
 fn default_spacing() -> f32 { 4.0 }
 fn default_wire_thickness() -> f32 { 6.0 }
+fn default_comment_color() -> [u8; 3] { [45, 45, 50] }
 fn default_scope_history() -> Vec<f32> { Vec::new() }
 fn default_scope_length() -> usize { 200 }
 fn default_scope_min() -> f32 { 0.0 }
@@ -259,7 +260,11 @@ pub enum NodeType {
         #[serde(default)]
         send_buf: String,
     },
-    Comment { text: String },
+    Comment {
+        text: String,
+        #[serde(default = "default_comment_color")]
+        bg_color: [u8; 3],
+    },
     Script {
         name: String,
         input_names: Vec<String>,
@@ -914,7 +919,7 @@ impl NodeType {
 
     /// Whether this node skips the standard egui::Window and renders itself completely custom.
     pub fn custom_render(&self) -> bool {
-        matches!(self, NodeType::Slider { .. })
+        matches!(self, NodeType::Slider { .. } | NodeType::Comment { .. })
     }
 }
 

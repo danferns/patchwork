@@ -293,7 +293,14 @@ impl PatchworkApp {
             // Pinned: inverse zoom on sizes so they appear at native screen size.
             // Zoom-bucketed ID resets egui's cached window size on zoom changes.
             let inv = 1.0 / zoom;
-            let node_width = if node.node_type.custom_render() { 50.0 } else if is_pinned { 180.0 * inv } else { 180.0 };
+            let node_width = match &node.node_type {
+                NodeType::Slider { .. } => 50.0,
+                NodeType::Comment { .. } => 160.0,
+                _ if node.node_type.custom_render() => 50.0,
+                _ if is_pinned => 180.0 * inv,
+                _ => 180.0,
+            };
+            let is_comment = matches!(node.node_type, NodeType::Comment { .. });
             let port_sz = if is_pinned { PORT_INTERACT * inv } else { PORT_INTERACT };
             let port_r = if is_pinned { PORT_RADIUS * inv } else { PORT_RADIUS };
             let title_size = if is_pinned { 14.0 * inv } else { 14.0 };
@@ -313,15 +320,26 @@ impl PatchworkApp {
                 ctx.set_style(std::sync::Arc::new(style));
             }
             let is_custom_render = node.node_type.custom_render();
-            let resp = egui::Window::new(title_rt)
+            // Custom frame for Comment nodes (use their bg_color)
+            let custom_frame = match &node.node_type {
+                NodeType::Comment { bg_color, .. } => {
+                    let bg = egui::Color32::from_rgb(bg_color[0], bg_color[1], bg_color[2]);
+                    Some(egui::Frame::NONE.fill(bg).rounding(8.0).inner_margin(12.0))
+                }
+                _ => None,
+            };
+            let mut win = egui::Window::new(title_rt)
                 .id(egui::Id::new(("node", node_id, zoom_bucket)))
                 .current_pos(egui::pos2(egui_x, egui_y))
                 .default_width(node_width)
-                .resizable(!is_custom_render)
+                .resizable(!is_custom_render && !is_comment)
                 .constrain(false)
-                .collapsible(!is_custom_render)
-                .title_bar(!is_custom_render)
-                .show(ctx, |ui| {
+                .collapsible(!is_custom_render && !is_comment)
+                .title_bar(!is_custom_render && !is_comment);
+            if let Some(frame) = custom_frame {
+                win = win.frame(frame);
+            }
+            let resp = win.show(ctx, |ui| {
                     // Top input ports (skip for inline-port nodes)
                     if !inline {
                         for (i, pdef) in input_defs.iter().enumerate() {
@@ -528,10 +546,14 @@ impl PatchworkApp {
                     self.pinned_nodes.insert(node_id);
                 }
             }
-            let del_id = egui::Id::new(("slider_delete_action", node_id));
-            if ctx.data_mut(|d| d.get_temp::<bool>(del_id).unwrap_or(false)) {
-                ctx.data_mut(|d| d.remove::<bool>(del_id));
-                nodes_to_delete.push(node_id);
+            // Handle delete actions from custom node popups (Slider, Comment, etc.)
+            for prefix in &["slider_delete_action", "comment_delete_action"] {
+                let del_id = egui::Id::new((*prefix, node_id));
+                if ctx.data_mut(|d| d.get_temp::<bool>(del_id).unwrap_or(false)) {
+                    ctx.data_mut(|d| d.remove::<bool>(del_id));
+                    self.push_undo();
+                    nodes_to_delete.push(node_id);
+                }
             }
 
             self.graph.nodes.insert(node_id, node);

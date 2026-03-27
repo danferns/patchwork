@@ -184,7 +184,7 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
 
         // ── Utility ──────────────────────────────────────────
         NodeCatalogEntry { label: "Comment", category: "Utility",
-            factory: || NodeType::Comment { text: String::new() } },
+            factory: || NodeType::Comment { text: String::new(), bg_color: [45, 45, 50] } },
         NodeCatalogEntry { label: "Theme", category: "Utility",
             factory: || NodeType::Theme {
                 dark_mode: true, accent: [80, 160, 255], font_size: 14.0,
@@ -262,7 +262,7 @@ pub fn render_content(
             serial::render(ui, port_name, baud_rate, log, last_line, send_buf, node_id, values, connections, serial_ports, serial_connected, serial_actions),
         NodeType::Theme { dark_mode, accent, font_size, bg_color, text_color, window_bg, window_alpha, grid_color, rounding, spacing, use_hsl, wire_thickness, background_path } =>
             theme::render(ui, dark_mode, accent, font_size, bg_color, text_color, window_bg, window_alpha, grid_color, rounding, spacing, use_hsl, wire_thickness, background_path, node_id, values, connections, port_positions, dragging_from),
-        NodeType::Comment { text } => comment::render(ui, text),
+        NodeType::Comment { text, bg_color } => comment::render(ui, text, bg_color, node_id),
         NodeType::Console { messages } => console::render(ui, messages),
         NodeType::Monitor => monitor::render(ui, monitor_state),
         NodeType::OscOut { host, port, address, arg_count } =>
