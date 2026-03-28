@@ -19,6 +19,10 @@ pub struct SynthParams {
     pub amplitude: f32,
     pub phase: f32,         // current phase (0..1), updated by audio thread
     pub active: bool,
+    /// FM modulation: which synth node modulates this synth's frequency
+    pub fm_source: Option<NodeId>,
+    /// FM modulation depth in Hz (modulator output * depth = frequency offset)
+    pub fm_depth: f32,
 }
 
 impl Default for SynthParams {
@@ -29,6 +33,8 @@ impl Default for SynthParams {
             amplitude: 0.5,
             phase: 0.0,
             active: true,
+            fm_source: None,
+            fm_depth: 0.0,
         }
     }
 }
@@ -186,7 +192,7 @@ impl AudioEffect {
 }
 
 /// Check if two effects chains have the same types in the same order
-fn effects_same_types(a: &[AudioEffect], b: &[AudioEffect]) -> bool {
+pub fn effects_same_types(a: &[AudioEffect], b: &[AudioEffect]) -> bool {
     a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.type_tag() == y.type_tag())
 }
 
@@ -195,6 +201,12 @@ fn effects_same_types(a: &[AudioEffect], b: &[AudioEffect]) -> bool {
 #[derive(Clone)]
 pub enum AudioSource {
     Synth(SynthParams),
+    /// Mixer: references source NodeIds with per-channel gain.
+    /// The audio callback mixes the referenced sources' outputs.
+    Mixer {
+        /// (source_node_id, gain) pairs — gain is 0.0–1.0
+        inputs: Vec<(NodeId, f32)>,
+    },
     // File player uses rodio's Sink — handled separately
 }
 
@@ -204,6 +216,12 @@ pub enum AudioSource {
 pub struct SharedAudioState {
     pub sources: HashMap<NodeId, AudioSource>,
     pub effects: HashMap<NodeId, Vec<AudioEffect>>,
+    /// Audio chains: source_node_id → Vec of effect specs in order.
+    /// Only sources in this map actually play (routed through a Speaker).
+    pub active_chains: HashMap<NodeId, Vec<AudioEffect>>,
+    /// Sources that should be rendered but NOT mixed to output directly.
+    /// These only feed into Mixers or FM carriers.
+    pub render_only: std::collections::HashSet<NodeId>,
     pub master_volume: f32,
     pub sample_rate: f32,
 }
@@ -213,6 +231,8 @@ impl Default for SharedAudioState {
         Self {
             sources: HashMap::new(),
             effects: HashMap::new(),
+            active_chains: HashMap::new(),
+            render_only: std::collections::HashSet::new(),
             master_volume: 0.8,
             sample_rate: 44100.0,
         }
@@ -227,10 +247,11 @@ pub struct AudioManager {
     pub output_device_name: String,
     pub _input_device_name: String,
     // File playback via rodio
-    pub rodio_sink: Option<rodio::Sink>,
+    pub rodio_sinks: HashMap<NodeId, rodio::Sink>,
     rodio_stream: Option<rodio::OutputStream>,
     _rodio_handle: Option<rodio::OutputStreamHandle>,
     pub file_playing: HashMap<NodeId, bool>,
+    pub file_durations: HashMap<NodeId, f64>,  // seconds
     // Cached device lists (refreshed periodically, not every frame)
     pub cached_output_devices: Vec<String>,
     pub cached_input_devices: Vec<String>,
@@ -245,10 +266,11 @@ impl AudioManager {
             stream: None,
             output_device_name: String::new(),
             _input_device_name: String::new(),
-            rodio_sink: None,
+            rodio_sinks: HashMap::new(),
             rodio_stream: None,
             _rodio_handle: None,
             file_playing: HashMap::new(),
+            file_durations: HashMap::new(),
             cached_output_devices: Vec::new(),
             cached_input_devices: Vec::new(),
         }
@@ -261,10 +283,11 @@ impl AudioManager {
             stream: None,
             output_device_name: String::new(),
             _input_device_name: String::new(),
-            rodio_sink: None,
+            rodio_sinks: HashMap::new(),
             rodio_stream: None,
             _rodio_handle: None,
             file_playing: HashMap::new(),
+            file_durations: HashMap::new(),
             cached_output_devices: Vec::new(),
             cached_input_devices: Vec::new(),
         }
@@ -360,6 +383,13 @@ impl AudioManager {
         // If lock fails, skip this frame's update (audio thread is busy — no clicking)
     }
 
+    /// Update mixer inputs for a node
+    pub fn set_mixer(&self, node_id: NodeId, inputs: Vec<(NodeId, f32)>) {
+        if let Ok(mut s) = self.state.try_lock() {
+            s.sources.insert(node_id, AudioSource::Mixer { inputs });
+        }
+    }
+
     /// Remove a source
     pub fn remove_source(&self, node_id: NodeId) {
         if let Ok(mut s) = self.state.lock() {
@@ -389,8 +419,62 @@ impl AudioManager {
         }
     }
 
-    /// Play an audio file via rodio
+    /// Set the active audio chain for a source node (called by Speaker node logic).
+    /// Only sources with active chains will produce sound.
+    pub fn set_active_chain(&self, source_node_id: NodeId, effects: Vec<AudioEffect>) {
+        if let Ok(mut s) = self.state.try_lock() {
+            if let Some(existing) = s.active_chains.get_mut(&source_node_id) {
+                if existing.len() != effects.len() || !effects_same_types(existing, &effects) {
+                    s.active_chains.insert(source_node_id, effects);
+                } else {
+                    for (old, new) in existing.iter_mut().zip(effects.iter()) {
+                        old.merge_params(new);
+                    }
+                }
+            } else {
+                s.active_chains.insert(source_node_id, effects);
+            }
+        }
+    }
+
+    pub fn get_master_volume(&self) -> f32 {
+        self.state.try_lock().ok().map(|s| s.master_volume).unwrap_or(0.8)
+    }
+
+    pub fn set_master_volume(&self, vol: f32) {
+        if let Ok(mut s) = self.state.try_lock() {
+            s.master_volume = vol.clamp(0.0, 1.0);
+        }
+    }
+
+    /// Remove a source from active chains (Speaker disconnected or muted)
+    pub fn remove_active_chain(&self, source_node_id: NodeId) {
+        if let Ok(mut s) = self.state.try_lock() {
+            s.active_chains.remove(&source_node_id);
+        }
+    }
+
+    /// Play an audio file — if paused, resume; if stopped/new, start fresh
     pub fn play_file(&mut self, node_id: NodeId, path: &str) -> Result<(), String> {
+        // If this node has an existing paused sink, just resume it
+        if let Some(sink) = self.rodio_sinks.get(&node_id) {
+            if sink.is_paused() {
+                sink.play();
+                self.file_playing.insert(node_id, true);
+                return Ok(());
+            }
+            if !sink.empty() {
+                // Already playing
+                self.file_playing.insert(node_id, true);
+                return Ok(());
+            }
+        }
+
+        // Remove any finished/old sink for this node
+        if let Some(old_sink) = self.rodio_sinks.remove(&node_id) {
+            old_sink.stop();
+        }
+
         // Initialize rodio stream if needed
         if self.rodio_stream.is_none() {
             let (stream, handle) = rodio::OutputStream::try_default()
@@ -400,6 +484,30 @@ impl AudioManager {
         }
 
         let handle = self._rodio_handle.as_ref().ok_or("No rodio handle")?;
+
+        // Get duration first (separate decoder instance)
+        if !self.file_durations.contains_key(&node_id) {
+            if let Ok(f) = std::fs::File::open(path) {
+                if let Ok(dec) = rodio::Decoder::new(std::io::BufReader::new(f)) {
+                    use rodio::Source;
+                    if let Some(dur) = dec.total_duration() {
+                        self.file_durations.insert(node_id, dur.as_secs_f64());
+                    } else {
+                        // MP3 and some formats don't report duration — calculate from samples
+                        let sample_rate = dec.sample_rate() as f64;
+                        let channels = dec.channels() as f64;
+                        if sample_rate > 0.0 && channels > 0.0 {
+                            let total_samples = dec.count() as f64; // consumes the decoder
+                            let duration = total_samples / sample_rate / channels;
+                            if duration > 0.0 {
+                                self.file_durations.insert(node_id, duration);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let file = std::fs::File::open(path)
             .map_err(|e| format!("Open file: {}", e))?;
         let source = rodio::Decoder::new(std::io::BufReader::new(file))
@@ -409,25 +517,69 @@ impl AudioManager {
             .map_err(|e| format!("Sink: {}", e))?;
         sink.append(source);
 
-        self.rodio_sink = Some(sink);
+        self.rodio_sinks.insert(node_id, sink);
         self.file_playing.insert(node_id, true);
         Ok(())
     }
 
-    /// Pause/resume file playback
-    pub fn toggle_file(&mut self, _node_id: NodeId) {
-        if let Some(sink) = &self.rodio_sink {
-            if sink.is_paused() {
-                sink.play();
-            } else {
-                sink.pause();
-            }
+    /// Pause file playback for a specific node (keeps position, can resume)
+    pub fn pause_file(&mut self, node_id: NodeId) {
+        if let Some(sink) = self.rodio_sinks.get(&node_id) {
+            sink.pause();
+        }
+        self.file_playing.insert(node_id, false);
+    }
+
+    /// Seek file playback to a specific position (seconds).
+    /// Stops current sink, creates new one skipping to the position.
+    pub fn seek_file(&mut self, node_id: NodeId, path: &str, position_secs: f64) -> Result<(), String> {
+        // Stop current playback
+        self.rodio_sinks.remove(&node_id);
+
+        let handle = self._rodio_handle.as_ref().ok_or("No rodio handle")?;
+        let file = std::fs::File::open(path)
+            .map_err(|e| format!("Open: {}", e))?;
+        let source = rodio::Decoder::new(std::io::BufReader::new(file))
+            .map_err(|e| format!("Decode: {}", e))?;
+
+        // Skip to the seek position
+        use rodio::Source;
+        let skipped = source.skip_duration(std::time::Duration::from_secs_f64(position_secs));
+
+        let sink = rodio::Sink::try_new(handle)
+            .map_err(|e| format!("Sink: {}", e))?;
+        sink.append(skipped);
+
+        self.rodio_sinks.insert(node_id, sink);
+        self.file_playing.insert(node_id, true);
+        Ok(())
+    }
+
+    /// Check if a specific node's file sink is paused
+    pub fn is_file_paused(&self, node_id: NodeId) -> bool {
+        self.rodio_sinks.get(&node_id).map(|s| s.is_paused()).unwrap_or(false)
+    }
+
+    /// Check if a specific node's sink has finished playing (empty = done)
+    pub fn is_file_finished(&self, node_id: NodeId) -> bool {
+        self.rodio_sinks.get(&node_id).map(|s| s.empty() && !s.is_paused()).unwrap_or(false)
+    }
+
+    /// Get duration of a file for a node (in seconds)
+    pub fn get_file_duration(&self, node_id: NodeId) -> f64 {
+        self.file_durations.get(&node_id).copied().unwrap_or(0.0)
+    }
+
+    /// Set volume for a specific node's file sink
+    pub fn set_file_volume(&self, node_id: NodeId, volume: f32) {
+        if let Some(sink) = self.rodio_sinks.get(&node_id) {
+            sink.set_volume(volume);
         }
     }
 
-    /// Stop file playback
+    /// Stop file playback completely for a specific node (resets position)
     pub fn stop_file(&mut self, node_id: NodeId) {
-        if let Some(sink) = self.rodio_sink.take() {
+        if let Some(sink) = self.rodio_sinks.remove(&node_id) {
             sink.stop();
         }
         self.file_playing.remove(&node_id);
@@ -442,6 +594,36 @@ impl AudioManager {
 
 // ── Audio Callback (runs on audio thread) ────────────────────────────────────
 
+/// Generate samples for a single synth into a buffer, optionally applying FM modulation.
+/// Returns the buffer (for use as FM source by downstream carriers).
+fn generate_synth_buffer(
+    params: &mut SynthParams,
+    num_frames: usize,
+    sample_rate: f32,
+    fm_buf: Option<&[f32]>,
+) -> Vec<f32> {
+    let mut buf = vec![0.0f32; num_frames];
+    if !params.active || params.amplitude < 0.001 {
+        return buf;
+    }
+
+    for frame in 0..num_frames {
+        // FM: offset frequency by modulator's sample × depth
+        let freq = params.frequency + match fm_buf {
+            Some(mod_samples) => mod_samples[frame] * params.fm_depth,
+            None => 0.0,
+        };
+
+        buf[frame] = params.waveform.sample(params.phase) * params.amplitude;
+
+        // Advance phase (freq can go negative from FM — handle wrap in both directions)
+        params.phase += freq / sample_rate;
+        while params.phase >= 1.0 { params.phase -= 1.0; }
+        while params.phase < 0.0 { params.phase += 1.0; }
+    }
+    buf
+}
+
 fn audio_callback(
     data: &mut [f32],
     channels: usize,
@@ -455,43 +637,114 @@ fn audio_callback(
     // Use try_lock to avoid blocking the audio thread — if UI holds the lock, skip this buffer
     let mut s = match state.try_lock() {
         Ok(s) => s,
-        Err(_) => return, // UI thread holds lock, output silence this buffer
+        Err(_) => return,
     };
 
     let sample_rate = s.sample_rate;
     let master_vol = s.master_volume;
     let num_frames = data.len() / channels;
 
-    // Mix all active sources
-    // Collect IDs to avoid borrow conflicts between sources and effects
-    let node_ids: Vec<NodeId> = s.sources.keys().copied().collect();
-    for node_id in node_ids {
-        let source = match s.sources.get_mut(&node_id) { Some(s) => s, None => continue };
-        match source {
-            AudioSource::Synth(params) => {
-                if !params.active || params.amplitude < 0.001 {
-                    continue;
+    // Only play sources that are in active_chains (routed through a Speaker node)
+    let active_ids: Vec<NodeId> = s.active_chains.keys().copied().collect();
+
+    // ── Two-pass FM synthesis ─────────────────────────────────────────
+    // Pass 1: identify modulators (no fm_source) vs carriers (have fm_source)
+    // Pass 2: generate modulators first, then carriers using modulator output
+
+    // Collect dependency info before mutating sources
+    // Each source either: has no deps (plain synth), has FM dep, or is a Mixer (deps on inputs)
+    let mut deps: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    for &nid in &active_ids {
+        match s.sources.get(&nid) {
+            Some(AudioSource::Synth(params)) => {
+                let mut d = Vec::new();
+                if let Some(fm_src) = params.fm_source { d.push(fm_src); }
+                deps.insert(nid, d);
+            }
+            Some(AudioSource::Mixer { inputs }) => {
+                deps.insert(nid, inputs.iter().map(|(id, _)| *id).collect());
+            }
+            _ => {}
+        }
+    }
+
+    // Dependency-ordered rendering: render nodes whose deps are all satisfied first
+    let mut rendered: HashMap<NodeId, Vec<f32>> = HashMap::new();
+    let mut remaining: Vec<NodeId> = active_ids.clone();
+    let max_passes = 6;
+
+    for _ in 0..max_passes {
+        if remaining.is_empty() { break; }
+        let mut still_waiting: Vec<NodeId> = Vec::new();
+
+        for nid in remaining {
+            let node_deps = deps.get(&nid).cloned().unwrap_or_default();
+            let all_deps_ready = node_deps.iter().all(|d| rendered.contains_key(d));
+
+            if !all_deps_ready {
+                still_waiting.push(nid);
+                continue;
+            }
+
+            match s.sources.get_mut(&nid) {
+                Some(AudioSource::Synth(params)) => {
+                    let fm_buf = params.fm_source.and_then(|src_id| rendered.get(&src_id));
+                    let buf = generate_synth_buffer(
+                        params, num_frames, sample_rate,
+                        fm_buf.map(|v| v.as_slice()),
+                    );
+                    rendered.insert(nid, buf);
                 }
-
-                for frame in 0..num_frames {
-                    let sample = params.waveform.sample(params.phase) * params.amplitude;
-
-                    // Advance phase
-                    params.phase += params.frequency / sample_rate;
-                    if params.phase >= 1.0 {
-                        params.phase -= 1.0;
+                Some(AudioSource::Mixer { inputs }) => {
+                    // Mix all input sources weighted by gain
+                    let mut buf = vec![0.0f32; num_frames];
+                    let inputs_snapshot: Vec<(NodeId, f32)> = inputs.clone();
+                    for (src_id, gain) in &inputs_snapshot {
+                        if let Some(src_buf) = rendered.get(src_id) {
+                            for frame in 0..num_frames {
+                                buf[frame] += src_buf[frame] * gain;
+                            }
+                        }
                     }
+                    rendered.insert(nid, buf);
+                }
+                _ => {}
+            }
+        }
 
-                    // Write to all channels
-                    for ch in 0..channels {
-                        data[frame * channels + ch] += sample * master_vol;
-                    }
+        remaining = still_waiting;
+    }
+
+    // Any remaining (circular deps) — render without deps to avoid silence
+    for nid in remaining {
+        match s.sources.get_mut(&nid) {
+            Some(AudioSource::Synth(params)) => {
+                let buf = generate_synth_buffer(params, num_frames, sample_rate, None);
+                rendered.insert(nid, buf);
+            }
+            Some(AudioSource::Mixer { .. }) => {
+                rendered.insert(nid, vec![0.0; num_frames]);
+            }
+            _ => {}
+        }
+    }
+
+    // ── Mix rendered buffers to output (skip render-only nodes) ────────
+    for &nid in &active_ids {
+        // Skip render-only sources — they only feed into Mixers/FM, not output directly
+        if s.render_only.contains(&nid) { continue; }
+
+        if let Some(buf) = rendered.get(&nid) {
+            for frame in 0..num_frames {
+                let sample = buf[frame];
+                for ch in 0..channels {
+                    data[frame * channels + ch] += sample * master_vol;
                 }
             }
         }
 
-        // Apply effects chain (separate borrow scope)
-        if let Some(fx_chain) = s.effects.get_mut(&node_id) {
+        // Apply the active chain's effects
+        if let Some(fx_chain) = s.active_chains.get_mut(&nid) {
             for frame in 0..num_frames {
                 for ch in 0..channels {
                     let idx = frame * channels + ch;

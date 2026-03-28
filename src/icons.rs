@@ -71,12 +71,15 @@ pub const TIMER: &str = "\u{e494}"; // Time node
 pub const PALETTE: &str = "\u{e39a}"; // Color node
 pub const CURSOR_CLICK: &str = "\u{e1d8}"; // Mouse tracker
 pub const KEYBOARD: &str = "\u{e2d6}"; // Key Input (keyboard icon)
+pub const KEYBOARD_ALT: &str = "⌨"; // Unicode keyboard fallback
 pub const TEXT_AA: &str = "\u{e484}"; // Alternative: ABC/text style
 pub const CHAT_CIRCLE: &str = "\u{e164}"; // Comment
 pub const TERMINAL: &str = "\u{e486}"; // Console
 pub const LIGHTNING: &str = "\u{e2de}"; // Script
 pub const CHART_LINE: &str = "\u{e170}"; // Display
 pub const TEXT_T: &str = "\u{e484}"; // Text Editor
+pub const TOGGLE_RIGHT: &str = "\u{e498}"; // Gate/Toggle (Phosphor toggle-right)
+pub const CIRCLE_HALF: &str = "\u{e18e}"; // Half-circle / gate indicator
 
 /// Font family name for Phosphor icons
 pub const FONT_FAMILY: &str = "phosphor";
@@ -169,14 +172,16 @@ pub fn node_icon(label: &str) -> &'static str {
         // Input
         "Slider" => SLIDERS,
         "Mouse Tracker" => CURSOR_CLICK,
-        "Key Input" | "Keyboard Input" => KEYBOARD,
+        "Key Input" | "Keyboard Input" => KEYBOARD_ALT,
         "Time" => TIMER,
         "Color" => PALETTE,
         // Math
         "Add" => PLUS,
-        "Multiply" => X,  // × symbol
+        "Multiply" => X,
+        "Math" => MATH_OPERATIONS,
         // IO
-        "File" => FOLDER,
+        "File" => FOLDER_OPEN,
+        "Folder" => FOLDER,
         "Text Editor" => TEXT_T,
         // Output
         "Display" => CHART_LINE,
@@ -195,6 +200,7 @@ pub fn node_icon(label: &str) -> &'static str {
         "Audio Player" => PLAY,
         "Audio Device" => SPEAKER_HIGH,
         "Audio FX" => FADERS,
+        "Mixer" => SLIDERS,
         // Hardware
         "OB Hub" => PLUGS_CONNECTED,
         "OB Joystick" => CURSOR_CLICK,

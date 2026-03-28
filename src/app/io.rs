@@ -1,19 +1,97 @@
 use super::*;
+use serde::{Deserialize, Serialize};
+
+/// Minimal session state that gets auto-saved on close and restored on launch.
+#[derive(Serialize, Deserialize)]
+struct SessionState {
+    graph: Graph,
+    canvas_offset: [f32; 2],
+    canvas_zoom: f32,
+    pinned_nodes: Vec<NodeId>,
+    #[serde(default)]
+    project_path: Option<String>,
+    #[serde(default)]
+    api_keys: HashMap<String, String>,
+}
+
+fn session_path() -> std::path::PathBuf {
+    let dir = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".patchwork");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("last_session.json")
+}
 
 impl super::PatchworkApp {
+    /// Save current session state to ~/.patchwork/last_session.json
+    pub fn save_session(&self) {
+        let state = SessionState {
+            graph: self.graph.clone(),
+            canvas_offset: [self.canvas_offset.x, self.canvas_offset.y],
+            canvas_zoom: self.canvas_zoom,
+            pinned_nodes: self.pinned_nodes.iter().copied().collect(),
+            project_path: self.project_path.clone(),
+            api_keys: self.api_keys.clone(),
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&state) {
+            let _ = std::fs::write(session_path(), json);
+        }
+    }
+
+    /// Try to restore session from ~/.patchwork/last_session.json.
+    /// Returns true if session was successfully restored.
+    pub fn restore_session(&mut self) -> bool {
+        let path = session_path();
+        let json = match std::fs::read_to_string(&path) {
+            Ok(j) => j,
+            Err(_) => return false,
+        };
+        let state: SessionState = match serde_json::from_str(&json) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Failed to restore session: {}", e);
+                return false;
+            }
+        };
+        self.graph = state.graph;
+        self.canvas_offset = egui::Vec2::new(state.canvas_offset[0], state.canvas_offset[1]);
+        self.canvas_zoom = state.canvas_zoom;
+        self.pinned_nodes = state.pinned_nodes.into_iter().collect();
+        self.project_path = state.project_path;
+        self.api_keys = state.api_keys;
+        self.port_positions.clear();
+        self.node_rects.clear();
+        self.undo_history.clear();
+        true
+    }
     pub(super) fn handle_file_drop(&mut self, ctx: &egui::Context) {
+        // Capture pointer position BEFORE processing drops (macOS clears it during drop)
+        let drop_pos = ctx.input(|i| {
+            // Try hover_pos first (most reliable during drag-over), then pointer
+            i.pointer.hover_pos()
+                .or_else(|| i.pointer.latest_pos())
+        }).unwrap_or(egui::pos2(300.0, 300.0));
+
         let dropped: Vec<_> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
         if !dropped.is_empty() { self.push_undo(); }
         let image_exts = ["png", "jpg", "jpeg", "gif", "bmp", "webp"];
         let video_exts = ["mp4", "mov", "avi", "webm", "mkv"];
-        for path in dropped {
-            let pos = ctx.pointer_latest_pos().unwrap_or(egui::pos2(200.0, 200.0));
-            let off_e = self.canvas_offset / self.canvas_zoom;
-            let canvas_x = pos.x - off_e.x;
-            let canvas_y = pos.y - off_e.y;
+        let audio_exts = ["mp3", "wav", "ogg", "flac", "aac", "m4a"];
+        let off_e = self.canvas_offset / self.canvas_zoom;
+        for (idx, path) in dropped.iter().enumerate() {
+            // Stack multiple dropped files vertically from the drop point
+            let canvas_x = drop_pos.x - off_e.x;
+            let canvas_y = drop_pos.y - off_e.y + (idx as f32 * 40.0);
 
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-            if image_exts.contains(&ext.as_str()) {
+            if audio_exts.contains(&ext.as_str()) {
+                self.graph.add_node(NodeType::AudioPlayer {
+                    file_path: path.display().to_string(),
+                    volume: 1.0,
+                    looping: false,
+                    duration_secs: 0.0,
+                }, [canvas_x, canvas_y]);
+            } else if image_exts.contains(&ext.as_str()) {
                 let image_data = crate::nodes::image_node::load_image_from_path(&path.display().to_string());
                 self.graph.add_node(NodeType::ImageNode {
                     path: path.display().to_string(),
@@ -78,25 +156,50 @@ impl super::PatchworkApp {
 
     pub(super) fn poll_osc_inputs(&mut self) {
         let node_ids: Vec<NodeId> = self.graph.nodes.keys().copied().collect();
+        // Auto-start/stop listeners for MCP-triggered OscIn nodes
+        for &nid in &node_ids {
+            if let Some(node) = self.graph.nodes.get(&nid) {
+                if let NodeType::OscIn { listening, port, .. } = &node.node_type {
+                    if *listening && !self.osc.is_listening(nid) && *port > 0 {
+                        self.osc.process(vec![crate::osc::OscAction::StartListening { node_id: nid, port: *port }]);
+                    } else if !*listening && self.osc.is_listening(nid) {
+                        self.osc.process(vec![crate::osc::OscAction::StopListening { node_id: nid }]);
+                    }
+                }
+            }
+        }
         for nid in node_ids {
             let messages = self.osc.poll(nid);
             if !messages.is_empty() {
                 if let Some(node) = self.graph.nodes.get_mut(&nid) {
-                    if let NodeType::OscIn { address_filter, arg_count, last_args, log, .. } = &mut node.node_type {
-                        for (addr, args) in messages {
-                            if !address_filter.is_empty() && !addr.contains(address_filter.as_str()) {
+                    if let NodeType::OscIn { address_filter, arg_count, last_args, last_args_text, log, discovered, .. } = &mut node.node_type {
+                        for msg in messages {
+                            // Auto-discover: track unique addresses with their arg counts
+                            let preview = msg.args_text.join(", ");
+                            if let Some(entry) = discovered.iter_mut().find(|(a, _, _)| *a == msg.address) {
+                                entry.1 = msg.args_float.len();
+                                entry.2 = preview.clone();
+                            } else {
+                                discovered.push((msg.address.clone(), msg.args_float.len(), preview.clone()));
+                            }
+
+                            // Log ALL messages (before filtering)
+                            log.push(format!("{} [{}]", msg.address, msg.args_text.join(", ")));
+                            if log.len() > 200 { log.remove(0); }
+
+                            // Address filter: skip if doesn't match
+                            if !address_filter.is_empty() && !msg.address.contains(address_filter.as_str()) {
                                 continue;
                             }
-                            // Update last_args from received message
-                            for (i, &val) in args.iter().enumerate() {
+
+                            // Update last_args (float) and last_args_text
+                            for (i, &val) in msg.args_float.iter().enumerate() {
                                 if i < *arg_count {
-                                    if i >= last_args.len() { last_args.push(0.0); }
+                                    while last_args.len() <= i { last_args.push(0.0); }
                                     last_args[i] = val;
                                 }
                             }
-                            let args_str = args.iter().map(|v| format!("{:.3}", v)).collect::<Vec<_>>().join(", ");
-                            log.push(format!("{} [{}]", addr, args_str));
-                            if log.len() > 200 { log.remove(0); }
+                            *last_args_text = msg.args_text.clone();
                         }
                     }
                 }

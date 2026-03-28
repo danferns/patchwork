@@ -180,12 +180,15 @@ fn port_circle(
     dragging_from: &mut Option<(NodeId, usize, bool)>,
     connections: &[Connection],
 ) {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::click_and_drag());
     let col = if response.hovered() || response.dragged() { egui::Color32::YELLOW }
         else if is_wired { egui::Color32::from_rgb(80, 170, 255) }
         else { egui::Color32::from_rgb(140, 140, 140) };
-    ui.painter().circle_filled(rect.center(), 4.0, col);
-    ui.painter().circle_stroke(rect.center(), 4.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
+    // Rounded square for text ports
+    let half = 5.0;
+    let r = egui::Rect::from_center_size(rect.center(), egui::vec2(half * 2.0, half * 2.0));
+    ui.painter().rect_filled(r, 3.0, col);
+    ui.painter().rect_stroke(r, 3.0, egui::Stroke::new(1.5, egui::Color32::WHITE), egui::StrokeKind::Outside);
     port_positions.insert((node_id, port, true), rect.center());
     if response.drag_started() {
         if let Some(existing) = connections.iter().find(|c| c.to_node == node_id && c.to_port == port) {

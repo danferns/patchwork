@@ -55,36 +55,35 @@ pub fn render(ui: &mut egui::Ui, state: &MonitorState) {
         egui::Color32::from_rgb(255, 80, 80)
     };
 
+    // Title + FPS on same line
     ui.horizontal(|ui| {
-        ui.label("FPS:");
-        ui.colored_label(fps_color, format!("{:.0}", state.fps));
+        ui.label(egui::RichText::new("Monitor").small().color(egui::Color32::GRAY));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.colored_label(fps_color, egui::RichText::new(format!("{:.0}", state.fps)).strong().size(16.0));
+            ui.label("FPS:");
+        });
     });
+
+    // FPS sparkline
+    draw_sparkline(ui, &state.fps_history, fps_color);
+
+    // Frame time
     ui.horizontal(|ui| {
         ui.label("Frame:");
         ui.label(format!("{:.1} ms", state.frame_ms));
     });
-    ui.horizontal(|ui| {
-        ui.label("Nodes:");
-        ui.label(format!("{}", state.node_count));
-    });
-    ui.horizontal(|ui| {
-        ui.label("Connections:");
-        ui.label(format!("{}", state.connection_count));
-    });
 
-    ui.separator();
-
-    // FPS sparkline
-    ui.label(egui::RichText::new("FPS").small().color(egui::Color32::GRAY));
-    draw_sparkline(ui, &state.fps_history, fps_color);
-
-    // Frame time sparkline
-    ui.label(egui::RichText::new("Frame ms").small().color(egui::Color32::GRAY));
+    // Frame ms sparkline
     draw_sparkline(ui, &state.frame_ms_history, egui::Color32::from_rgb(100, 180, 255));
+
+    // Stats
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(format!("Nodes: {}  Conn: {}", state.node_count, state.connection_count)).small().color(egui::Color32::GRAY));
+    });
 }
 
 fn draw_sparkline(ui: &mut egui::Ui, data: &VecDeque<f32>, color: egui::Color32) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 25.0), egui::Sense::hover());
     if data.len() < 2 { return; }
 
     let max_val = data.iter().cloned().fold(f32::MIN, f32::max).max(1.0);
@@ -92,7 +91,7 @@ fn draw_sparkline(ui: &mut egui::Ui, data: &VecDeque<f32>, color: egui::Color32)
     let range = (max_val - min_val).max(0.001);
 
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(30, 30, 30));
+    painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(25, 25, 30));
 
     let points: Vec<egui::Pos2> = data.iter().enumerate().map(|(i, &v)| {
         let x = rect.left() + (i as f32 / (data.len() - 1) as f32) * rect.width();

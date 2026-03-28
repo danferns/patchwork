@@ -10,9 +10,17 @@ pub enum OscAction {
     StopListening { node_id: NodeId },
 }
 
+/// A received OSC message with both float and string representations of args.
+#[derive(Clone, Debug)]
+pub struct ReceivedOsc {
+    pub address: String,
+    pub args_float: Vec<f32>,
+    pub args_text: Vec<String>,
+}
+
 struct Listener {
     _thread: std::thread::JoinHandle<()>,
-    rx: mpsc::Receiver<(String, Vec<f32>)>,
+    rx: mpsc::Receiver<ReceivedOsc>,
 }
 
 pub struct OscManager {
@@ -90,17 +98,57 @@ impl OscManager {
         }
     }
 
-    fn extract_messages(packet: &OscPacket, tx: &mpsc::Sender<(String, Vec<f32>)>) {
+    fn extract_messages(packet: &OscPacket, tx: &mpsc::Sender<ReceivedOsc>) {
         match packet {
             OscPacket::Message(msg) => {
-                let args: Vec<f32> = msg.args.iter().map(|a| match a {
-                    OscType::Float(f) => *f,
-                    OscType::Int(i) => *i as f32,
-                    OscType::Double(d) => *d as f32,
-                    OscType::Long(l) => *l as f32,
-                    _ => 0.0,
-                }).collect();
-                let _ = tx.send((msg.addr.clone(), args));
+                let mut args_float = Vec::with_capacity(msg.args.len());
+                let mut args_text = Vec::with_capacity(msg.args.len());
+                for a in &msg.args {
+                    match a {
+                        OscType::Float(f) => {
+                            args_float.push(*f);
+                            args_text.push(format!("{:.4}", f));
+                        }
+                        OscType::Int(i) => {
+                            args_float.push(*i as f32);
+                            args_text.push(i.to_string());
+                        }
+                        OscType::Double(d) => {
+                            args_float.push(*d as f32);
+                            args_text.push(format!("{:.6}", d));
+                        }
+                        OscType::Long(l) => {
+                            args_float.push(*l as f32);
+                            args_text.push(l.to_string());
+                        }
+                        OscType::String(s) => {
+                            // Try parsing as number, fall back to 0.0
+                            args_float.push(s.parse::<f32>().unwrap_or(0.0));
+                            args_text.push(s.clone());
+                        }
+                        OscType::Bool(b) => {
+                            args_float.push(if *b { 1.0 } else { 0.0 });
+                            args_text.push(b.to_string());
+                        }
+                        OscType::Nil => {
+                            args_float.push(0.0);
+                            args_text.push("nil".into());
+                        }
+                        OscType::Blob(bytes) => {
+                            args_float.push(bytes.len() as f32);
+                            args_text.push(format!("<blob {}B>", bytes.len()));
+                        }
+                        _ => {
+                            args_float.push(0.0);
+                            args_text.push("?".into());
+                        }
+                    }
+                }
+                let _ = tx.send(ReceivedOsc {
+                    address: msg.addr.clone(),
+                    args_float,
+                    args_text,
+                });
             }
             OscPacket::Bundle(bundle) => {
                 for p in &bundle.content {
@@ -110,7 +158,7 @@ impl OscManager {
         }
     }
 
-    pub fn poll(&mut self, node_id: NodeId) -> Vec<(String, Vec<f32>)> {
+    pub fn poll(&mut self, node_id: NodeId) -> Vec<ReceivedOsc> {
         let mut messages = Vec::new();
         if let Some(listener) = self.listeners.get(&node_id) {
             while let Ok(msg) = listener.rx.try_recv() {

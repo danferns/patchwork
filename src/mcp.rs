@@ -43,6 +43,8 @@ pub enum McpCommand {
     #[allow(dead_code)]
     GetGraph,
     CreateWorkflow { nodes: Vec<WorkflowNode>, connections: Vec<WorkflowConn> },
+    /// Trigger an action on a node (send, play, listen, etc.)
+    TriggerNode { node_id: NodeId, action: String },
 }
 
 #[derive(Serialize)]
@@ -225,6 +227,18 @@ fn tool_definitions() -> Value {
                 },
                 "required": ["nodes"]
             }
+        },
+        {
+            "name": "trigger_node",
+            "description": "Trigger an action on a node. Actions: 'send' (HttpRequest, AiRequest), 'play'/'pause'/'stop' (VideoPlayer, AudioPlayer), 'listen'/'stop_listen' (OscIn), 'activate'/'deactivate' (Speaker)",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "node_id": { "type": "integer", "description": "Node ID" },
+                    "action": { "type": "string", "description": "Action name: send, play, pause, stop, listen, stop_listen, activate, deactivate" }
+                },
+                "required": ["node_id", "action"]
+            }
         }
     ])
 }
@@ -264,11 +278,47 @@ pub fn execute_command(
             let catalog = nodes::catalog();
             let types: Vec<Value> = catalog.iter().map(|e| {
                 let nt = (e.factory)();
+                // Extract property names and default values from serialized NodeType
+                let properties = if let Ok(val) = serde_json::to_value(&nt) {
+                    if let Value::Object(outer) = val {
+                        if let Some((_, inner)) = outer.into_iter().next() {
+                            if let Value::Object(fields) = inner {
+                                let schema: serde_json::Map<String, Value> = fields.into_iter()
+                                    .filter(|(k, _)| {
+                                        // Skip internal/runtime fields
+                                        !matches!(k.as_str(),
+                                            "response" | "status" | "log" | "last_hash" |
+                                            "last_args" | "last_args_text" | "discovered" |
+                                            "result" | "error" | "result_text" | "last_input_hash" |
+                                            "current_frame" | "duration" | "variables" |
+                                            "image_data" | "last_save_hash" | "content" |
+                                            "messages" | "detected_devices" | "effects" |
+                                            "x" | "y" // mouse tracker runtime values
+                                        )
+                                    })
+                                    .map(|(k, v)| {
+                                        let type_str = match &v {
+                                            Value::Bool(_) => "boolean",
+                                            Value::Number(_) => "number",
+                                            Value::String(_) => "string",
+                                            Value::Array(_) => "array",
+                                            Value::Object(_) => "object",
+                                            Value::Null => "null",
+                                        };
+                                        (k, json!({ "type": type_str, "default": v }))
+                                    })
+                                    .collect();
+                                Value::Object(schema)
+                            } else { json!({}) }
+                        } else { json!({}) }
+                    } else { json!({}) }
+                } else { json!({}) };
                 json!({
                     "name": e.label,
                     "category": e.category,
                     "inputs": nt.inputs().iter().map(|p| p.name).collect::<Vec<_>>(),
                     "outputs": nt.outputs().iter().map(|p| p.name).collect::<Vec<_>>(),
+                    "properties": properties,
                 })
             }).collect();
             McpResult::Json(json!(types))
@@ -419,6 +469,73 @@ pub fn execute_command(
         McpCommand::GetGraph => {
             let json = serde_json::to_value(graph).unwrap_or(json!(null));
             McpResult::Json(json)
+        }
+
+        McpCommand::TriggerNode { node_id, action } => {
+            let node = match graph.nodes.get_mut(&node_id) {
+                Some(n) => n,
+                None => return McpResult::Error { error: format!("Node {} not found", node_id) },
+            };
+            match (&mut node.node_type, action.as_str()) {
+                // HttpRequest: mark for send by setting auto_send + resetting hash
+                (NodeType::HttpRequest { auto_send, last_hash, .. }, "send") => {
+                    *auto_send = true;
+                    *last_hash = 0; // Force hash mismatch → triggers send on next frame
+                    McpResult::Json(json!({ "success": true, "triggered": "send" }))
+                }
+                // AiRequest: set a pending flag via status
+                (NodeType::AiRequest { status, .. }, "send") => {
+                    *status = "mcp_trigger".into();
+                    McpResult::Json(json!({ "success": true, "triggered": "send" }))
+                }
+                // VideoPlayer
+                (NodeType::VideoPlayer { playing, status, .. }, "play") => {
+                    *playing = true; *status = "Playing".into();
+                    McpResult::Json(json!({ "success": true, "triggered": "play" }))
+                }
+                (NodeType::VideoPlayer { playing, status, .. }, "pause" | "stop") => {
+                    *playing = false; *status = "Stopped".into();
+                    McpResult::Json(json!({ "success": true, "triggered": action }))
+                }
+                // AudioPlayer
+                (NodeType::AudioPlayer { volume, .. }, "play") => {
+                    if *volume <= 0.0 { *volume = 1.0; }
+                    McpResult::Json(json!({ "success": true, "triggered": "play" }))
+                }
+                // Speaker
+                (NodeType::Speaker { active, .. }, "activate") => {
+                    *active = true;
+                    McpResult::Json(json!({ "success": true, "triggered": "activate" }))
+                }
+                (NodeType::Speaker { active, .. }, "deactivate") => {
+                    *active = false;
+                    McpResult::Json(json!({ "success": true, "triggered": "deactivate" }))
+                }
+                // OscIn
+                (NodeType::OscIn { listening, port, .. }, "listen") => {
+                    *listening = true;
+                    // Actual listener start happens via mcp_trigger temp data
+                    let p = *port;
+                    // Store trigger request for app layer to process
+                    McpResult::Json(json!({ "success": true, "triggered": "listen", "port": p }))
+                }
+                (NodeType::OscIn { listening, .. }, "stop_listen") => {
+                    *listening = false;
+                    McpResult::Json(json!({ "success": true, "triggered": "stop_listen" }))
+                }
+                // Synth active
+                (NodeType::Synth { active, .. }, "play" | "activate") => {
+                    *active = true;
+                    McpResult::Json(json!({ "success": true, "triggered": "activate" }))
+                }
+                (NodeType::Synth { active, .. }, "stop" | "deactivate") => {
+                    *active = false;
+                    McpResult::Json(json!({ "success": true, "triggered": "deactivate" }))
+                }
+                _ => McpResult::Error { error: format!(
+                    "Action '{}' not supported for node type '{}'", action, node.node_type.title()
+                ) },
+            }
         }
 
         McpCommand::CreateWorkflow { nodes: wf_nodes, connections: wf_conns } => {
@@ -673,6 +790,14 @@ fn parse_tool_call(name: &str, args: &Value) -> Result<McpCommand, String> {
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
                 .unwrap_or_default();
             Ok(McpCommand::CreateWorkflow { nodes, connections })
+        }
+
+        "trigger_node" => {
+            let node_id = args.get("node_id").and_then(|v| v.as_u64())
+                .ok_or("Missing 'node_id'")?;
+            let action = args.get("action").and_then(|v| v.as_str())
+                .ok_or("Missing 'action'")?.to_string();
+            Ok(McpCommand::TriggerNode { node_id, action })
         }
 
         _ => Err(format!("Unknown tool: {}", name)),

@@ -2,8 +2,8 @@ use crate::graph::{NodeId, PortValue, Connection};
 use std::collections::HashMap;
 use eframe::egui;
 
-const PORT_RADIUS: f32 = 6.0;
-const PORT_SIZE: f32 = 12.0;
+const PORT_RADIUS: f32 = 7.0;
+const PORT_SIZE: f32 = 14.0;
 const IN_COLOR: egui::Color32 = egui::Color32::from_rgb(70, 75, 85);
 const IN_BORDER: egui::Color32 = egui::Color32::from_rgb(120, 125, 135);
 const WIRED_COLOR: egui::Color32 = egui::Color32::from_rgb(60, 140, 255);
@@ -214,6 +214,11 @@ pub fn render(
     window_bg: &mut [u8; 3],
     window_alpha: &mut u8,
     grid_color: &mut [u8; 3],
+    grid_style: &mut u8,
+    wire_style: &mut u8,
+    wiggle_gravity: &mut f32,
+    wiggle_range: &mut f32,
+    wiggle_speed: &mut f32,
     rounding: &mut f32,
     spacing: &mut f32,
     use_hsl: &mut bool,
@@ -284,28 +289,29 @@ pub fn render(
     });
 
     // Presets
+    ui.label(egui::RichText::new("Preset").small().color(egui::Color32::GRAY));
     ui.horizontal(|ui| {
         if ui.small_button("Dark").clicked() {
-            *dark_mode = true;
-            *bg_color = [30, 30, 30]; *text_color = [220, 220, 220];
-            *window_bg = [40, 40, 40]; *window_alpha = 240; *grid_color = [12, 12, 12];
+            apply_preset_dark(dark_mode, bg_color, text_color, window_bg, window_alpha, grid_color, accent, font_size, rounding, spacing, wire_thickness, grid_style, wire_style);
         }
         if ui.small_button("Light").clicked() {
-            *dark_mode = false;
-            *bg_color = [240, 240, 240]; *text_color = [30, 30, 30];
-            *window_bg = [255, 255, 255]; *window_alpha = 240; *grid_color = [200, 200, 200];
+            apply_preset_light(dark_mode, bg_color, text_color, window_bg, window_alpha, grid_color, accent, font_size, rounding, spacing, wire_thickness, grid_style, wire_style);
         }
         if ui.small_button("Blue").clicked() {
-            *dark_mode = true;
-            *bg_color = [15, 20, 35]; *text_color = [200, 210, 230];
-            *window_bg = [20, 30, 50]; *window_alpha = 230;
-            *grid_color = [20, 25, 45]; *accent = [60, 140, 255];
+            apply_preset_blue(dark_mode, bg_color, text_color, window_bg, window_alpha, grid_color, accent, font_size, rounding, spacing, wire_thickness, grid_style, wire_style);
+        }
+        if ui.small_button("Reset").clicked() {
+            apply_defaults(dark_mode, bg_color, text_color, window_bg, window_alpha, grid_color, accent, font_size, rounding, spacing, wire_thickness, grid_style, wire_style);
         }
     });
 
+    ui.separator();
+
+    // Mode
+    ui.label(egui::RichText::new("Mode").small().color(egui::Color32::GRAY));
     ui.horizontal(|ui| {
-        ui.selectable_value(use_hsl, false, "RGB");
-        ui.selectable_value(use_hsl, true, "HSL");
+        ui.radio_value(use_hsl, false, "RGB");
+        ui.radio_value(use_hsl, true, "HSL");
     });
 
     ui.separator();
@@ -316,6 +322,48 @@ pub fn render(
     color_row(ui, "Accent", accent, *use_hsl, port_positions, dragging_from, node_id, 6, 0, values, connections);
     color_row(ui, "Window", window_bg, *use_hsl, port_positions, dragging_from, node_id, 9, 0, values, connections);
     color_row(ui, "Grid", grid_color, *use_hsl, port_positions, dragging_from, node_id, 12, 0, values, connections);
+
+    // Grid style selector
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Grid").small());
+        for (label, val) in [("Solid", 0u8), ("Square", 1), ("Dotted", 2)] {
+            if ui.selectable_label(*grid_style == val, label).clicked() {
+                *grid_style = val;
+            }
+        }
+    });
+
+    // Wire style selector
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Wires").small());
+        for (label, val) in [("Bezier", 0u8), ("Straight", 1), ("Ortho", 2), ("Wiggly", 3)] {
+            if ui.selectable_label(*wire_style == val, label).clicked() {
+                *wire_style = val;
+            }
+        }
+    });
+
+    // Wiggly wire sub-settings (only shown when Wiggly is selected)
+    if *wire_style == 3 {
+        ui.horizontal(|ui| {
+            ui.add_space(12.0);
+            ui.label(egui::RichText::new("Gravity").small().color(egui::Color32::GRAY));
+            ui.add(egui::Slider::new(wiggle_gravity, 0.0..=4.0).step_by(0.1).show_value(false));
+            ui.add(egui::DragValue::new(wiggle_gravity).speed(0.1).range(0.0..=4.0).max_decimals(1));
+        });
+        ui.horizontal(|ui| {
+            ui.add_space(12.0);
+            ui.label(egui::RichText::new("Range").small().color(egui::Color32::GRAY));
+            ui.add(egui::Slider::new(wiggle_range, 0.1..=12.0).step_by(0.1).show_value(false));
+            ui.add(egui::DragValue::new(wiggle_range).speed(0.1).range(0.1..=12.0).max_decimals(1));
+        });
+        ui.horizontal(|ui| {
+            ui.add_space(12.0);
+            ui.label(egui::RichText::new("Speed").small().color(egui::Color32::GRAY));
+            ui.add(egui::Slider::new(wiggle_speed, 0.1..=4.0).step_by(0.05).show_value(false));
+            ui.add(egui::DragValue::new(wiggle_speed).speed(0.05).range(0.1..=4.0).max_decimals(2));
+        });
+    }
 
     ui.separator();
 
@@ -432,6 +480,63 @@ pub fn apply(
     }
     style.spacing.item_spacing = egui::vec2(spacing, spacing);
     ctx.set_style(style);
+}
+
+// ── Defaults & Presets ───────────────────────────────────────────────────
+
+/// The canonical defaults — used by Reset button and initial Theme node creation
+pub fn apply_defaults(
+    dark_mode: &mut bool, bg_color: &mut [u8; 3], text_color: &mut [u8; 3],
+    window_bg: &mut [u8; 3], window_alpha: &mut u8, grid_color: &mut [u8; 3],
+    accent: &mut [u8; 3], font_size: &mut f32, rounding: &mut f32, spacing: &mut f32,
+    wire_thickness: &mut f32, grid_style: &mut u8, wire_style: &mut u8,
+) {
+    *dark_mode = true;
+    *bg_color = [30, 30, 30]; *text_color = [220, 220, 220];
+    *accent = [80, 160, 255];
+    *window_bg = [40, 40, 40]; *window_alpha = 240;
+    *grid_color = [12, 12, 12];
+    *font_size = 14.0; *rounding = 16.0; *spacing = 4.0;
+    *wire_thickness = 6.0; *grid_style = 2; *wire_style = 0;
+}
+
+fn apply_preset_dark(
+    dark_mode: &mut bool, bg_color: &mut [u8; 3], text_color: &mut [u8; 3],
+    window_bg: &mut [u8; 3], window_alpha: &mut u8, grid_color: &mut [u8; 3],
+    accent: &mut [u8; 3], font_size: &mut f32, rounding: &mut f32, spacing: &mut f32,
+    wire_thickness: &mut f32, grid_style: &mut u8, wire_style: &mut u8,
+) {
+    apply_defaults(dark_mode, bg_color, text_color, window_bg, window_alpha, grid_color, accent, font_size, rounding, spacing, wire_thickness, grid_style, wire_style);
+}
+
+fn apply_preset_light(
+    dark_mode: &mut bool, bg_color: &mut [u8; 3], text_color: &mut [u8; 3],
+    window_bg: &mut [u8; 3], window_alpha: &mut u8, grid_color: &mut [u8; 3],
+    accent: &mut [u8; 3], font_size: &mut f32, rounding: &mut f32, spacing: &mut f32,
+    _wire_thickness: &mut f32, grid_style: &mut u8, _wire_style: &mut u8,
+) {
+    *dark_mode = false;
+    *bg_color = [240, 240, 240]; *text_color = [30, 30, 30];
+    *accent = [60, 120, 220];
+    *window_bg = [255, 255, 255]; *window_alpha = 240;
+    *grid_color = [200, 200, 200];
+    *font_size = 14.0; *rounding = 16.0; *spacing = 4.0;
+    *grid_style = 2;
+}
+
+fn apply_preset_blue(
+    dark_mode: &mut bool, bg_color: &mut [u8; 3], text_color: &mut [u8; 3],
+    window_bg: &mut [u8; 3], window_alpha: &mut u8, grid_color: &mut [u8; 3],
+    accent: &mut [u8; 3], font_size: &mut f32, rounding: &mut f32, spacing: &mut f32,
+    _wire_thickness: &mut f32, grid_style: &mut u8, _wire_style: &mut u8,
+) {
+    *dark_mode = true;
+    *bg_color = [15, 20, 35]; *text_color = [200, 210, 230];
+    *accent = [60, 140, 255];
+    *window_bg = [20, 30, 50]; *window_alpha = 230;
+    *grid_color = [20, 25, 45];
+    *font_size = 14.0; *rounding = 16.0; *spacing = 4.0;
+    *grid_style = 2;
 }
 
 // ── HSL helpers ──────────────────────────────────────────────────────────

@@ -16,12 +16,229 @@ pub(super) fn point_near_bezier(p: egui::Pos2, from: egui::Pos2, to: egui::Pos2,
     false
 }
 
-pub(super) fn draw_bezier(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, color: egui::Color32, width: f32) {
+/// Evaluate a cubic bezier at parameter t
+fn eval_bezier(from: egui::Pos2, to: egui::Pos2, t: f32) -> egui::Pos2 {
     let dx = (to.x - from.x).abs().max(50.0) * 0.5;
-    painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
-        [from, egui::pos2(from.x + dx, from.y), egui::pos2(to.x - dx, to.y), to],
-        false, egui::Color32::TRANSPARENT, egui::Stroke::new(width, color),
-    ));
+    let cp1 = egui::pos2(from.x + dx, from.y);
+    let cp2 = egui::pos2(to.x - dx, to.y);
+    let it = 1.0 - t;
+    egui::pos2(
+        it*it*it*from.x + 3.0*it*it*t*cp1.x + 3.0*it*t*t*cp2.x + t*t*t*to.x,
+        it*it*it*from.y + 3.0*it*it*t*cp1.y + 3.0*it*t*t*cp2.y + t*t*t*to.y,
+    )
+}
+
+/// Wiggly wire parameters (passed through draw_wire/draw_wire_3d)
+#[derive(Clone, Copy)]
+pub(super) struct WiggleParams {
+    pub activity: f32,
+    pub time: f32,
+    pub gravity: f32,    // 0=none, 1=heavy droop
+    pub range: f32,      // amplitude multiplier
+    pub speed: f32,      // speed multiplier (0.1=slow, 2.0=fast)
+}
+
+impl Default for WiggleParams {
+    fn default() -> Self { Self { activity: 0.0, time: 0.0, gravity: 0.0, range: 1.0, speed: 1.0 } }
+}
+
+/// Draw a wire connector plug at an endpoint.
+/// This is a simple vector shape (rounded rect with border) — replace the SVG path
+/// inside this function to use your own custom connector artwork.
+///
+/// To customize: edit the painter calls below. The `center` is where the wire meets
+/// the port. `color` is the PortKind base color. `is_source` indicates whether this
+/// is the output (source) end or the input (destination) end.
+///
+/// To replace with your own vector image later:
+/// 1. Load your SVG/vector as a set of `egui::Shape` primitives
+/// 2. Replace the painter calls in this function with your shapes
+/// 3. Use `color` to tint your vector artwork
+pub(super) fn draw_wire_connector(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    color: egui::Color32,
+    is_source: bool,
+) {
+    let w = 8.0_f32;
+    let h = 6.0_f32;
+    let corner = 2.0;
+
+    // Outer shape: rounded rect
+    let rect = egui::Rect::from_center_size(center, egui::vec2(w, h));
+    let border_col = egui::Color32::from_rgb(
+        (color.r() as u16 + 80).min(255) as u8,
+        (color.g() as u16 + 80).min(255) as u8,
+        (color.b() as u16 + 80).min(255) as u8,
+    );
+
+    // Fill: darker for input (dest), full color for output (source)
+    let fill = if is_source {
+        color
+    } else {
+        egui::Color32::from_rgb(
+            (color.r() as f32 * 0.4) as u8,
+            (color.g() as f32 * 0.4) as u8,
+            (color.b() as f32 * 0.4) as u8,
+        )
+    };
+
+    painter.rect_filled(rect, corner, fill);
+    painter.rect_stroke(rect, corner, egui::Stroke::new(1.5, border_col), egui::StrokeKind::Outside);
+
+    // Small notch/line inside to suggest a plug contact
+    let notch_y = center.y;
+    let notch_w = w * 0.3;
+    painter.line_segment(
+        [egui::pos2(center.x - notch_w, notch_y), egui::pos2(center.x + notch_w, notch_y)],
+        egui::Stroke::new(1.0, border_col),
+    );
+}
+
+/// Draw a wire between two points. style: 0=Bezier, 1=Straight, 2=Orthogonal, 3=Wiggly
+pub(super) fn draw_wire(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, color: egui::Color32, width: f32, style: u8, wp: &WiggleParams) {
+    match style {
+        1 => {
+            // Straight line
+            painter.line_segment([from, to], egui::Stroke::new(width, color));
+        }
+        2 => {
+            // Orthogonal with rounded corners
+            let mid_x = (from.x + to.x) / 2.0;
+            let corner_r = 12.0_f32.min((to.x - from.x).abs() / 4.0).min((to.y - from.y).abs() / 2.0);
+            let points = if (from.y - to.y).abs() < 2.0 {
+                vec![from, to]
+            } else {
+                let dy = to.y - from.y;
+                let sign_y = dy.signum();
+                vec![
+                    from,
+                    egui::pos2(mid_x - corner_r, from.y),
+                    egui::pos2(mid_x, from.y + sign_y * corner_r),
+                    egui::pos2(mid_x, to.y - sign_y * corner_r),
+                    egui::pos2(mid_x + corner_r, to.y),
+                    to,
+                ]
+            };
+            for pair in points.windows(2) {
+                painter.line_segment([pair[0], pair[1]], egui::Stroke::new(width, color));
+            }
+        }
+        3 => {
+            // Wiggly wire — sine-displaced bezier, activity-driven
+            draw_wiggly_wire(painter, from, to, color, width, wp);
+        }
+        _ => {
+            // Bezier (default)
+            let dx = (to.x - from.x).abs().max(50.0) * 0.5;
+            painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+                [from, egui::pos2(from.x + dx, from.y), egui::pos2(to.x - dx, to.y), to],
+                false, egui::Color32::TRANSPARENT, egui::Stroke::new(width, color),
+            ));
+        }
+    }
+}
+
+/// Draw wiggly wire: sample bezier, add perpendicular sine displacement.
+/// - Smooth activity transitions (exponential-smoothed via egui temp data)
+/// - Port-area fade: wiggles near-zero at both endpoints (steeper than plain sine envelope)
+/// - Gravity: catenary-like downward sag, strongest at midpoint
+/// - Phase travels from→to direction
+fn draw_wiggly_wire(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, color: egui::Color32, width: f32, wp: &WiggleParams) {
+    let segments = 50;
+    let dist = from.distance(to).max(1.0);
+    let activity = wp.activity;
+    let range = wp.range;
+
+    // Amplitude scales with distance and range, boosted by activity
+    let base_amp = (dist * 0.012).clamp(1.0, 4.0) * range;
+    let active_amp = (dist * 0.04).clamp(4.0, 16.0) * range;
+    let amplitude = base_amp + (active_amp - base_amp) * activity;
+
+    // Frequency: more waves when active
+    let base_freq = (dist / 70.0).clamp(1.5, 4.0);
+    let active_freq = (dist / 30.0).clamp(3.0, 12.0);
+    let frequency = base_freq + (active_freq - base_freq) * activity;
+
+    // Phase travels from→to (positive direction along t), scaled by speed
+    let phase = wp.time * (1.5 + activity * 5.0) * wp.speed;
+
+    // Gravity sag (pixels of downward displacement at midpoint)
+    let gravity_sag = wp.gravity * dist * 0.12;
+
+    let mut points = Vec::with_capacity(segments + 1);
+    for i in 0..=segments {
+        let t = i as f32 / segments as f32;
+        let base = eval_bezier(from, to, t);
+
+        // Tangent for perpendicular
+        let t2 = (t + 0.01).min(1.0);
+        let next = eval_bezier(from, to, t2);
+        let dx = next.x - base.x;
+        let dy = next.y - base.y;
+        let len = (dx * dx + dy * dy).sqrt().max(0.001);
+        let nx = -dy / len;
+        let ny = dx / len;
+
+        // Port-area fade: steep falloff near endpoints, flat in the middle
+        // Using sin^3 for steeper edge fade — near-zero for ~15% at each end
+        let raw_env = (t * std::f32::consts::PI).sin();
+        let envelope = raw_env * raw_env * raw_env; // sin³ = very flat at 0 and 1
+
+        // Sine displacement — phase moves from→to
+        let sine = (t * frequency * std::f32::consts::TAU - phase).sin();
+        let offset = sine * amplitude * envelope;
+
+        // Gravity: parabolic sag (max at t=0.5, zero at endpoints)
+        // 4*t*(1-t) = parabola peaking at 1.0 when t=0.5
+        let sag = gravity_sag * 4.0 * t * (1.0 - t);
+
+        points.push(egui::pos2(
+            base.x + nx * offset,
+            base.y + ny * offset + sag, // sag is always downward (+y)
+        ));
+    }
+
+    for pair in points.windows(2) {
+        painter.line_segment([pair[0], pair[1]], egui::Stroke::new(width, color));
+    }
+}
+
+/// Draw a 3D-effect wire: shadow underneath + main color + bright highlight on top.
+pub(super) fn draw_wire_3d(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, color: egui::Color32, width: f32, style: u8, wp: &WiggleParams) {
+    let rgba = color.to_array();
+    // 1. Shadow layer (dark, wider, offset slightly down)
+    let shadow = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 40);
+    let shadow_from = egui::pos2(from.x, from.y + 1.5);
+    let shadow_to = egui::pos2(to.x, to.y + 1.5);
+    draw_wire(painter, shadow_from, shadow_to, shadow, width + 3.0, style, wp);
+
+    // 2. Dark edge (creates depth — slightly wider than main)
+    let dark_edge = egui::Color32::from_rgb(
+        (rgba[0] as u16 / 3).min(255) as u8,
+        (rgba[1] as u16 / 3).min(255) as u8,
+        (rgba[2] as u16 / 3).min(255) as u8,
+    );
+    draw_wire(painter, from, to, dark_edge, width + 1.5, style, wp);
+
+    // 3. Main wire
+    draw_wire(painter, from, to, color, width, style, wp);
+
+    // 4. Bright highlight strip (specular — thin, brighter, offset slightly up)
+    let highlight = egui::Color32::from_rgba_unmultiplied(
+        (rgba[0] as u16 + 100).min(255) as u8,
+        (rgba[1] as u16 + 100).min(255) as u8,
+        (rgba[2] as u16 + 100).min(255) as u8,
+        140,
+    );
+    let hl_from = egui::pos2(from.x, from.y - 0.5);
+    let hl_to = egui::pos2(to.x, to.y - 0.5);
+    draw_wire(painter, hl_from, hl_to, highlight, (width * 0.25).max(1.0), style, wp);
+}
+
+/// Backward-compatible wrapper
+pub(super) fn draw_bezier(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, color: egui::Color32, width: f32) {
+    draw_wire(painter, from, to, color, width, 0, &WiggleParams::default());
 }
 
 impl super::PatchworkApp {
@@ -31,23 +248,45 @@ impl super::PatchworkApp {
             let rect = ui.max_rect();
             let zoom = self.canvas_zoom;
             let grid = 25.0; // Logical units; set_zoom_factor scales to screen
-            let gc = self.graph.nodes.values()
-                .find_map(|n| if let NodeType::Theme { grid_color, .. } = &n.node_type { Some(*grid_color) } else { None })
-                .unwrap_or([12, 12, 12]);
+            // Grid style + color from Theme
+            let (gc, gs) = self.graph.nodes.values()
+                .find_map(|n| if let NodeType::Theme { grid_color, grid_style, .. } = &n.node_type { Some((*grid_color, *grid_style)) } else { None })
+                .unwrap_or(([12, 12, 12], 2)); // default: dotted
             let col = egui::Color32::from_rgba_premultiplied(gc[0], gc[1], gc[2], 35);
-            let off = self.canvas_offset / zoom; // Offset in logical coords
-            let x_start = ((rect.left() - off.x) / grid).floor() as i32;
-            let x_end = ((rect.right() - off.x) / grid).ceil() as i32;
-            let y_start = ((rect.top() - off.y) / grid).floor() as i32;
-            let y_end = ((rect.bottom() - off.y) / grid).ceil() as i32;
-            for i in x_start..=x_end {
-                let x = i as f32 * grid + off.x;
-                painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], egui::Stroke::new(0.5, col));
+            let off = self.canvas_offset / zoom;
+
+            // gs: 0=Solid (no grid), 1=Square lines, 2=Dotted
+            if gs > 0 {
+                let x_start = ((rect.left() - off.x) / grid).floor() as i32;
+                let x_end = ((rect.right() - off.x) / grid).ceil() as i32;
+                let y_start = ((rect.top() - off.y) / grid).floor() as i32;
+                let y_end = ((rect.bottom() - off.y) / grid).ceil() as i32;
+
+                if gs == 1 {
+                    // Square grid (lines)
+                    for i in x_start..=x_end {
+                        let x = i as f32 * grid + off.x;
+                        painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], egui::Stroke::new(0.5, col));
+                    }
+                    for i in y_start..=y_end {
+                        let y = i as f32 * grid + off.y;
+                        painter.line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)], egui::Stroke::new(0.5, col));
+                    }
+                } else {
+                    // Dotted grid (dots at intersections)
+                    let dot_col = egui::Color32::from_rgba_premultiplied(gc[0], gc[1], gc[2], 50);
+                    for ix in x_start..=x_end {
+                        for iy in y_start..=y_end {
+                            let x = ix as f32 * grid + off.x;
+                            let y = iy as f32 * grid + off.y;
+                            if rect.contains(egui::pos2(x, y)) {
+                                painter.circle_filled(egui::pos2(x, y), 1.2, dot_col);
+                            }
+                        }
+                    }
+                }
             }
-            for i in y_start..=y_end {
-                let y = i as f32 * grid + off.y;
-                painter.line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)], egui::Stroke::new(0.5, col));
-            }
+
             // Origin crosshair
             if rect.contains(egui::pos2(off.x, off.y)) {
                 painter.circle_filled(egui::pos2(off.x, off.y), 3.0, egui::Color32::from_rgba_premultiplied(gc[0], gc[1], gc[2], 80));
@@ -72,8 +311,10 @@ impl super::PatchworkApp {
             if let (Some(start), Some(end)) = (self.box_select_start, self.box_select_end) {
                 let sel_rect = egui::Rect::from_two_pos(start, end);
                 let painter = ui.painter();
-                painter.rect_filled(sel_rect, 0.0, egui::Color32::from_rgba_unmultiplied(80, 170, 255, 25));
-                painter.rect_stroke(sel_rect, 0.0, egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(80, 170, 255, 150)), egui::StrokeKind::Outside);
+                let acc = ctx.data_mut(|d| d.get_temp::<[u8; 3]>(egui::Id::new("theme_accent")))
+                    .unwrap_or([80, 160, 255]);
+                painter.rect_filled(sel_rect, 0.0, egui::Color32::from_rgba_unmultiplied(acc[0], acc[1], acc[2], 25));
+                painter.rect_stroke(sel_rect, 0.0, egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(acc[0], acc[1], acc[2], 150)), egui::StrokeKind::Outside);
             }
         });
     }
@@ -82,34 +323,38 @@ impl super::PatchworkApp {
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("connections")));
         let pointer = ctx.pointer_latest_pos();
         let clicked = ctx.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary));
+        let now = ctx.input(|i| i.time) as f32;
         let mut hovered_conn: Option<usize> = None;
 
-        // ── Wire color palette (by data type) ──────────────────────────
-        let color_float = egui::Color32::from_rgb(80, 100, 230);    // blue
-        let color_text  = egui::Color32::from_rgb(60, 220, 80);     // green
-        let color_image = egui::Color32::from_rgb(200, 30, 255);    // purple
-        let color_audio = egui::Color32::from_rgb(255, 220, 40);    // yellow-orange
-        let color_none  = egui::Color32::from_rgb(160, 160, 160);   // gray
+        // ── Wire color palette (derived from PortKind) ──────────────────
+        let color_none  = egui::Color32::from_rgb(140, 140, 140);   // gray fallback
 
-        // Wire thickness from Theme (default 6px, minimum 1px)
-        let wire_thickness: f32 = self.graph.nodes.values()
-            .find_map(|n| if let NodeType::Theme { wire_thickness, .. } = &n.node_type { Some(*wire_thickness) } else { None })
-            .unwrap_or(6.0)
-            .max(1.0);
+        // Wire thickness + style + wiggly params from Theme
+        let (wire_thickness, wire_style, wiggle_gravity, wiggle_range, wiggle_speed): (f32, u8, f32, f32, f32) = self.graph.nodes.values()
+            .find_map(|n| if let NodeType::Theme { wire_thickness, wire_style, wiggle_gravity, wiggle_range, wiggle_speed, .. } = &n.node_type {
+                Some((*wire_thickness, *wire_style, *wiggle_gravity, *wiggle_range, *wiggle_speed))
+            } else { None })
+            .unwrap_or((6.0, 0, 0.0, 1.0, 1.0));
+        let wire_thickness = wire_thickness.max(1.0);
 
-        // Connection endpoint dot size
-        let endpoint_radius: f32 = 6.0;
+        // (endpoint_radius removed — connectors now use draw_wire_connector)
 
         // Pre-compute wire colors for all connections + drag
+        // Uses PortKind from port definitions for semantic coloring
         let compute_wire_color = |nodes: &HashMap<NodeId, Node>, from_node: NodeId, from_port: usize| -> egui::Color32 {
-            let is_audio = nodes.get(&from_node).map(|n| {
-                matches!(n.node_type, NodeType::Synth { .. } | NodeType::AudioFx { .. } | NodeType::AudioPlayer { .. })
-            }).unwrap_or(false);
-            if is_audio { return color_audio; }
+            if let Some(node) = nodes.get(&from_node) {
+                let outputs = node.node_type.outputs();
+                if let Some(pdef) = outputs.get(from_port) {
+                    let c = pdef.kind.base_color();
+                    return egui::Color32::from_rgb(c[0], c[1], c[2]);
+                }
+            }
+            // Fallback: infer from runtime value
             match values.get(&(from_node, from_port)) {
-                Some(PortValue::Float(_)) => color_float,
-                Some(PortValue::Text(_)) => color_text,
-                Some(PortValue::Image(_)) => color_image,
+                Some(v) => {
+                    let c = PortKind::from_value(v).base_color();
+                    egui::Color32::from_rgb(c[0], c[1], c[2])
+                }
                 _ => color_none,
             }
         };
@@ -117,16 +362,31 @@ impl super::PatchworkApp {
         let wire_colors: Vec<egui::Color32> = self.graph.connections.iter()
             .map(|c| compute_wire_color(&self.graph.nodes, c.from_node, c.from_port))
             .collect();
+        // Pre-compute destination (input) port colors for connector plugs
+        let wire_dest_colors: Vec<egui::Color32> = self.graph.connections.iter()
+            .map(|c| {
+                if let Some(node) = self.graph.nodes.get(&c.to_node) {
+                    let inputs = node.node_type.inputs();
+                    if let Some(pdef) = inputs.get(c.to_port) {
+                        let col = pdef.kind.base_color();
+                        return egui::Color32::from_rgb(col[0], col[1], col[2]);
+                    }
+                }
+                color_none
+            })
+            .collect();
         let drag_color = if let Some((nid, pidx, is_output)) = self.dragging_from {
             if is_output {
                 compute_wire_color(&self.graph.nodes, nid, pidx)
             } else {
-                match values.get(&(nid, pidx)) {
-                    Some(PortValue::Float(_)) => color_float,
-                    Some(PortValue::Text(_)) => color_text,
-                    Some(PortValue::Image(_)) => color_image,
-                    _ => color_none,
-                }
+                // Dragging from an input: look up the input port's PortKind
+                if let Some(node) = self.graph.nodes.get(&nid) {
+                    let inputs = node.node_type.inputs();
+                    if let Some(pdef) = inputs.get(pidx) {
+                        let c = pdef.kind.base_color();
+                        egui::Color32::from_rgb(c[0], c[1], c[2])
+                    } else { color_none }
+                } else { color_none }
             }
         } else {
             color_none
@@ -156,16 +416,52 @@ impl super::PatchworkApp {
                     (base_color, wire_thickness)
                 };
 
-                // Glow
-                let rgba = color.to_array();
-                let glow = egui::Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], 20);
-                draw_bezier(&painter, a, b, glow, width + 4.0);
-                // Main wire
-                draw_bezier(&painter, a, b, color, width);
+                // Compute wire activity for wiggly mode:
+                // Compare current value hash with stored previous — exponential smoothing
+                let wire_activity = if wire_style == 3 {
+                    let val_id = egui::Id::new(("wire_val_hash", conn.from_node, conn.from_port));
+                    let activity_id = egui::Id::new(("wire_activity", conn.from_node, conn.from_port));
+                    let smooth_id = egui::Id::new(("wire_smooth", conn.from_node, conn.from_port));
+                    let cur_hash = match values.get(&(conn.from_node, conn.from_port)) {
+                        Some(PortValue::Float(f)) => (*f * 10000.0) as i64,
+                        Some(PortValue::Text(s)) => s.len() as i64 * 31 + s.bytes().next().unwrap_or(0) as i64,
+                        Some(PortValue::Image(img)) => img.width as i64 * img.height as i64 + img.pixels.first().copied().unwrap_or(0) as i64,
+                        _ => 0i64,
+                    };
+                    let prev_hash = ctx.data_mut(|d| d.get_temp::<i64>(val_id).unwrap_or(0));
+                    // Raw target: 1 when changed, decays slowly
+                    let prev_raw = ctx.data_mut(|d| d.get_temp::<f32>(activity_id).unwrap_or(0.0));
+                    let raw_target = if cur_hash != prev_hash {
+                        1.0_f32
+                    } else {
+                        (prev_raw - 0.015).max(0.0) // slow decay
+                    };
+                    // Exponential smoothing: smoothed value eases toward raw target
+                    let prev_smooth = ctx.data_mut(|d| d.get_temp::<f32>(smooth_id).unwrap_or(0.0));
+                    let rise_speed = 0.15; // how fast to ramp up (0.15 = ~7 frames to reach peak)
+                    let fall_speed = 0.04; // how fast to settle down (0.04 = ~25 frames to fade)
+                    let speed = if raw_target > prev_smooth { rise_speed } else { fall_speed };
+                    let smoothed = prev_smooth + (raw_target - prev_smooth) * speed;
+                    ctx.data_mut(|d| {
+                        d.insert_temp(val_id, cur_hash);
+                        d.insert_temp(activity_id, raw_target);
+                        d.insert_temp(smooth_id, smoothed);
+                    });
+                    smoothed
+                } else {
+                    0.0
+                };
 
-                // Endpoint dots at both ends
-                painter.circle_filled(a, endpoint_radius, color);
-                painter.circle_filled(b, endpoint_radius, color);
+                let wp = WiggleParams { activity: wire_activity, time: now, gravity: wiggle_gravity, range: wiggle_range, speed: wiggle_speed };
+
+                // 3D wire: shadow + dark edge + main + highlight
+                draw_wire_3d(&painter, a, b, color, width, wire_style, &wp);
+
+                // Connector plugs at both ends (source=output, dest=input)
+                let src_color = wire_colors[idx];
+                let dst_color = wire_dest_colors[idx];
+                draw_wire_connector(&painter, a, src_color, true);
+                draw_wire_connector(&painter, b, dst_color, false);
 
                 // Wire label (centered on bezier midpoint)
                 if !conn.label.is_empty() {
@@ -198,6 +494,11 @@ impl super::PatchworkApp {
             }
         }
 
+        // Request continuous repaint when wiggly wires are active (for animation)
+        if wire_style == 3 {
+            ctx.request_repaint();
+        }
+
         // ── Wire context menu (label + delete) ───────────────────────────
         if let Some(conn_idx) = self.wire_menu_conn {
             if conn_idx < self.graph.connections.len() {
@@ -207,7 +508,7 @@ impl super::PatchworkApp {
 
                 egui::Area::new(egui::Id::new("wire_context_menu"))
                     .fixed_pos(pos)
-                    .order(egui::Order::Foreground)
+                    .order(egui::Order::Tooltip)
                     .show(ctx, |ui| {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
                             ui.set_min_width(60.0 / self.canvas_zoom);
@@ -260,18 +561,15 @@ impl super::PatchworkApp {
         if let Some((nid, pidx, is_output)) = self.dragging_from {
             if let Some(&from) = self.port_positions.get(&(nid, pidx, !is_output)) {
                 if let Some(ptr) = ctx.pointer_latest_pos() {
-                    let rgba = drag_color.to_array();
-                    let glow = egui::Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], 30);
+                    let drag_wp = WiggleParams { activity: 0.3, time: now, gravity: wiggle_gravity, range: wiggle_range, speed: wiggle_speed };
                     if is_output {
-                        draw_bezier(&painter, from, ptr, glow, wire_thickness + 4.0);
-                        draw_bezier(&painter, from, ptr, drag_color, wire_thickness);
-                        painter.circle_filled(from, endpoint_radius, drag_color);
-                        painter.circle_filled(ptr, endpoint_radius - 2.0, drag_color);
+                        draw_wire_3d(&painter, from, ptr, drag_color, wire_thickness, wire_style, &drag_wp);
+                        draw_wire_connector(&painter, from, drag_color, true);
+                        draw_wire_connector(&painter, ptr, drag_color, false);
                     } else {
-                        draw_bezier(&painter, ptr, from, glow, wire_thickness + 4.0);
-                        draw_bezier(&painter, ptr, from, drag_color, wire_thickness);
-                        painter.circle_filled(from, endpoint_radius, drag_color);
-                        painter.circle_filled(ptr, endpoint_radius - 2.0, drag_color);
+                        draw_wire_3d(&painter, ptr, from, drag_color, wire_thickness, wire_style, &drag_wp);
+                        draw_wire_connector(&painter, from, drag_color, false);
+                        draw_wire_connector(&painter, ptr, drag_color, true);
                     }
                 }
             }

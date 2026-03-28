@@ -2,6 +2,9 @@ use crate::graph::*;
 use eframe::egui;
 use std::collections::HashMap;
 
+const SCOPE_W: f32 = 148.0;
+const SCOPE_H: f32 = 80.0;
+
 pub fn render(
     ui: &mut egui::Ui,
     node_id: NodeId,
@@ -11,163 +14,205 @@ pub fn render(
     history_max: &mut usize,
     scope_min: &mut f32,
     scope_max: &mut f32,
-    scope_height: &mut f32,
+    _scope_height: &mut f32,
     paused: &mut bool,
+    display_color: &mut [u8; 3],
+    label: &mut String,
+    auto_fit: &mut bool,
+    port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
+    dragging_from: &mut Option<(NodeId, usize, bool)>,
 ) {
+    let is_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 0);
     let val = Graph::static_input_value(connections, values, node_id, 0);
+    let current = val.as_float();
+    let wave_color = egui::Color32::from_rgb(display_color[0], display_color[1], display_color[2]);
 
-    // Current value display
-    match &val {
-        PortValue::Float(v) => {
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(format!("{:.3}", v))
-                        .size(18.0)
-                        .strong()
-                        .monospace(),
-                );
-            });
-
-            // Record history
-            if !*paused {
-                history.push(*v);
-                while history.len() > *history_max {
-                    history.remove(0);
-                }
-            }
-        }
-        PortValue::Text(s) => {
-            egui::ScrollArea::vertical().max_height(100.0).show(ui, |ui| {
-                ui.label(egui::RichText::new(s.as_str()).monospace());
-            });
-            return; // No oscilloscope for text
-        }
-        PortValue::Image(img) => {
-            ui.label(format!("Image {}x{}", img.width, img.height));
-            return;
-        }
-        PortValue::None => {
-            ui.label(egui::RichText::new("\u{2014}").color(egui::Color32::GRAY));
-            return;
-        }
+    // Push to history
+    if !*paused && is_wired {
+        history.push(current);
+        while history.len() > *history_max { history.remove(0); }
     }
 
-    ui.separator();
+    // Auto-fit range
+    if *auto_fit && !history.is_empty() {
+        let min_v = history.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max_v = history.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let margin = (max_v - min_v).max(0.01) * 0.1;
+        *scope_min = min_v - margin;
+        *scope_max = max_v + margin;
+    }
 
-    // Oscilloscope display
-    let w = ui.available_width().max(100.0);
-    let h = *scope_height;
-    let (rect, _response) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
+    // ── Input port + value ──────────────────────────────
+    ui.horizontal(|ui| {
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
+        let (fill, border) = if response.hovered() || response.dragged() {
+            (egui::Color32::YELLOW, egui::Color32::WHITE)
+        } else if is_wired {
+            (egui::Color32::from_rgb(60, 140, 255), egui::Color32::from_rgb(120, 180, 255))
+        } else {
+            (egui::Color32::from_rgb(70, 75, 85), egui::Color32::from_rgb(120, 125, 135))
+        };
+        ui.painter().circle_filled(rect.center(), 5.0, fill);
+        ui.painter().circle_stroke(rect.center(), 5.0, egui::Stroke::new(1.5, border));
+        port_positions.insert((node_id, 0, true), rect.center());
+        if response.drag_started() {
+            if let Some(existing) = connections.iter().find(|c| c.to_node == node_id && c.to_port == 0) {
+                *dragging_from = Some((existing.from_node, existing.from_port, true));
+            } else {
+                *dragging_from = Some((node_id, 0, false));
+            }
+        }
+        ui.label(egui::RichText::new(format!("{:.3}", current)).monospace().strong().color(wave_color));
+    });
 
-    let painter = ui.painter_at(rect);
+    // ── Oscilloscope (fills available space, respects resize) ─
+    let scope_w = ui.available_width().max(80.0);
+    let scope_h = (ui.available_height() - 20.0).max(SCOPE_H); // leave room for label below
+    let (rect, body_response) = ui.allocate_exact_size(
+        egui::vec2(scope_w, scope_h),
+        egui::Sense::click(),
+    );
+    let painter = ui.painter();
 
-    // Background
-    painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(15, 15, 20));
+    painter.rect_filled(rect, 4.0, egui::Color32::from_rgb(10, 10, 15));
 
     // Grid lines
-    let range = *scope_max - *scope_min;
-    if range > 0.0 {
-        // Horizontal grid (value)
-        for i in 0..=4 {
-            let t = i as f32 / 4.0;
-            let y = rect.bottom() - t * h;
-            let alpha = if i == 0 || i == 4 { 40 } else { 20 };
-            painter.line_segment(
-                [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-                egui::Stroke::new(0.5, egui::Color32::from_rgba_premultiplied(100, 100, 100, alpha)),
-            );
-        }
+    let grid_color = egui::Color32::from_rgba_unmultiplied(60, 60, 70, 40);
+    for i in 1..4 {
+        let y = rect.top() + rect.height() * i as f32 / 4.0;
+        painter.line_segment(
+            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+            egui::Stroke::new(0.5, grid_color),
+        );
+    }
 
-        // Zero line if visible
-        if *scope_min < 0.0 && *scope_max > 0.0 {
-            let zero_t = (0.0 - *scope_min) / range;
-            let zero_y = rect.bottom() - zero_t * h;
-            painter.line_segment(
-                [egui::pos2(rect.left(), zero_y), egui::pos2(rect.right(), zero_y)],
-                egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(100, 100, 100, 60)),
-            );
+    // Waveform
+    if history.len() >= 2 {
+        let range = (*scope_max - *scope_min).max(0.001);
+        let points: Vec<egui::Pos2> = history.iter().enumerate().map(|(i, &v)| {
+            let x = rect.left() + (i as f32 / (history.len() - 1).max(1) as f32) * rect.width();
+            let t = ((v - *scope_min) / range).clamp(0.0, 1.0);
+            let y = rect.bottom() - t * rect.height();
+            egui::pos2(x, y)
+        }).collect();
+
+        for w in points.windows(2) {
+            painter.line_segment([w[0], w[1]], egui::Stroke::new(1.5, wave_color));
+        }
+        if let Some(&last) = points.last() {
+            painter.circle_filled(last, 3.0, wave_color);
+        }
+    } else if !is_wired {
+        painter.text(rect.center(), egui::Align2::CENTER_CENTER, "No input",
+            egui::FontId::proportional(11.0), egui::Color32::from_rgb(60, 60, 65));
+    }
+
+    // Range labels
+    painter.text(egui::pos2(rect.left() + 2.0, rect.top() + 2.0), egui::Align2::LEFT_TOP,
+        format!("{:.1}", scope_max), egui::FontId::proportional(8.0), egui::Color32::from_rgb(60, 60, 70));
+    painter.text(egui::pos2(rect.left() + 2.0, rect.bottom() - 2.0), egui::Align2::LEFT_BOTTOM,
+        format!("{:.1}", scope_min), egui::FontId::proportional(8.0), egui::Color32::from_rgb(60, 60, 70));
+
+    if *paused {
+        painter.text(egui::pos2(rect.right() - 4.0, rect.top() + 2.0), egui::Align2::RIGHT_TOP,
+            "⏸", egui::FontId::proportional(10.0), egui::Color32::from_rgb(200, 200, 80));
+    }
+
+    // Label
+    if !label.is_empty() {
+        ui.label(egui::RichText::new(label.as_str()).small().color(egui::Color32::GRAY));
+    }
+
+    // ── Popup ───────────────────────────────────────────
+    let popup_id = egui::Id::new(("display_popup", node_id));
+    let popup_time_id = egui::Id::new(("display_popup_time", node_id));
+    let now = ui.ctx().input(|i| i.time);
+
+    if body_response.clicked() {
+        let is_open = ui.ctx().data_mut(|d| d.get_temp::<bool>(popup_id).unwrap_or(false));
+        if !is_open {
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(popup_id, true);
+                d.insert_temp(popup_time_id, now);
+            });
         }
     }
 
-    // Draw waveform
-    if history.len() >= 2 && range > 0.0 {
-        let points: Vec<egui::Pos2> = history
-            .iter()
-            .enumerate()
-            .map(|(i, &v)| {
-                let x = rect.left() + (i as f32 / (history.len() - 1).max(1) as f32) * w;
-                let t = ((v - *scope_min) / range).clamp(0.0, 1.0);
-                let y = rect.bottom() - t * h;
-                egui::pos2(x, y)
-            })
-            .collect();
+    let popup_open = ui.ctx().data_mut(|d| d.get_temp::<bool>(popup_id).unwrap_or(false));
 
-        // Draw line segments
-        for pair in points.windows(2) {
-            painter.line_segment(
-                [pair[0], pair[1]],
-                egui::Stroke::new(1.5, egui::Color32::from_rgb(80, 220, 120)),
-            );
-        }
+    if popup_open {
+        let accent = ui.ctx().data_mut(|d| d.get_temp::<[u8; 3]>(egui::Id::new("theme_accent"))).unwrap_or([80, 160, 255]);
+        let node_rect = ui.min_rect();
+        let fg = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new(("display_hl", node_id))));
+        fg.rect_stroke(node_rect.expand(3.0), 8.0,
+            egui::Stroke::new(2.0, egui::Color32::from_rgb(accent[0], accent[1], accent[2])), egui::StrokeKind::Outside);
 
-        // Current value dot
-        if let Some(&last_pt) = points.last() {
-            painter.circle_filled(last_pt, 3.0, egui::Color32::from_rgb(120, 255, 160));
+        let popup_pos = egui::pos2(rect.right() + 8.0, rect.top());
+        let opened_time = ui.ctx().data_mut(|d| d.get_temp::<f64>(popup_time_id).unwrap_or(0.0));
+
+        let area_resp = egui::Area::new(egui::Id::new(("display_opts", node_id)))
+            .fixed_pos(popup_pos)
+            .order(egui::Order::Foreground)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).rounding(10.0).inner_margin(10.0).show(ui, |ui| {
+                    ui.set_min_width(170.0);
+
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(*paused, "⏸").on_hover_text("Pause").clicked() { *paused = !*paused; }
+                        if ui.small_button("↺").on_hover_text("Reset").clicked() { history.clear(); }
+                        if ui.selectable_label(*auto_fit, "Auto").on_hover_text("Auto-fit range").clicked() { *auto_fit = !*auto_fit; }
+                    });
+
+                    if !*auto_fit {
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label("Min"); ui.add(egui::DragValue::new(scope_min).speed(0.1));
+                            ui.label("Max"); ui.add(egui::DragValue::new(scope_max).speed(0.1));
+                        });
+                    }
+
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label("Samples");
+                        let mut hm = *history_max as f32;
+                        ui.add(egui::DragValue::new(&mut hm).speed(10.0).range(10.0..=10000.0));
+                        *history_max = hm as usize;
+                    });
+
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.small_button(crate::icons::PUSH_PIN).on_hover_text("Pin").clicked() {
+                            ui.ctx().data_mut(|d| {
+                                d.insert_temp(egui::Id::new(("display_pin_action", node_id)), true);
+                                d.insert_temp(popup_id, false);
+                            });
+                        }
+                        let mut color = egui::Color32::from_rgb(display_color[0], display_color[1], display_color[2]);
+                        if ui.color_edit_button_srgba(&mut color).changed() {
+                            let a = color.to_array();
+                            *display_color = [a[0], a[1], a[2]];
+                        }
+                        ui.add(egui::TextEdit::singleline(label).hint_text(format!("Display #{}", node_id)).desired_width(70.0));
+                        if ui.small_button(egui::RichText::new(crate::icons::TRASH).color(egui::Color32::from_rgb(200, 80, 80))).clicked() {
+                            ui.ctx().data_mut(|d| {
+                                d.insert_temp(egui::Id::new(("display_delete_action", node_id)), true);
+                                d.insert_temp(popup_id, false);
+                            });
+                        }
+                    });
+                    ui.label(egui::RichText::new(format!("ID: {}", node_id)).small().color(egui::Color32::from_rgb(80, 80, 80)));
+                });
+            });
+
+        let popup_rect = area_resp.response.rect;
+        let esc = ui.ctx().input(|i| i.key_pressed(egui::Key::Escape));
+        let click_outside = if now - opened_time > 0.3 {
+            ui.ctx().input(|i| i.pointer.button_clicked(egui::PointerButton::Primary))
+                && ui.ctx().pointer_latest_pos().map(|p| !popup_rect.contains(p) && !rect.contains(p)).unwrap_or(false)
+        } else { false };
+
+        if esc || click_outside {
+            ui.ctx().data_mut(|d| d.insert_temp(popup_id, false));
         }
     }
-
-    // Scale labels on scope
-    let small = egui::FontId::proportional(9.0);
-    painter.text(
-        egui::pos2(rect.left() + 2.0, rect.top() + 1.0),
-        egui::Align2::LEFT_TOP,
-        format!("{:.1}", scope_max),
-        small.clone(),
-        egui::Color32::from_rgb(100, 100, 100),
-    );
-    painter.text(
-        egui::pos2(rect.left() + 2.0, rect.bottom() - 1.0),
-        egui::Align2::LEFT_BOTTOM,
-        format!("{:.1}", scope_min),
-        small,
-        egui::Color32::from_rgb(100, 100, 100),
-    );
-
-    ui.add_space(2.0);
-
-    // Controls
-    ui.horizontal(|ui| {
-        if ui.small_button(if *paused { "▶" } else { "⏸" }).clicked() {
-            *paused = !*paused;
-        }
-        if ui.small_button("⟲").on_hover_text("Clear history").clicked() {
-            history.clear();
-        }
-        if ui.small_button("Auto").on_hover_text("Auto-fit range").clicked() {
-            if let (Some(&min_v), Some(&max_v)) = (
-                history.iter().min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)),
-                history.iter().max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)),
-            ) {
-                let margin = (max_v - min_v).max(0.1) * 0.1;
-                *scope_min = min_v - margin;
-                *scope_max = max_v + margin;
-            }
-        }
-    });
-
-    // Settings (collapsible)
-    ui.collapsing("Settings", |ui| {
-        ui.horizontal(|ui| {
-            ui.label("Min:");
-            ui.add(egui::DragValue::new(scope_min).speed(0.01));
-            ui.label("Max:");
-            ui.add(egui::DragValue::new(scope_max).speed(0.01));
-        });
-        ui.horizontal(|ui| {
-            ui.label("Samples:");
-            ui.add(egui::DragValue::new(history_max).speed(1.0).range(10..=2000));
-            ui.label("Height:");
-            ui.add(egui::DragValue::new(scope_height).speed(1.0).range(30.0..=300.0));
-        });
-    });
 }

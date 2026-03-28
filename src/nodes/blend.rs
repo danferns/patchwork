@@ -105,10 +105,27 @@ pub fn render(
         } else {
             ui.label(egui::RichText::new("—").small());
         }
-        let (rect, response) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
-        let (fill, border) = if response.hovered() || response.dragged() { (egui::Color32::YELLOW, egui::Color32::WHITE) } else { (egui::Color32::from_rgb(60, 140, 255), egui::Color32::from_rgb(120, 180, 255)) };
-        ui.painter().circle_filled(rect.center(), 6.0, fill);
-        ui.painter().circle_stroke(rect.center(), 6.0, egui::Stroke::new(2.5, border));
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click_and_drag());
+        let (fill, border) = if response.hovered() || response.dragged() { (egui::Color32::YELLOW, egui::Color32::WHITE) } else { (egui::Color32::from_rgb(200, 30, 255), egui::Color32::from_rgb(230, 100, 255)) };
+        // Diamond shape for image output
+        let d = 7.0;
+        let c = rect.center();
+        let points = vec![
+            egui::pos2(c.x, c.y - d),
+            egui::pos2(c.x + d, c.y),
+            egui::pos2(c.x, c.y + d),
+            egui::pos2(c.x - d, c.y),
+        ];
+        ui.painter().add(egui::Shape::convex_polygon(points, fill, egui::Stroke::new(2.0, border)));
+        if response.hovered() || response.dragged() || connections.iter().any(|c| c.from_node == node_id && c.from_port == 0) {
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                crate::icons::IMAGE,
+                egui::FontId::new(8.0, egui::FontFamily::Proportional),
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 180),
+            );
+        }
         port_positions.insert((node_id, 0, false), rect.center());
         if response.drag_started() { *dragging_from = Some((node_id, 0, true)); }
     });
@@ -143,12 +160,30 @@ fn port_circle(
     dragging_from: &mut Option<(NodeId, usize, bool)>,
     connections: &[Connection],
 ) {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click_and_drag());
     let (fill, border) = if response.hovered() || response.dragged() { (egui::Color32::YELLOW, egui::Color32::WHITE) }
-        else if is_wired { (egui::Color32::from_rgb(60, 140, 255), egui::Color32::from_rgb(120, 180, 255)) }
+        else if is_wired { (egui::Color32::from_rgb(200, 30, 255), egui::Color32::from_rgb(230, 100, 255)) }
         else { (egui::Color32::from_rgb(70, 75, 85), egui::Color32::from_rgb(120, 125, 135)) };
-    ui.painter().circle_filled(rect.center(), 6.0, fill);
-    ui.painter().circle_stroke(rect.center(), 6.0, egui::Stroke::new(2.5, border));
+    // Diamond shape for image ports
+    let d = 7.0;
+    let c = rect.center();
+    let points = vec![
+        egui::pos2(c.x, c.y - d),
+        egui::pos2(c.x + d, c.y),
+        egui::pos2(c.x, c.y + d),
+        egui::pos2(c.x - d, c.y),
+    ];
+    ui.painter().add(egui::Shape::convex_polygon(points, fill, egui::Stroke::new(2.0, border)));
+    // Image icon when wired
+    if is_wired {
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            crate::icons::IMAGE,
+            egui::FontId::new(8.0, egui::FontFamily::Proportional),
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 180),
+        );
+    }
     port_positions.insert((node_id, port, is_input), rect.center());
     if response.drag_started() {
         if is_input {

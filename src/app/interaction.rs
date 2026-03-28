@@ -338,13 +338,25 @@ impl super::PatchworkApp {
 
         egui::Area::new(egui::Id::new("node_context_menu"))
             .fixed_pos(pos)
-            .order(egui::Order::Foreground)
+            .order(egui::Order::Tooltip)
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_min_width(140.0 / self.canvas_zoom);
 
                     if on_node {
                         // ── Node context menu ──────────────────────────
+                        // Show node type + ID
+                        if let Some(id) = self.context_menu_node {
+                            if let Some(node) = self.graph.nodes.get(&id) {
+                                let [cr, cg, cb] = node.node_type.color_hint();
+                                let accent = egui::Color32::from_rgb(cr, cg, cb);
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(node.node_type.title()).strong().color(accent));
+                                    ui.label(egui::RichText::new(format!("#{}", id)).small().color(egui::Color32::from_rgb(100, 100, 120)));
+                                });
+                                ui.separator();
+                            }
+                        }
                         if icon_menu_item(ui, icons::COPY, "Copy").clicked() {
                             if let Some(id) = self.context_menu_node {
                                 if let Some(node) = self.graph.nodes.get(&id) {

@@ -152,6 +152,22 @@ pub fn render(
         });
     }
 
+    // MCP trigger: fire send automatically when triggered via MCP
+    if status == "mcp_trigger" && !user_prompt.is_empty() && !eff_key.is_empty() && !is_pending {
+        let (url, headers, body) = build_request(
+            &eff_provider, &eff_model, &eff_custom_url, &eff_key,
+            &system_prompt, &user_prompt, eff_max_tokens, eff_temp,
+        );
+        actions.push(HttpAction::SendRequest {
+            node_id, url, method: "POST".into(), headers, body,
+        });
+        // Signal app layer to clear the mcp_trigger status
+        ui.ctx().data_mut(|d| d.insert_temp(
+            egui::Id::new(("mcp_ai_triggered", node_id)),
+            true,
+        ));
+    }
+
     // Send button
     ui.separator();
     ui.horizontal(|ui| {

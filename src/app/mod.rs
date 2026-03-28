@@ -11,38 +11,122 @@ use eframe::egui_wgpu;
 use std::collections::HashMap;
 
 
-const PORT_RADIUS: f32 = 6.0;    // 12px diameter
-const PORT_INTERACT: f32 = 18.0;
-const PORT_BORDER: f32 = 3.0;    // 3px border stroke
+const PORT_RADIUS: f32 = 7.0;    // slightly larger for shaped ports
+const PORT_INTERACT: f32 = 20.0;
+const PORT_BORDER: f32 = 2.5;    // border stroke
 const CONN_COLOR: egui::Color32 = egui::Color32::from_rgb(180, 180, 180);
-const CONN_ACTIVE: egui::Color32 = egui::Color32::from_rgb(80, 170, 255);
 
-/// Get port fill + border colors based on data type.
-/// Fill is a darker shade, border is a lighter shade — both matching the wire hue.
-fn port_colors_for_value(val: &PortValue, is_output: bool) -> (egui::Color32, egui::Color32) {
-    let base: [u8; 3] = match val {
-        PortValue::Float(_) => [80, 100, 230],      // matches wire blue
-        PortValue::Text(_) => [60, 220, 80],         // matches wire green
-        PortValue::Image(_) => [200, 30, 255],       // matches wire purple
-        PortValue::None => [140, 140, 140],           // gray
-    };
+/// Legacy bridge: convert PortKind to the rendering system.
+/// Now delegates entirely to PortKind from graph.rs.
+pub(crate) type PortDataKind = PortKind;
+
+/// Get port fill + border colors based on PortKind.
+/// Fill is a darker shade for inputs, border is a lighter shade — matching the semantic type.
+fn port_colors_for_kind(kind: PortKind, is_output: bool) -> (egui::Color32, egui::Color32) {
+    let base = kind.base_color();
     let fill = if is_output {
         egui::Color32::from_rgb(base[0], base[1], base[2])
     } else {
-        // Input: darker fill
         egui::Color32::from_rgb(
             (base[0] as f32 * 0.5) as u8,
             (base[1] as f32 * 0.5) as u8,
             (base[2] as f32 * 0.5) as u8,
         )
     };
-    // Border: lighter shade of the wire color
     let border = egui::Color32::from_rgb(
         (base[0] as u16 + 80).min(255) as u8,
         (base[1] as u16 + 80).min(255) as u8,
         (base[2] as u16 + 80).min(255) as u8,
     );
     (fill, border)
+}
+
+/// Draw a shaped port based on PortKind:
+/// - Number/Normalized/Audio/Color/Generic: circle
+/// - Text: rounded square
+/// - Image: diamond
+/// - Trigger: triangle (pointing right)
+/// - Gate: half-moon
+/// When connected, draws a tiny Phosphor icon inside.
+pub(crate) fn draw_shaped_port(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    radius: f32,
+    fill: egui::Color32,
+    border: egui::Color32,
+    border_width: f32,
+    kind: PortKind,
+    is_connected: bool,
+) {
+    match kind.shape_id() {
+        1 => {
+            // Rounded square (Text)
+            let half = radius * 0.85;
+            let rect = egui::Rect::from_center_size(center, egui::vec2(half * 2.0, half * 2.0));
+            painter.rect_filled(rect, 3.0, fill);
+            painter.rect_stroke(rect, 3.0, egui::Stroke::new(border_width, border), egui::StrokeKind::Outside);
+        }
+        2 => {
+            // Triangle (Trigger) — pointing right
+            let d = radius * 0.95;
+            let points = vec![
+                egui::pos2(center.x - d * 0.7, center.y - d),   // top-left
+                egui::pos2(center.x + d, center.y),              // right point
+                egui::pos2(center.x - d * 0.7, center.y + d),   // bottom-left
+            ];
+            painter.add(egui::Shape::convex_polygon(points, fill, egui::Stroke::new(border_width, border)));
+        }
+        3 => {
+            // Diamond (Image)
+            let d = radius;
+            let points = vec![
+                egui::pos2(center.x, center.y - d),
+                egui::pos2(center.x + d, center.y),
+                egui::pos2(center.x, center.y + d),
+                egui::pos2(center.x - d, center.y),
+            ];
+            painter.add(egui::Shape::convex_polygon(points, fill, egui::Stroke::new(border_width, border)));
+        }
+        4 => {
+            // Half-moon (Gate) — left half filled, right half open
+            painter.circle_filled(center, radius, fill);
+            painter.circle_stroke(center, radius, egui::Stroke::new(border_width, border));
+            // Draw a vertical line through center to indicate half
+            painter.line_segment(
+                [egui::pos2(center.x, center.y - radius + 1.0), egui::pos2(center.x, center.y + radius - 1.0)],
+                egui::Stroke::new(1.5, border),
+            );
+        }
+        _ => {
+            // Circle (Number, Normalized, Audio, Color, Generic)
+            painter.circle_filled(center, radius, fill);
+            painter.circle_stroke(center, radius, egui::Stroke::new(border_width, border));
+
+            // Audio: inner dot
+            if kind == PortKind::Audio {
+                painter.circle_filled(center, radius * 0.35, border);
+            }
+            // Normalized: thin ring indicator
+            if kind == PortKind::Normalized {
+                painter.circle_stroke(center, radius * 0.55, egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 80)));
+            }
+        }
+    }
+
+    // Draw tiny icon inside when connected
+    if is_connected {
+        let glyph = kind.icon_glyph();
+        if !glyph.is_empty() {
+            let icon_size = (radius * 1.0).max(6.0).min(10.0);
+            painter.text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                glyph,
+                egui::FontId::new(icon_size, egui::FontFamily::Proportional),
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 200),
+            );
+        }
+    }
 }
 
 mod undo;
@@ -110,6 +194,10 @@ pub struct PatchworkApp {
     // Undo / Redo
     undo_history: UndoHistory,
     drag_undo_pushed: bool,
+    // Click-to-connect wiring mode (alternative to drag-and-drop)
+    click_wiring: bool,
+    // Monotonic clock reference for wall-clock timing
+    app_start_instant: std::time::Instant,
 }
 
 /// Results from background device enumeration thread
@@ -163,6 +251,7 @@ impl PatchworkApp {
             api_keys: HashMap::new(),
             ob: ObManager::new(),
             audio: AudioManager::new(),
+            app_start_instant: std::time::Instant::now(),
             mcp_log: crate::mcp::new_log(),
             mcp_rx: None,
             ml_rx: ml_rx,
@@ -198,6 +287,7 @@ impl PatchworkApp {
             wgpu_render_state,
             undo_history: UndoHistory::new(100),
             drag_undo_pushed: false,
+            click_wiring: false,
         };
         // Always start MCP server thread — auto-detects if stdin is a pipe (Claude Desktop)
         // vs terminal (normal launch). If stdin is a terminal, the thread exits immediately.
@@ -208,8 +298,157 @@ impl PatchworkApp {
             app.mcp_rx = Some(rx);
         }
 
-        app.spawn_default_nodes();
+        // Try restoring previous session; fall back to default nodes
+        if !app.restore_session() {
+            app.spawn_default_nodes();
+        }
         app
+    }
+
+    /// Build audio chains from Speaker nodes backward through effects to sources.
+    /// Only sources routed through an active Speaker will produce sound.
+    fn build_audio_chains(&mut self) {
+        use crate::audio::{AudioEffect, AudioSource};
+
+        // ── Phase 1: Collect all chain info without locking audio state ──
+        let mut active_sources: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+        let mut render_only_sources: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+        // Collected updates to apply in a single lock
+        let mut chain_updates: Vec<(NodeId, Vec<AudioEffect>)> = Vec::new();
+        let mut mixer_updates: Vec<(NodeId, Vec<(NodeId, f32)>)> = Vec::new();
+
+        for (&speaker_id, node) in &self.graph.nodes {
+            let is_active = match &node.node_type {
+                NodeType::Speaker { active, .. } => *active,
+                _ => continue,
+            };
+            if !is_active { continue; }
+
+            let chain = crate::nodes::speaker::trace_audio_chain(speaker_id, &self.graph);
+            if chain.is_empty() { continue; }
+
+            let source_id = chain[0];
+            let is_source = self.graph.nodes.get(&source_id).map(|n| {
+                matches!(n.node_type, NodeType::Synth { .. } | NodeType::AudioPlayer { .. } | NodeType::AudioMixer { .. })
+            }).unwrap_or(false);
+            if !is_source { continue; }
+
+            // Mixer: collect input sources
+            if let Some(node) = self.graph.nodes.get(&source_id) {
+                if let NodeType::AudioMixer { channel_count, gains } = &node.node_type {
+                    let mut mixer_inputs: Vec<(NodeId, f32)> = Vec::new();
+                    for ch in 0..*channel_count {
+                        let audio_port = ch * 2;
+                        if let Some(conn) = self.graph.connections.iter().find(|c| c.to_node == source_id && c.to_port == audio_port) {
+                            let gain = gains.get(ch).copied().unwrap_or(0.8);
+                            let input_id = conn.from_node;
+                            mixer_inputs.push((input_id, gain));
+                            render_only_sources.insert(input_id);
+                            active_sources.insert(input_id);
+                            chain_updates.push((input_id, Vec::new()));
+                        }
+                    }
+                    mixer_updates.push((source_id, mixer_inputs));
+                }
+            }
+
+            // FM: if Freq input (port 0) is connected to another Synth, register modulator as render-only
+            if let Some(node) = self.graph.nodes.get(&source_id) {
+                if let NodeType::Synth { .. } = &node.node_type {
+                    if let Some(conn) = self.graph.connections.iter().find(|c| c.to_node == source_id && c.to_port == 0) {
+                        let fm_id = conn.from_node;
+                        let is_synth = self.graph.nodes.get(&fm_id).map(|n| matches!(n.node_type, NodeType::Synth { .. })).unwrap_or(false);
+                        if is_synth && !active_sources.contains(&fm_id) {
+                            render_only_sources.insert(fm_id);
+                            active_sources.insert(fm_id);
+                            chain_updates.push((fm_id, Vec::new()));
+                        }
+                    }
+                }
+            }
+
+            // Build effects list from the rest of the chain
+            let mut effects: Vec<AudioEffect> = Vec::new();
+            for &nid in &chain[1..] {
+                if let Some(n) = self.graph.nodes.get(&nid) {
+                    match &n.node_type {
+                        NodeType::AudioDelay { time_ms, feedback } => {
+                            effects.push(AudioEffect::Delay {
+                                time_ms: *time_ms, feedback: *feedback,
+                                buffer: Vec::new(), write_pos: 0,
+                            });
+                        }
+                        NodeType::AudioDistortion { drive } => {
+                            effects.push(AudioEffect::Distortion { drive: *drive });
+                        }
+                        NodeType::AudioLowPass { cutoff } => {
+                            effects.push(AudioEffect::LowPass { cutoff: *cutoff, state: 0.0 });
+                        }
+                        NodeType::AudioHighPass { cutoff } => {
+                            effects.push(AudioEffect::HighPass { cutoff: *cutoff, state: 0.0 });
+                        }
+                        NodeType::AudioGain { level } => {
+                            effects.push(AudioEffect::Gain { level: *level });
+                        }
+                        NodeType::AudioFx { effects: fx_list } => {
+                            effects.extend(fx_list.iter().cloned());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            chain_updates.push((source_id, effects));
+            active_sources.insert(source_id);
+        }
+
+        // ── Phase 2: Apply ALL updates in a single lock ─────────────────
+        if let Ok(mut s) = self.audio.state.lock() {
+            // Apply mixer source registrations
+            for (mixer_id, inputs) in mixer_updates {
+                s.sources.insert(mixer_id, AudioSource::Mixer { inputs });
+            }
+
+            // Apply active chains (with effect merging for existing chains)
+            for (node_id, effects) in chain_updates {
+                if let Some(existing) = s.active_chains.get_mut(&node_id) {
+                    if existing.len() != effects.len() || !crate::audio::effects_same_types(existing, &effects) {
+                        s.active_chains.insert(node_id, effects);
+                    } else {
+                        for (old, new) in existing.iter_mut().zip(effects.iter()) {
+                            old.merge_params(new);
+                        }
+                    }
+                } else {
+                    s.active_chains.insert(node_id, effects);
+                }
+            }
+
+            // Update render_only set
+            s.render_only = render_only_sources;
+
+            // Remove stale chains
+            let stale: Vec<NodeId> = s.active_chains.keys()
+                .filter(|id| !active_sources.contains(id))
+                .copied()
+                .collect();
+            for id in stale {
+                s.active_chains.remove(&id);
+            }
+        }
+
+        // Auto-start audio output if we have active sources but no running stream
+        if !active_sources.is_empty() && !self.audio.is_running() {
+            let device_name: Option<String> = self.graph.nodes.values()
+                .find_map(|n| {
+                    if let NodeType::AudioDevice { selected_output, .. } = &n.node_type {
+                        if selected_output.is_empty() { None } else { Some(selected_output.clone()) }
+                    } else { None }
+                });
+            if let Err(e) = self.audio.start_output(device_name.as_deref()) {
+                eprintln!("Auto-start audio failed: {}", e);
+            }
+        }
     }
 
     fn primary_selected(&self) -> Option<NodeId> {
@@ -272,7 +511,7 @@ impl PatchworkApp {
             let n_outputs = output_defs.len();
             let [cr, cg, cb] = node.node_type.color_hint();
             let accent = egui::Color32::from_rgb(cr, cg, cb);
-            let title = format!("{} #{}", node.node_type.title(), node_id);
+            let title = node.node_type.title().to_string();
             let midi_conn_out = self.midi.is_output_connected(node_id);
             let midi_conn_in = self.midi.is_input_connected(node_id);
             let serial_conn = self.serial.is_connected(node_id);
@@ -295,16 +534,25 @@ impl PatchworkApp {
             let inv = 1.0 / zoom;
             let node_width = match &node.node_type {
                 NodeType::Slider { .. } => 50.0,
+                NodeType::Display { .. } => 160.0,
                 NodeType::Comment { .. } => 160.0,
                 _ if node.node_type.custom_render() => 50.0,
                 _ if is_pinned => 180.0 * inv,
                 _ => 180.0,
             };
             let is_comment = matches!(node.node_type, NodeType::Comment { .. });
+            let is_display = matches!(node.node_type, NodeType::Display { .. });
+            let is_monitor = matches!(node.node_type, NodeType::Monitor);
+            let is_audio_player = matches!(node.node_type, NodeType::AudioPlayer { .. });
+            let is_math = matches!(node.node_type, NodeType::Math { .. });
+            let is_speaker = matches!(node.node_type, NodeType::Speaker { .. });
+            let no_title = is_comment || is_display || is_monitor || is_audio_player || is_speaker;
             let port_sz = if is_pinned { PORT_INTERACT * inv } else { PORT_INTERACT };
             let port_r = if is_pinned { PORT_RADIUS * inv } else { PORT_RADIUS };
             let title_size = if is_pinned { 14.0 * inv } else { 14.0 };
-            let title_rt = egui::RichText::new(&title).color(accent).strong().size(title_size);
+            let node_icon = crate::icons::node_icon(node.node_type.title());
+            let title_with_icon = format!("{} {}", node_icon, title);
+            let title_rt = egui::RichText::new(&title_with_icon).color(accent).strong().size(title_size);
             // Pinned windows use zoom-bucketed ID to reset cached size on zoom change
             let zoom_bucket = if is_pinned { (zoom * 10.0).round() as i32 } else { 0 };
             // Apply inverse-zoom style for pinned nodes
@@ -326,32 +574,50 @@ impl PatchworkApp {
                     let bg = egui::Color32::from_rgb(bg_color[0], bg_color[1], bg_color[2]);
                     Some(egui::Frame::NONE.fill(bg).rounding(8.0).inner_margin(12.0))
                 }
+                NodeType::Display { .. } => {
+                    Some(egui::Frame::NONE.fill(egui::Color32::from_rgb(15, 15, 20)).rounding(8.0).inner_margin(6.0))
+                }
                 _ => None,
             };
             let mut win = egui::Window::new(title_rt)
                 .id(egui::Id::new(("node", node_id, zoom_bucket)))
                 .current_pos(egui::pos2(egui_x, egui_y))
                 .default_width(node_width)
-                .resizable(!is_custom_render && !is_comment)
+                .resizable(is_display || (!is_custom_render && !is_comment && !is_monitor && !is_audio_player && !is_math))
                 .constrain(false)
-                .collapsible(!is_custom_render && !is_comment)
-                .title_bar(!is_custom_render && !is_comment);
+                .collapsible(!is_custom_render && !no_title)
+                .title_bar(!is_custom_render && !no_title);
+            if is_pinned {
+                win = win.order(egui::Order::Foreground);
+            }
+            if is_display {
+                win = win.default_height(120.0).scroll([false, false]);
+            }
             if let Some(frame) = custom_frame {
                 win = win.frame(frame);
             }
             let resp = win.show(ctx, |ui| {
+                    // Constrain width to prevent expanding nodes
+                    ui.set_max_width(node_width.max(180.0));
+
                     // Top input ports (skip for inline-port nodes)
                     if !inline {
                         for (i, pdef) in input_defs.iter().enumerate() {
                             ui.horizontal(|ui| {
                                 let (rect, response) = ui.allocate_exact_size(egui::vec2(port_sz, port_sz), egui::Sense::click_and_drag());
                                 let val = Graph::static_input_value(&connections, values, node_id, i);
-                                let (type_fill, type_border) = port_colors_for_value(&val, false);
+                                let kind = pdef.kind; // Use semantic kind from port definition
+                                let is_connected = connections.iter().any(|c| c.to_node == node_id && c.to_port == i);
+                                let (type_fill, type_border) = port_colors_for_kind(kind, false);
                                 let (fill, border) = if response.hovered() || response.dragged() {
                                     (egui::Color32::YELLOW, egui::Color32::WHITE)
                                 } else { (type_fill, type_border) };
-                                ui.painter().circle_filled(rect.center(), port_r, fill);
-                                ui.painter().circle_stroke(rect.center(), port_r, egui::Stroke::new(PORT_BORDER, border));
+                                // Highlight port if click-wiring and hovering a compatible target
+                                let click_wiring_hover = self.click_wiring && dragging_from.is_some() && response.hovered();
+                                let (fill, border) = if click_wiring_hover {
+                                    (egui::Color32::from_rgb(100, 255, 100), egui::Color32::WHITE)
+                                } else { (fill, border) };
+                                draw_shaped_port(ui.painter(), rect.center(), port_r, fill, border, PORT_BORDER, kind, is_connected);
                                 port_positions.insert((node_id, i, true), rect.center());
                                 ui.label(format!("{}: {}", pdef.name, val));
                                 if response.drag_started() {
@@ -362,6 +628,31 @@ impl PatchworkApp {
                                         pending_disconnects.push((node_id, i));
                                     } else {
                                         dragging_from = Some((node_id, i, false));
+                                    }
+                                }
+                                // Click-to-connect: click on input port starts or completes wiring
+                                if response.clicked() {
+                                    if let Some((src_node, src_port, is_output)) = dragging_from {
+                                        if self.click_wiring && is_output && node_id != src_node {
+                                            // Complete: output → this input
+                                            pending_connections.push((src_node, src_port, node_id, i));
+                                            dragging_from = None;
+                                            self.click_wiring = false;
+                                        } else if self.click_wiring && !is_output && node_id != src_node {
+                                            // Complete: this input ← input (reverse)
+                                            pending_connections.push((node_id, i, src_node, src_port));
+                                            dragging_from = None;
+                                            self.click_wiring = false;
+                                        }
+                                    } else {
+                                        // Start click-wiring from input port
+                                        if let Some(existing) = connections.iter().find(|c| c.to_node == node_id && c.to_port == i) {
+                                            dragging_from = Some((existing.from_node, existing.from_port, true));
+                                            pending_disconnects.push((node_id, i));
+                                        } else {
+                                            dragging_from = Some((node_id, i, false));
+                                        }
+                                        self.click_wiring = true;
                                     }
                                 }
                             });
@@ -388,21 +679,48 @@ impl PatchworkApp {
                     if !inline {
                         if !output_defs.is_empty() { ui.separator(); }
                         for (i, pdef) in output_defs.iter().enumerate() {
+                            let val = values.get(&(node_id, i)).cloned().unwrap_or(PortValue::None);
+                            let label_text = format!("{}: {}", pdef.name, val);
+                            let kind = pdef.kind; // Use semantic kind from port definition
+                            let is_connected = connections.iter().any(|c| c.from_node == node_id && c.from_port == i);
+                            let (type_fill, type_border) = port_colors_for_kind(kind, true);
+
+                            // Use columns: label left, port circle right
                             ui.horizontal(|ui| {
-                                let val = values.get(&(node_id, i)).cloned().unwrap_or(PortValue::None);
-                                ui.label(format!("{}: {}", pdef.name, val));
-                                // Push port circle to right edge
-                                let remaining = ui.available_width() - port_sz - 2.0;
-                                if remaining > 0.0 { ui.add_space(remaining); }
-                                let (rect, response) = ui.allocate_exact_size(egui::vec2(port_sz, port_sz), egui::Sense::click_and_drag());
-                                let (type_fill, type_border) = port_colors_for_value(&val, true);
-                                let (fill, border) = if response.hovered() || response.dragged() {
-                                    (egui::Color32::YELLOW, egui::Color32::WHITE)
-                                } else { (type_fill, type_border) };
-                                ui.painter().circle_filled(rect.center(), port_r, fill);
-                                ui.painter().circle_stroke(rect.center(), port_r, egui::Stroke::new(PORT_BORDER, border));
-                                port_positions.insert((node_id, i, false), rect.center());
-                                if response.drag_started() { dragging_from = Some((node_id, i, true)); }
+                                ui.label(&label_text);
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    let (rect, response) = ui.allocate_exact_size(egui::vec2(port_sz, port_sz), egui::Sense::click_and_drag());
+                                    // Highlight port if click-wiring and hovering a compatible target
+                                    let click_wiring_hover = self.click_wiring && dragging_from.is_some() && response.hovered();
+                                    let (fill, border) = if click_wiring_hover {
+                                        (egui::Color32::from_rgb(100, 255, 100), egui::Color32::WHITE)
+                                    } else if response.hovered() || response.dragged() {
+                                        (egui::Color32::YELLOW, egui::Color32::WHITE)
+                                    } else { (type_fill, type_border) };
+                                    draw_shaped_port(ui.painter(), rect.center(), port_r, fill, border, PORT_BORDER, kind, is_connected);
+                                    port_positions.insert((node_id, i, false), rect.center());
+                                    if response.drag_started() { dragging_from = Some((node_id, i, true)); }
+                                    // Click-to-connect: click on output port starts or completes wiring
+                                    if response.clicked() {
+                                        if let Some((src_node, src_port, is_output)) = dragging_from {
+                                            if self.click_wiring && !is_output && node_id != src_node {
+                                                // Complete: input → this output
+                                                pending_connections.push((node_id, i, src_node, src_port));
+                                                dragging_from = None;
+                                                self.click_wiring = false;
+                                            } else if self.click_wiring && is_output && node_id != src_node {
+                                                // Complete: output → output (swap direction)
+                                                pending_connections.push((src_node, src_port, node_id, i));
+                                                dragging_from = None;
+                                                self.click_wiring = false;
+                                            }
+                                        } else {
+                                            // Start click-wiring from output port
+                                            dragging_from = Some((node_id, i, true));
+                                            self.click_wiring = true;
+                                        }
+                                    }
+                                });
                             });
                         }
                     }
@@ -430,6 +748,32 @@ impl PatchworkApp {
                     ];
                 }
                 node_rects.insert(node_id, r.response.rect);
+
+                // ── Pin badge for user-pinned nodes (not system nodes) ──
+                let is_system_node = matches!(node.node_type,
+                    NodeType::FileMenu | NodeType::ZoomControl { .. } | NodeType::Monitor | NodeType::Profiler
+                );
+                if is_pinned && !is_system_node && !matches!(node.node_type, NodeType::Palette { .. }) {
+                    let rect = r.response.rect;
+                    let badge_size = 22.0;
+                    let badge_center = egui::pos2(rect.left() - 2.0, rect.top() - 2.0);
+                    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new(("pin_badge", node_id))));
+                    // Accent color circle
+                    painter.circle_filled(badge_center, badge_size / 2.0, accent);
+                    // Pin icon
+                    let icon_col = if cr as u16 + cg as u16 + cb as u16 > 380 {
+                        egui::Color32::from_rgb(20, 20, 25)
+                    } else {
+                        egui::Color32::from_rgb(240, 240, 245)
+                    };
+                    painter.text(
+                        badge_center,
+                        egui::Align2::CENTER_CENTER,
+                        crate::icons::PUSH_PIN,
+                        egui::FontId::new(13.0, egui::FontFamily::Proportional),
+                        icon_col,
+                    );
+                }
 
                 // Selection on click (Shift = toggle, no Shift = replace)
                 // For custom_render nodes (Slider), only select on drag — click opens their popup
@@ -471,17 +815,33 @@ impl PatchworkApp {
                 // Draw selection highlight (skip for custom_render nodes — they handle their own visual feedback)
                 if self.selected_nodes.contains(&node_id) && !is_custom_render {
                     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("selection")));
-                    painter.rect_stroke(r.response.rect.expand(2.0), 4.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(80, 170, 255)), egui::StrokeKind::Outside);
+                    let sel_accent = ctx.data_mut(|d| d.get_temp::<[u8; 3]>(egui::Id::new("theme_accent")))
+                        .unwrap_or([80, 160, 255]);
+                    painter.rect_stroke(r.response.rect.expand(2.0), 4.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(sel_accent[0], sel_accent[1], sel_accent[2])), egui::StrokeKind::Outside);
                 }
                 // Pin indicator
                 if is_pinned {
                     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("pins")));
+                    let badge_center = egui::pos2(r.response.rect.left() + 10.0, r.response.rect.top() - 6.0);
+                    let badge_r = 8.0;
+                    // Use theme accent color
+                    let theme_accent = ctx.data_mut(|d| d.get_temp::<[u8; 3]>(egui::Id::new("theme_accent")))
+                        .unwrap_or([80, 160, 255]);
+                    let accent_color = egui::Color32::from_rgb(theme_accent[0], theme_accent[1], theme_accent[2]);
+                    // Darker version for background
+                    let bg = egui::Color32::from_rgb(
+                        theme_accent[0] / 4,
+                        theme_accent[1] / 4,
+                        theme_accent[2] / 4,
+                    );
+                    painter.circle_filled(badge_center, badge_r, bg);
+                    painter.circle_stroke(badge_center, badge_r, egui::Stroke::new(1.0, accent_color.linear_multiply(0.5)));
                     painter.text(
-                        egui::pos2(r.response.rect.left() + 4.0, r.response.rect.top() - 12.0),
-                        egui::Align2::LEFT_TOP,
-                        "Pinned",
-                        egui::FontId::proportional(9.0),
-                        egui::Color32::from_rgb(255, 200, 80),
+                        badge_center,
+                        egui::Align2::CENTER_CENTER,
+                        crate::icons::PUSH_PIN,
+                        egui::FontId::proportional(10.0),
+                        accent_color,
                     );
                 }
 
@@ -526,9 +886,13 @@ impl PatchworkApp {
                 }
             }
             // Process slider popup actions (pin/delete)
+            // Check all custom node pin actions
             let pin_id = egui::Id::new(("slider_pin_action", node_id));
-            if ctx.data_mut(|d| d.get_temp::<bool>(pin_id).unwrap_or(false)) {
-                ctx.data_mut(|d| d.remove::<bool>(pin_id));
+            let display_pin_id = egui::Id::new(("display_pin_action", node_id));
+            let has_pin = ctx.data_mut(|d| d.get_temp::<bool>(pin_id).unwrap_or(false))
+                       || ctx.data_mut(|d| d.get_temp::<bool>(display_pin_id).unwrap_or(false));
+            ctx.data_mut(|d| { d.remove::<bool>(pin_id); d.remove::<bool>(display_pin_id); });
+            if has_pin {
                 self.push_undo();
                 if self.pinned_nodes.contains(&node_id) {
                     // Unpin: current pos is screen pixels stored by pinned rendering
@@ -547,7 +911,7 @@ impl PatchworkApp {
                 }
             }
             // Handle delete actions from custom node popups (Slider, Comment, etc.)
-            for prefix in &["slider_delete_action", "comment_delete_action"] {
+            for prefix in &["slider_delete_action", "comment_delete_action", "display_delete_action"] {
                 let del_id = egui::Id::new((*prefix, node_id));
                 if ctx.data_mut(|d| d.get_temp::<bool>(del_id).unwrap_or(false)) {
                     ctx.data_mut(|d| d.remove::<bool>(del_id));
@@ -580,18 +944,40 @@ impl PatchworkApp {
         }
 
         if let Some((src_node, src_port, is_output)) = dragging_from {
-            if ctx.input(|i| i.pointer.any_released()) {
-                if let Some(pointer) = ctx.pointer_latest_pos() {
-                    for (&(nid, pidx, is_input), &pos) in &port_positions {
-                        if pos.distance(pointer) < PORT_INTERACT * 1.5 {
-                            if is_output && is_input && nid != src_node { pending_connections.push((src_node, src_port, nid, pidx)); }
-                            else if !is_output && !is_input && nid != src_node { pending_connections.push((nid, pidx, src_node, src_port)); }
-                            break;
+            if self.click_wiring {
+                // Click-wiring mode: cancel on Escape or right-click
+                let cancel = ctx.input(|i| i.key_pressed(egui::Key::Escape))
+                    || ctx.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary));
+                if cancel {
+                    dragging_from = None;
+                    self.click_wiring = false;
+                }
+                // Connection completion is handled in the port click handlers above
+            } else {
+                // Normal drag mode: complete on release
+                if ctx.input(|i| i.pointer.any_released()) {
+                    if let Some(pointer) = ctx.pointer_latest_pos() {
+                        for (&(nid, pidx, is_input), &pos) in &port_positions {
+                            if pos.distance(pointer) < PORT_INTERACT * 1.5 {
+                                if is_output && is_input && nid != src_node { pending_connections.push((src_node, src_port, nid, pidx)); }
+                                else if !is_output && !is_input && nid != src_node { pending_connections.push((nid, pidx, src_node, src_port)); }
+                                break;
+                            }
                         }
                     }
+                    dragging_from = None;
                 }
-                dragging_from = None;
             }
+        }
+
+        // Sync click_wiring state with egui temp data (for inline port nodes)
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new("click_wiring_active"), self.click_wiring));
+        // Pick up click-wire completions from inline ports
+        if let Some((fn_, fp, tn, tp)) = ctx.data_mut(|d| d.get_temp::<(NodeId, usize, NodeId, usize)>(egui::Id::new("click_wire_complete"))) {
+            ctx.data_mut(|d| d.remove::<(NodeId, usize, NodeId, usize)>(egui::Id::new("click_wire_complete")));
+            pending_connections.push((fn_, fp, tn, tp));
+            dragging_from = None;
+            self.click_wiring = false;
         }
 
         self.dragging_from = dragging_from;
@@ -600,6 +986,10 @@ impl PatchworkApp {
         self.monitor = monitor_state;
         self.ob = ob_manager;
         self.audio = audio_manager;
+
+        // ── Build audio chains from Speaker nodes ────────────────────────
+        self.build_audio_chains();
+
         // Push undo snapshot if any graph mutations are pending
         if !nodes_to_delete.is_empty() || !pending_disconnects.is_empty()
             || !pending_connections.is_empty() || !palette_spawns.is_empty() {
@@ -611,6 +1001,16 @@ impl PatchworkApp {
         // Spawn nodes from Palette clicks (place to the right of the palette node)
         for (palette_pos, nt) in palette_spawns {
             self.graph.add_node(nt, [palette_pos[0] + 250.0, palette_pos[1]]);
+        }
+        // Clear MCP trigger flags on AI Request nodes
+        for (&nid, node) in &mut self.graph.nodes {
+            if let NodeType::AiRequest { status, .. } = &mut node.node_type {
+                let trigger_id = egui::Id::new(("mcp_ai_triggered", nid));
+                if ctx.data_mut(|d| d.get_temp::<bool>(trigger_id).unwrap_or(false)) {
+                    ctx.data_mut(|d| d.remove::<bool>(trigger_id));
+                    *status = "thinking".into();
+                }
+            }
         }
         self.midi.process(midi_actions);
         self.serial.process(serial_actions);
@@ -648,7 +1048,8 @@ impl eframe::App for PatchworkApp {
         let conn_count = self.graph.connections.len();
         self.monitor.tick(node_count, conn_count);
 
-        let mut values = self.graph.evaluate();
+        let now_secs = self.app_start_instant.elapsed().as_secs_f64();
+        let mut values = self.graph.evaluate(now_secs);
 
         // Inject OB hardware values into the graph (before they're used by downstream nodes)
         // These need a second evaluation pass to propagate through Add/Multiply/etc.
@@ -712,7 +1113,7 @@ impl eframe::App for PatchworkApp {
             }
             // Re-evaluate to propagate OB values through downstream nodes (Add, Multiply, etc.)
             if ob_injected {
-                self.graph.evaluate_with_existing(&mut values);
+                self.graph.evaluate_with_existing(&mut values, now_secs);
             }
         }
 
@@ -812,10 +1213,30 @@ impl eframe::App for PatchworkApp {
                             values.insert((id, 0), PortValue::Image(result));
                         }
                     }
-                    NodeType::Curve { points } => {
-                        let x = inputs.first().map(|v| v.as_float()).unwrap_or(0.0);
-                        let y = nodes::curve::evaluate_curve(points, x);
-                        values.insert((id, 0), PortValue::Float(y));
+                    NodeType::Curve { points, .. } => {
+                        // Y/Phase/End are computed in graph.evaluate().
+                        // Here we generate the Image LUT output (port 3).
+                        let pts_hash = points.iter().map(|p| (p[0].to_bits() as u64) ^ (p[1].to_bits() as u64)).fold(0u64, |a, b| a.wrapping_add(b));
+                        let cache_id = egui::Id::new(("curve_lut_cache", id));
+                        let cached: Option<(u64, std::sync::Arc<ImageData>)> = ctx.data_mut(|d| d.get_temp(cache_id));
+                        let need_regen = cached.as_ref().map(|(h, _)| *h != pts_hash).unwrap_or(true);
+                        if need_regen {
+                            // Generate 256×1 LUT image
+                            let w = 256u32;
+                            let h = 1u32;
+                            let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+                            for i in 0..w {
+                                let t = i as f32 / (w - 1) as f32;
+                                let v = nodes::curve::evaluate_curve(points, t);
+                                let byte = (v.clamp(0.0, 1.0) * 255.0) as u8;
+                                pixels.extend_from_slice(&[byte, byte, byte, 255]);
+                            }
+                            let img = std::sync::Arc::new(ImageData::new(w, h, pixels));
+                            ctx.data_mut(|d| d.insert_temp(cache_id, (pts_hash, img.clone())));
+                            values.insert((id, 3), PortValue::Image(img));
+                        } else if let Some((_, img)) = cached {
+                            values.insert((id, 3), PortValue::Image(img));
+                        }
                     }
                     NodeType::Draw { strokes, canvas_size, .. } => {
                         // Only regenerate if strokes changed
@@ -955,6 +1376,36 @@ impl eframe::App for PatchworkApp {
         self.sync_console_messages();
         self.handle_system_node_actions(ctx);
 
+        // Handle OSC In spawn requests (create new OscIn pre-configured for a discovered address)
+        {
+            let osc_ids: Vec<NodeId> = self.graph.nodes.keys().copied()
+                .filter(|id| matches!(self.graph.nodes.get(id).map(|n| &n.node_type), Some(NodeType::OscIn { .. })))
+                .collect();
+            for osc_id in osc_ids {
+                let spawn_id = egui::Id::new(("osc_spawn", osc_id));
+                if let Some((addr, argc, port)) = ctx.data_mut(|d| d.get_temp::<(String, usize, u16)>(spawn_id)) {
+                    ctx.data_mut(|d| d.remove::<(String, usize, u16)>(spawn_id));
+                    let src_pos = self.graph.nodes.get(&osc_id).map(|n| n.pos).unwrap_or([200.0, 200.0]);
+                    let nt = NodeType::OscIn {
+                        port,
+                        address_filter: addr,
+                        arg_count: argc,
+                        last_args: vec![0.0; argc],
+                        last_args_text: Vec::new(),
+                        log: Vec::new(),
+                        listening: true,
+                        discovered: Vec::new(),
+                    };
+                    self.push_undo();
+                    let new_id = self.graph.add_node(nt, [src_pos[0] + 280.0, src_pos[1]]);
+                    self.selected_nodes.clear();
+                    self.selected_nodes.insert(new_id);
+                    // Auto-start listening on the spawned node
+                    self.osc.process(vec![crate::osc::OscAction::StartListening { node_id: new_id, port }]);
+                }
+            }
+        }
+
         // Handle OB Hub spawn requests (create device node auto-connected to hub)
         {
             let hub_ids: Vec<NodeId> = self.graph.nodes.keys().copied()
@@ -983,5 +1434,9 @@ impl eframe::App for PatchworkApp {
         self.handle_canvas_interaction(ctx);
 
         ctx.request_repaint();
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_session();
     }
 }

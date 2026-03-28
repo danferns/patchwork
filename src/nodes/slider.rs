@@ -23,7 +23,8 @@ pub fn render(
 ) {
     let in_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 0);
     if in_wired {
-        *value = Graph::static_input_value(connections, values, node_id, 0).as_float();
+        let raw = Graph::static_input_value(connections, values, node_id, 0).as_float();
+        *value = raw.clamp(*min, *max);
     }
 
     let knob_color = egui::Color32::from_rgb(slider_color[0], slider_color[1], slider_color[2]);
@@ -103,8 +104,12 @@ pub fn render(
     ui.add_space(2.0);
 
     // ── Value display ───────────────────────────────────
+    // No hard range constraint — if user types a value beyond, expand the range
     ui.vertical_centered(|ui| {
-        ui.add(egui::DragValue::new(value).speed(*step).range(*min..=*max));
+        if ui.add(egui::DragValue::new(value).speed(*step)).changed() && !in_wired {
+            if *value > *max { *max = *value; }
+            if *value < *min { *min = *value; }
+        }
     });
 
     // Label — show default "Slider #N" if empty
@@ -143,7 +148,7 @@ pub fn render(
 
         let area_resp = egui::Area::new(egui::Id::new(("slider_opts", node_id)))
             .fixed_pos(popup_pos)
-            .order(egui::Order::Foreground)
+            .order(egui::Order::Tooltip)
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).rounding(12.0).inner_margin(12.0).show(ui, |ui| {
                     ui.set_min_width(200.0);
@@ -168,10 +173,13 @@ pub fn render(
 
                     ui.add_space(4.0);
 
-                    // Value
+                    // Value — expand range if user types beyond
                     ui.horizontal(|ui| {
                         ui.label("Value");
-                        ui.add(egui::DragValue::new(value).speed(*step).range(*min..=*max));
+                        if ui.add(egui::DragValue::new(value).speed(*step)).changed() && !in_wired {
+                            if *value > *max { *max = *value; }
+                            if *value < *min { *min = *value; }
+                        }
                     });
 
                     // Range
@@ -220,7 +228,7 @@ fn port_circle(
     dragging_from: &mut Option<(NodeId, usize, bool)>,
     connections: &[Connection],
 ) {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::click_and_drag());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click_and_drag());
     let (fill, border) = if response.hovered() || response.dragged() {
         (egui::Color32::YELLOW, egui::Color32::WHITE)
     } else if is_wired {
@@ -228,8 +236,18 @@ fn port_circle(
     } else {
         (egui::Color32::from_rgb(70, 75, 85), egui::Color32::from_rgb(120, 125, 135))
     };
-    ui.painter().circle_filled(rect.center(), 6.0, fill);
-    ui.painter().circle_stroke(rect.center(), 6.0, egui::Stroke::new(2.0, border));
+    ui.painter().circle_filled(rect.center(), 7.0, fill);
+    ui.painter().circle_stroke(rect.center(), 7.0, egui::Stroke::new(2.0, border));
+    // Show math icon when connected
+    if is_wired {
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            crate::icons::MATH_OPERATIONS,
+            egui::FontId::new(8.0, egui::FontFamily::Proportional),
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 180),
+        );
+    }
     port_positions.insert((node_id, port, is_input), rect.center());
     if response.drag_started() {
         if is_input {

@@ -154,7 +154,7 @@ pub fn render(
 
         let area_resp = egui::Area::new(egui::Id::new(("comment_opts", node_id)))
             .fixed_pos(popup_pos)
-            .order(egui::Order::Foreground)
+            .order(egui::Order::Tooltip)
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).rounding(10.0).inner_margin(8.0).show(ui, |ui| {
                     ui.set_min_width(130.0);
