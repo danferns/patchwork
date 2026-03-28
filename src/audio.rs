@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::cell::UnsafeCell;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -87,6 +87,108 @@ impl LiveInputBuffer {
             buf[i] = 0.0;
         }
         self.read_pos.store(rp, Ordering::Release);
+    }
+}
+
+// ── Lock-free Ring Buffer for File Playback ──────────────────────────────────
+
+/// SPSC ring buffer for streaming decoded audio file samples from a background
+/// decode thread (Symphonia) into the audio output callback.
+/// Same architecture as LiveInputBuffer, with additional control signals for
+/// play/pause/seek/stop coordination between UI and decode thread.
+pub struct FilePlayerBuffer {
+    data: UnsafeCell<Vec<f32>>,
+    capacity: usize,
+    write_pos: AtomicUsize,
+    read_pos: AtomicUsize,
+    /// Decode thread sets when file reaches EOF
+    pub finished: AtomicBool,
+    /// UI sets to pause decode thread (audio callback returns silence)
+    pub paused: AtomicBool,
+    /// UI signals decode thread to seek
+    pub seek_requested: AtomicBool,
+    /// Target seek position in seconds (Mutex OK — only read by decode thread, not audio thread)
+    pub seek_target_secs: Mutex<f64>,
+    /// UI signals decode thread to stop
+    pub stop_requested: AtomicBool,
+    /// File's native sample rate (set once by decode thread on open)
+    pub file_sample_rate: AtomicU32,
+    /// Playback position in output samples (updated by audio callback consumer)
+    pub playback_position: AtomicUsize,
+    /// Decoded position in output samples (updated by decode thread as it writes).
+    /// Used for playhead display when no Speaker is consuming.
+    pub decoded_position: AtomicUsize,
+    /// Total duration in file samples (set by decode thread from metadata)
+    pub total_samples: AtomicUsize,
+}
+
+unsafe impl Send for FilePlayerBuffer {}
+unsafe impl Sync for FilePlayerBuffer {}
+
+impl FilePlayerBuffer {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            data: UnsafeCell::new(vec![0.0f32; capacity]),
+            capacity,
+            write_pos: AtomicUsize::new(0),
+            read_pos: AtomicUsize::new(0),
+            finished: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
+            seek_requested: AtomicBool::new(false),
+            seek_target_secs: Mutex::new(0.0),
+            stop_requested: AtomicBool::new(false),
+            file_sample_rate: AtomicU32::new(44100),
+            playback_position: AtomicUsize::new(0),
+            decoded_position: AtomicUsize::new(0),
+            total_samples: AtomicUsize::new(0),
+        }
+    }
+
+    /// Write decoded mono samples into the ring buffer (producer: decode thread).
+    pub fn write(&self, samples: &[f32]) {
+        let data = unsafe { &mut *self.data.get() };
+        let mut wp = self.write_pos.load(Ordering::Relaxed);
+        for &s in samples {
+            data[wp % self.capacity] = s;
+            wp = wp.wrapping_add(1);
+        }
+        self.write_pos.store(wp, Ordering::Release);
+    }
+
+    /// Read samples into the output buffer (consumer: audio callback).
+    /// Returns silence on underrun — never blocks.
+    pub fn read_into(&self, buf: &mut [f32], num_frames: usize) {
+        if self.paused.load(Ordering::Relaxed) {
+            for i in 0..num_frames.min(buf.len()) { buf[i] = 0.0; }
+            return;
+        }
+        let data = unsafe { &*self.data.get() };
+        let wp = self.write_pos.load(Ordering::Acquire);
+        let mut rp = self.read_pos.load(Ordering::Relaxed);
+        let available = wp.wrapping_sub(rp);
+        let to_read = num_frames.min(available).min(buf.len());
+        for i in 0..to_read {
+            buf[i] = data[rp % self.capacity];
+            rp = rp.wrapping_add(1);
+        }
+        for i in to_read..num_frames.min(buf.len()) {
+            buf[i] = 0.0;
+        }
+        self.read_pos.store(rp, Ordering::Release);
+    }
+
+    /// Reset buffer positions (called during seek to flush stale samples).
+    pub fn reset(&self) {
+        self.write_pos.store(0, Ordering::Release);
+        self.read_pos.store(0, Ordering::Release);
+        self.finished.store(false, Ordering::Release);
+    }
+
+    /// How many output samples are available but not yet consumed by the callback.
+    pub fn buffered(&self) -> usize {
+        let wp = self.write_pos.load(Ordering::Relaxed);
+        let rp = self.read_pos.load(Ordering::Relaxed);
+        wp.wrapping_sub(rp)
     }
 }
 
@@ -295,7 +397,12 @@ pub enum AudioSource {
         buffer: Arc<LiveInputBuffer>,
         gain: f32,
     },
-    // File player uses rodio's Sink — handled separately
+    /// Audio file playback — decoded by Symphonia in a background thread,
+    /// samples fed through a lock-free ring buffer into the audio callback.
+    FilePlayer {
+        buffer: Arc<FilePlayerBuffer>,
+        volume: f32,
+    },
 }
 
 // ── Shared Audio State ───────────────────────────────────────────────────────
@@ -439,6 +546,240 @@ impl Default for SharedAudioState {
     }
 }
 
+// ── Symphonia File Decode Thread ─────────────────────────────────────────────
+
+/// Background thread function that decodes an audio file with Symphonia and
+/// writes mono f32 samples into a FilePlayerBuffer ring buffer.
+/// Handles seeking, pausing, looping, and stop signals via atomics.
+fn decode_file_thread(
+    path: String,
+    buffer: Arc<FilePlayerBuffer>,
+    output_sample_rate: f32,
+    looping: Arc<AtomicBool>,
+) {
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::probe::Hint;
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::codecs::DecoderOptions;
+    use symphonia::core::audio::SampleBuffer;
+    use symphonia::core::units::Time;
+
+    let open_and_decode = |path: &str, buffer: &FilePlayerBuffer, seek_secs: f64| -> Result<(), String> {
+        let file = std::fs::File::open(path).map_err(|e| format!("Open: {}", e))?;
+        let mss = MediaSourceStream::new(Box::new(file), Default::default());
+
+        let mut hint = Hint::new();
+        if let Some(ext) = std::path::Path::new(path).extension().and_then(|e| e.to_str()) {
+            hint.with_extension(ext);
+        }
+
+        let probed = symphonia::default::get_probe()
+            .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+            .map_err(|e| format!("Probe: {}", e))?;
+
+        let mut reader = probed.format;
+
+        let track = reader.default_track()
+            .ok_or("No default audio track")?;
+        let track_id = track.id;
+        let codec_params = track.codec_params.clone();
+
+        let file_sr = codec_params.sample_rate.unwrap_or(44100) as f32;
+        let _file_channels = codec_params.channels
+            .map(|ch| ch.count()).unwrap_or(2) as usize;
+
+        buffer.file_sample_rate.store(file_sr as u32, Ordering::Release);
+        if let Some(n_frames) = codec_params.n_frames {
+            buffer.total_samples.store(n_frames as usize, Ordering::Release);
+        }
+
+        let mut decoder = symphonia::default::get_codecs()
+            .make(&codec_params, &DecoderOptions::default())
+            .map_err(|e| format!("Decoder: {}", e))?;
+
+        // Seek if needed (non-zero start position)
+        if seek_secs > 0.01 {
+            let _ = reader.seek(
+                symphonia::core::formats::SeekMode::Coarse,
+                symphonia::core::formats::SeekTo::Time {
+                    time: Time::new(seek_secs as u64, seek_secs.fract()),
+                    track_id: Some(track_id),
+                },
+            );
+        }
+
+        // Resampling state: linear interpolation
+        let resample_ratio = output_sample_rate / file_sr;
+        let needs_resample = (resample_ratio - 1.0).abs() > 0.001;
+        let mut resample_pos: f64 = 0.0;  // fractional position in source samples
+
+        let mut sample_buf: Option<SampleBuffer<f32>> = None;
+
+        loop {
+            // Check stop signal
+            if buffer.stop_requested.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+
+            // Check seek signal
+            if buffer.seek_requested.load(Ordering::Relaxed) {
+                buffer.seek_requested.store(false, Ordering::Release);
+                let target = *buffer.seek_target_secs.lock().unwrap();
+                let _ = reader.seek(
+                    symphonia::core::formats::SeekMode::Coarse,
+                    symphonia::core::formats::SeekTo::Time {
+                        time: Time::new(target as u64, target.fract()),
+                        track_id: Some(track_id),
+                    },
+                );
+                buffer.reset();
+                let new_pos = (target * output_sample_rate as f64) as usize;
+                buffer.playback_position.store(new_pos, Ordering::Release);
+                buffer.decoded_position.store(new_pos, Ordering::Release);
+                resample_pos = 0.0;
+                decoder.reset();
+                continue;
+            }
+
+            // Check pause signal
+            if buffer.paused.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
+
+            // Backpressure: if the ring buffer is nearly full, either the audio callback
+            // is consuming (normal — wait briefly) or no Speaker is connected (buffer stalls).
+            // In the latter case, advance read_pos to discard old samples so we keep decoding
+            // at real-time pace and the playhead keeps moving.
+            let buffered = buffer.buffered();
+            if buffered > buffer.capacity * 3 / 4 {
+                // If buffer has been full for a while (no consumer), advance read_pos to make room
+                let drain = buffer.capacity / 4;
+                let rp = buffer.read_pos.load(Ordering::Relaxed);
+                buffer.read_pos.store(rp.wrapping_add(drain), Ordering::Release);
+                // Brief sleep for real-time pacing (~drain samples at output_sample_rate)
+                let sleep_ms = (drain as f64 / output_sample_rate as f64 * 1000.0) as u64;
+                std::thread::sleep(std::time::Duration::from_millis(sleep_ms.max(1)));
+                continue;
+            }
+
+            // Decode next packet
+            let packet = match reader.next_packet() {
+                Ok(p) => p,
+                Err(symphonia::core::errors::Error::IoError(ref e))
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    // End of file
+                    if looping.load(Ordering::Relaxed) {
+                        // Seek back to beginning
+                        let _ = reader.seek(
+                            symphonia::core::formats::SeekMode::Coarse,
+                            symphonia::core::formats::SeekTo::Time {
+                                time: Time::new(0, 0.0),
+                                track_id: Some(track_id),
+                            },
+                        );
+                        buffer.playback_position.store(0, Ordering::Release);
+                        buffer.decoded_position.store(0, Ordering::Release);
+                        resample_pos = 0.0;
+                        decoder.reset();
+                        continue;
+                    }
+                    buffer.finished.store(true, Ordering::Release);
+                    return Ok(());
+                }
+                Err(_) => {
+                    buffer.finished.store(true, Ordering::Release);
+                    return Ok(());
+                }
+            };
+
+            if packet.track_id() != track_id {
+                continue; // Skip non-audio packets
+            }
+
+            let decoded = match decoder.decode(&packet) {
+                Ok(d) => d,
+                Err(_) => continue, // Skip decode errors
+            };
+
+            // Get samples as interleaved f32
+            let spec = *decoded.spec();
+            let num_decoded_frames = decoded.frames();
+            if num_decoded_frames == 0 { continue; }
+
+            let sb = sample_buf.get_or_insert_with(|| {
+                SampleBuffer::<f32>::new(num_decoded_frames as u64, spec)
+            });
+            // Ensure capacity
+            if sb.capacity() < num_decoded_frames {
+                *sb = SampleBuffer::<f32>::new(num_decoded_frames as u64, spec);
+            }
+            sb.copy_interleaved_ref(decoded);
+            let interleaved = sb.samples();
+            let channels = spec.channels.count().max(1);
+
+            // Downmix to mono
+            let mono: Vec<f32> = interleaved.chunks(channels)
+                .map(|frame| {
+                    let sum: f32 = frame.iter().sum();
+                    sum / channels as f32
+                })
+                .collect();
+
+            // Resample if needed, then write to ring buffer
+            if needs_resample && mono.len() > 1 {
+                // Linear interpolation resampling
+                let src_len = mono.len() as f64;
+                let mut resampled = Vec::with_capacity((src_len * resample_ratio as f64) as usize + 1);
+                while resample_pos < src_len - 1.0 {
+                    let idx = resample_pos as usize;
+                    let frac = resample_pos - idx as f64;
+                    let s0 = mono[idx];
+                    let s1 = mono[(idx + 1).min(mono.len() - 1)];
+                    resampled.push(s0 + (s1 - s0) * frac as f32);
+                    resample_pos += 1.0 / resample_ratio as f64;
+                }
+                resample_pos -= src_len - 1.0; // carry fractional part to next packet
+                if resample_pos < 0.0 { resample_pos = 0.0; }
+                buffer.decoded_position.fetch_add(resampled.len(), Ordering::Relaxed);
+                buffer.write(&resampled);
+            } else {
+                buffer.decoded_position.fetch_add(mono.len(), Ordering::Relaxed);
+                buffer.write(&mono);
+            }
+        }
+    };
+
+    if let Err(e) = open_and_decode(&path, &buffer, 0.0) {
+        eprintln!("File decode error: {}", e);
+        buffer.finished.store(true, Ordering::Release);
+    }
+}
+
+/// Probe an audio file for its duration using Symphonia metadata (fast, no full decode).
+pub fn probe_file_duration(path: &str) -> Option<f64> {
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::probe::Hint;
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::meta::MetadataOptions;
+
+    let file = std::fs::File::open(path).ok()?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = std::path::Path::new(path).extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let probed = symphonia::default::get_probe()
+        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .ok()?;
+    let track = probed.format.default_track()?;
+    let n_frames = track.codec_params.n_frames?;
+    let sr = track.codec_params.sample_rate.unwrap_or(44100) as f64;
+    Some(n_frames as f64 / sr)
+}
+
 // ── Audio Manager ────────────────────────────────────────────────────────────
 
 pub struct AudioManager {
@@ -446,10 +787,10 @@ pub struct AudioManager {
     stream: Option<cpal::Stream>,
     pub output_device_name: String,
     pub _input_device_name: String,
-    // File playback via rodio
-    pub rodio_sinks: HashMap<NodeId, rodio::Sink>,
-    rodio_stream: Option<rodio::OutputStream>,
-    _rodio_handle: Option<rodio::OutputStreamHandle>,
+    // File playback via Symphonia decode thread → FilePlayerBuffer → CPAL callback
+    pub file_buffers: HashMap<NodeId, Arc<FilePlayerBuffer>>,
+    file_threads: HashMap<NodeId, std::thread::JoinHandle<()>>,
+    file_looping: HashMap<NodeId, Arc<AtomicBool>>,
     pub file_playing: HashMap<NodeId, bool>,
     pub file_durations: HashMap<NodeId, f64>,  // seconds
     // Live audio input streams (one per AudioInput node)
@@ -469,9 +810,9 @@ impl AudioManager {
             stream: None,
             output_device_name: String::new(),
             _input_device_name: String::new(),
-            rodio_sinks: HashMap::new(),
-            rodio_stream: None,
-            _rodio_handle: None,
+            file_buffers: HashMap::new(),
+            file_threads: HashMap::new(),
+            file_looping: HashMap::new(),
             file_playing: HashMap::new(),
             file_durations: HashMap::new(),
             input_streams: HashMap::new(),
@@ -488,9 +829,9 @@ impl AudioManager {
             stream: None,
             output_device_name: String::new(),
             _input_device_name: String::new(),
-            rodio_sinks: HashMap::new(),
-            rodio_stream: None,
-            _rodio_handle: None,
+            file_buffers: HashMap::new(),
+            file_threads: HashMap::new(),
+            file_looping: HashMap::new(),
             file_playing: HashMap::new(),
             file_durations: HashMap::new(),
             input_streams: HashMap::new(),
@@ -720,115 +1061,104 @@ impl AudioManager {
         }
     }
 
-    /// Play an audio file — if paused, resume; if stopped/new, start fresh
+    /// Play an audio file — if paused, resume; if stopped/new, start fresh.
+    /// Decoded by Symphonia in a background thread → FilePlayerBuffer → CPAL callback.
     pub fn play_file(&mut self, node_id: NodeId, path: &str) -> Result<(), String> {
-        // If this node has an existing paused sink, just resume it
-        if let Some(sink) = self.rodio_sinks.get(&node_id) {
-            if sink.is_paused() {
-                sink.play();
+        // If paused, just resume
+        if let Some(buf) = self.file_buffers.get(&node_id) {
+            if buf.paused.load(Ordering::Relaxed) {
+                buf.paused.store(false, Ordering::Release);
                 self.file_playing.insert(node_id, true);
                 return Ok(());
             }
-            if !sink.empty() {
+            if !buf.finished.load(Ordering::Relaxed) {
                 // Already playing
                 self.file_playing.insert(node_id, true);
                 return Ok(());
             }
         }
 
-        // Remove any finished/old sink for this node
-        if let Some(old_sink) = self.rodio_sinks.remove(&node_id) {
-            old_sink.stop();
-        }
+        // Stop any existing playback for this node
+        self.stop_file(node_id);
 
-        // Initialize rodio stream if needed
-        if self.rodio_stream.is_none() {
-            let (stream, handle) = rodio::OutputStream::try_default()
-                .map_err(|e| format!("Rodio output: {}", e))?;
-            self.rodio_stream = Some(stream);
-            self._rodio_handle = Some(handle);
-        }
+        // Get output sample rate from shared state
+        let output_sr = self.state.lock()
+            .map(|s| s.sample_rate)
+            .unwrap_or(44100.0);
 
-        let handle = self._rodio_handle.as_ref().ok_or("No rodio handle")?;
-
-        // Get duration first (separate decoder instance)
+        // Probe file for duration (fast metadata read, no full decode)
         if !self.file_durations.contains_key(&node_id) {
-            if let Ok(f) = std::fs::File::open(path) {
-                if let Ok(dec) = rodio::Decoder::new(std::io::BufReader::new(f)) {
-                    use rodio::Source;
-                    if let Some(dur) = dec.total_duration() {
-                        self.file_durations.insert(node_id, dur.as_secs_f64());
-                    } else {
-                        // MP3 and some formats don't report duration — calculate from samples
-                        let sample_rate = dec.sample_rate() as f64;
-                        let channels = dec.channels() as f64;
-                        if sample_rate > 0.0 && channels > 0.0 {
-                            let total_samples = dec.count() as f64; // consumes the decoder
-                            let duration = total_samples / sample_rate / channels;
-                            if duration > 0.0 {
-                                self.file_durations.insert(node_id, duration);
-                            }
-                        }
-                    }
-                }
+            if let Some(dur) = probe_file_duration(path) {
+                self.file_durations.insert(node_id, dur);
             }
         }
 
-        let file = std::fs::File::open(path)
-            .map_err(|e| format!("Open file: {}", e))?;
-        let source = rodio::Decoder::new(std::io::BufReader::new(file))
-            .map_err(|e| format!("Decode: {}", e))?;
+        // Create ring buffer (2 seconds at output sample rate)
+        let capacity = (output_sr * 2.0) as usize;
+        let buffer = Arc::new(FilePlayerBuffer::new(capacity));
 
-        let sink = rodio::Sink::try_new(handle)
-            .map_err(|e| format!("Sink: {}", e))?;
-        sink.append(source);
+        // Looping flag shared with decode thread
+        let looping = Arc::new(AtomicBool::new(false));
+        self.file_looping.insert(node_id, looping.clone());
 
-        self.rodio_sinks.insert(node_id, sink);
+        // Spawn decode thread
+        let buf_clone = buffer.clone();
+        let path_owned = path.to_string();
+        let looping_clone = looping.clone();
+        let handle = std::thread::Builder::new()
+            .name(format!("file-decode-{}", node_id))
+            .spawn(move || {
+                decode_file_thread(path_owned, buf_clone, output_sr, looping_clone);
+            })
+            .map_err(|e| format!("Spawn decode thread: {}", e))?;
+
+        // Register as audio source so the CPAL callback can render it
+        if let Ok(mut s) = self.state.lock() {
+            s.sources.insert(node_id, AudioSource::FilePlayer {
+                buffer: buffer.clone(),
+                volume: 1.0,
+            });
+        }
+
+        self.file_buffers.insert(node_id, buffer);
+        self.file_threads.insert(node_id, handle);
         self.file_playing.insert(node_id, true);
         Ok(())
     }
 
-    /// Pause file playback for a specific node (keeps position, can resume)
+    /// Pause file playback (keeps position, decode thread sleeps)
     pub fn pause_file(&mut self, node_id: NodeId) {
-        if let Some(sink) = self.rodio_sinks.get(&node_id) {
-            sink.pause();
+        if let Some(buf) = self.file_buffers.get(&node_id) {
+            buf.paused.store(true, Ordering::Release);
         }
         self.file_playing.insert(node_id, false);
     }
 
     /// Seek file playback to a specific position (seconds).
-    /// Stops current sink, creates new one skipping to the position.
-    pub fn seek_file(&mut self, node_id: NodeId, path: &str, position_secs: f64) -> Result<(), String> {
-        // Stop current playback
-        self.rodio_sinks.remove(&node_id);
-
-        let handle = self._rodio_handle.as_ref().ok_or("No rodio handle")?;
-        let file = std::fs::File::open(path)
-            .map_err(|e| format!("Open: {}", e))?;
-        let source = rodio::Decoder::new(std::io::BufReader::new(file))
-            .map_err(|e| format!("Decode: {}", e))?;
-
-        // Skip to the seek position
-        use rodio::Source;
-        let skipped = source.skip_duration(std::time::Duration::from_secs_f64(position_secs));
-
-        let sink = rodio::Sink::try_new(handle)
-            .map_err(|e| format!("Sink: {}", e))?;
-        sink.append(skipped);
-
-        self.rodio_sinks.insert(node_id, sink);
-        self.file_playing.insert(node_id, true);
-        Ok(())
+    /// Signals the decode thread to seek — no thread restart needed.
+    pub fn seek_file(&mut self, node_id: NodeId, _path: &str, position_secs: f64) -> Result<(), String> {
+        if let Some(buf) = self.file_buffers.get(&node_id) {
+            *buf.seek_target_secs.lock().unwrap() = position_secs;
+            buf.seek_requested.store(true, Ordering::Release);
+            self.file_playing.insert(node_id, true);
+            Ok(())
+        } else {
+            Err("No active file player".into())
+        }
     }
 
-    /// Check if a specific node's file sink is paused
+    /// Check if paused
     pub fn is_file_paused(&self, node_id: NodeId) -> bool {
-        self.rodio_sinks.get(&node_id).map(|s| s.is_paused()).unwrap_or(false)
+        self.file_buffers.get(&node_id)
+            .map(|b| b.paused.load(Ordering::Relaxed))
+            .unwrap_or(false)
     }
 
-    /// Check if a specific node's sink has finished playing (empty = done)
+    /// Check if playback has finished (EOF reached and buffer drained)
     pub fn is_file_finished(&self, node_id: NodeId) -> bool {
-        self.rodio_sinks.get(&node_id).map(|s| s.empty() && !s.is_paused()).unwrap_or(false)
+        self.file_buffers.get(&node_id)
+            .map(|b| b.finished.load(Ordering::Relaxed))
+            .unwrap_or(false)
     }
 
     /// Get duration of a file for a node (in seconds)
@@ -836,19 +1166,57 @@ impl AudioManager {
         self.file_durations.get(&node_id).copied().unwrap_or(0.0)
     }
 
-    /// Set volume for a specific node's file sink
-    pub fn set_file_volume(&self, node_id: NodeId, volume: f32) {
-        if let Some(sink) = self.rodio_sinks.get(&node_id) {
-            sink.set_volume(volume);
+    /// Get current playback position in seconds.
+    /// Uses callback-consumed position when a Speaker is connected (accurate),
+    /// falls back to decoded position when no Speaker (playhead still moves).
+    pub fn get_playback_position(&self, node_id: NodeId) -> f64 {
+        if let Some(buf) = self.file_buffers.get(&node_id) {
+            let callback_pos = buf.playback_position.load(Ordering::Relaxed);
+            let decoded_pos = buf.decoded_position.load(Ordering::Relaxed);
+            // Use whichever is further ahead — callback_pos when Speaker is consuming,
+            // decoded_pos when no Speaker is connected
+            let pos = callback_pos.max(decoded_pos);
+            let sr = self.state.lock().map(|s| s.sample_rate).unwrap_or(44100.0) as f64;
+            if sr > 0.0 { pos as f64 / sr } else { 0.0 }
+        } else {
+            0.0
         }
     }
 
-    /// Stop file playback completely for a specific node (resets position)
-    pub fn stop_file(&mut self, node_id: NodeId) {
-        if let Some(sink) = self.rodio_sinks.remove(&node_id) {
-            sink.stop();
+    /// Set volume for a specific node's file player
+    pub fn set_file_volume(&self, node_id: NodeId, volume: f32) {
+        if let Ok(mut s) = self.state.try_lock() {
+            if let Some(AudioSource::FilePlayer { volume: v, .. }) = s.sources.get_mut(&node_id) {
+                *v = volume;
+            }
         }
+    }
+
+    /// Update looping flag for a specific node's file player
+    pub fn set_file_looping(&self, node_id: NodeId, looping: bool) {
+        if let Some(flag) = self.file_looping.get(&node_id) {
+            flag.store(looping, Ordering::Release);
+        }
+    }
+
+    /// Stop file playback completely (signals thread, joins, removes source)
+    pub fn stop_file(&mut self, node_id: NodeId) {
+        // Signal decode thread to stop
+        if let Some(buf) = self.file_buffers.get(&node_id) {
+            buf.stop_requested.store(true, Ordering::Release);
+        }
+        // Join the thread (with timeout to avoid blocking)
+        if let Some(handle) = self.file_threads.remove(&node_id) {
+            let _ = handle.join();
+        }
+        // Remove buffer and source
+        self.file_buffers.remove(&node_id);
+        self.file_looping.remove(&node_id);
         self.file_playing.remove(&node_id);
+        // Remove from audio source registry
+        if let Ok(mut s) = self.state.lock() {
+            s.sources.remove(&node_id);
+        }
     }
 
     /// Cleanup when a node is deleted
@@ -955,6 +1323,9 @@ fn audio_callback(
             Some(AudioSource::LiveInput { .. }) => {
                 deps.insert(nid, vec![]); // No dependencies — reads from ring buffer
             }
+            Some(AudioSource::FilePlayer { .. }) => {
+                deps.insert(nid, vec![]); // No dependencies — reads from ring buffer
+            }
             _ => {}
         }
     }
@@ -1023,6 +1394,16 @@ fn audio_callback(
                     }
                     rendered.insert(nid, buf);
                 }
+                Some(AudioSource::FilePlayer { buffer, volume }) => {
+                    let vol = *volume;
+                    let mut buf = vec![0.0f32; num_frames];
+                    buffer.read_into(&mut buf, num_frames);
+                    if (vol - 1.0).abs() > 0.001 {
+                        for s in buf.iter_mut() { *s *= vol; }
+                    }
+                    buffer.playback_position.fetch_add(num_frames, Ordering::Relaxed);
+                    rendered.insert(nid, buf);
+                }
                 _ => {}
             }
         }
@@ -1047,6 +1428,16 @@ fn audio_callback(
                 if (g - 1.0).abs() > 0.001 {
                     for s in buf.iter_mut() { *s *= g; }
                 }
+                rendered.insert(nid, buf);
+            }
+            Some(AudioSource::FilePlayer { buffer, volume }) => {
+                let vol = *volume;
+                let mut buf = vec![0.0f32; num_frames];
+                buffer.read_into(&mut buf, num_frames);
+                if (vol - 1.0).abs() > 0.001 {
+                    for s in buf.iter_mut() { *s *= vol; }
+                }
+                buffer.playback_position.fetch_add(num_frames, Ordering::Relaxed);
                 rendered.insert(nid, buf);
             }
             _ => {}

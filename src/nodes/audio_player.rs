@@ -27,45 +27,30 @@ pub fn render(
 
     // Auto-detect duration when file is loaded but duration unknown
     if !file_path.is_empty() && *duration_secs <= 0.0 {
-        // Try to get from AudioManager cache first
         let cached = audio.get_file_duration(node_id);
         if cached > 0.0 {
             *duration_secs = cached;
         } else {
-            // Force a duration scan by calling play_file briefly (it calculates duration as side effect)
-            // Actually just calculate directly here
-            if let Ok(f) = std::fs::File::open(file_path.as_str()) {
-                if let Ok(dec) = rodio::Decoder::new(std::io::BufReader::new(f)) {
-                    use rodio::Source;
-                    if let Some(dur) = dec.total_duration() {
-                        *duration_secs = dur.as_secs_f64();
-                    } else {
-                        let sr = dec.sample_rate() as f64;
-                        let ch = dec.channels() as f64;
-                        if sr > 0.0 && ch > 0.0 {
-                            let samples = dec.count() as f64;
-                            *duration_secs = samples / sr / ch;
-                        }
-                    }
-                }
+            // Use Symphonia to probe file for duration (fast metadata read)
+            if let Some(dur) = crate::audio::probe_file_duration(file_path) {
+                *duration_secs = dur;
             }
         }
     }
 
     let duration = *duration_secs;
 
-    // Detect end of playback — sink is empty and we thought we were playing
+    // Keep looping flag in sync with decode thread
+    audio.set_file_looping(node_id, *looping);
+
+    // Detect end of playback
     if is_playing && !is_paused && audio.is_file_finished(node_id) {
         if *looping && !file_path.is_empty() {
-            // Restart from beginning
+            // Looping is handled by the decode thread — just restart
             audio.stop_file(node_id);
             let _ = audio.play_file(node_id, file_path);
-            // Reset playback pos
-            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("audio_playback_pos", node_id)), 0.0f64));
         } else {
-            // Stop and reset to beginning
             audio.stop_file(node_id);
-            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("audio_playback_pos", node_id)), 0.0f64));
         }
     }
 
@@ -73,24 +58,12 @@ pub fn render(
     let is_playing = audio.file_playing.get(&node_id).copied().unwrap_or(false);
     let is_paused = audio.is_file_paused(node_id);
 
-    // Track playback position — only advances while actually playing
-    let pos_id = egui::Id::new(("audio_playback_pos", node_id));
-    let last_time_id = egui::Id::new(("audio_last_time", node_id));
-    let now = ui.ctx().input(|i| i.time);
-    let last_time = ui.ctx().data_mut(|d| d.get_temp::<f64>(last_time_id).unwrap_or(now));
-    let mut playback_pos = ui.ctx().data_mut(|d| d.get_temp::<f64>(pos_id).unwrap_or(0.0));
-
-    if is_playing && !is_paused {
-        playback_pos += now - last_time;
-        // Clamp to duration if known
-        if duration > 0.0 && playback_pos > duration {
-            playback_pos = duration;
-        }
-    }
-    ui.ctx().data_mut(|d| {
-        d.insert_temp(pos_id, playback_pos);
-        d.insert_temp(last_time_id, now);
-    });
+    // Sample-accurate playback position from FilePlayerBuffer atomic counter
+    let playback_pos = if is_playing || is_paused {
+        audio.get_playback_position(node_id)
+    } else {
+        0.0
+    };
 
     // Read from input ports if connected
     // Port 0: Play (>0.5 = play, <=0.5 = pause)
@@ -145,21 +118,18 @@ pub fn render(
     let painter = ui.painter();
     painter.rect_filled(wf_rect, 4.0, egui::Color32::from_rgb(25, 25, 30));
 
-    // Click/drag on waveform = seek to that position (both visual AND audio)
+    // Click/drag on waveform = seek
     if (wf_response.clicked() || wf_response.dragged()) && duration > 0.0 {
         if let Some(pos) = wf_response.interact_pointer_pos() {
             let seek_t = ((pos.x - wf_rect.left()) / wf_rect.width()).clamp(0.0, 1.0);
             let new_pos = seek_t as f64 * duration;
-            playback_pos = new_pos;
-            ui.ctx().data_mut(|d| d.insert_temp(pos_id, new_pos));
-            // Actually seek the audio — stop current sink and restart from new position
             if is_playing || is_paused {
                 let _ = audio.seek_file(node_id, file_path, new_pos);
             }
         }
     }
 
-    // Waveform bars (visual from file hash — compressed to always fill the width)
+    // Waveform bars
     {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -177,7 +147,6 @@ pub fn render(
                 * ((seed as f64 * 0.0003 + t * 7.3).sin() * 0.3 + 0.5) as f32;
             let half_h = v.clamp(0.05, 0.9) * (WAVEFORM_HEIGHT * 0.4);
             let x = wf_rect.left() + i as f32 * bar_w;
-            // Bars before playhead = bright, after = dim
             let bar_progress = i as f32 / num_bars as f32;
             let wf_color = if bar_progress <= progress {
                 egui::Color32::from_rgb(80, 200, 120)
@@ -189,14 +158,13 @@ pub fn render(
                 1.0, wf_color);
         }
 
-        // Playhead — ALWAYS visible (red vertical line + top triangle)
+        // Playhead
         {
             let px = wf_rect.left() + progress * wf_rect.width();
             let ph_color = egui::Color32::from_rgb(255, 60, 60);
             painter.line_segment(
                 [egui::pos2(px, wf_rect.top()), egui::pos2(px, wf_rect.bottom())],
                 egui::Stroke::new(2.5, ph_color));
-            // Small triangle at top of playhead
             painter.add(egui::Shape::convex_polygon(
                 vec![
                     egui::pos2(px - 4.0, wf_rect.top()),
@@ -238,7 +206,7 @@ pub fn render(
         wp.circle_filled(center, radius, egui::Color32::from_rgb(30, 30, 35));
         wp.circle_stroke(center, radius, egui::Stroke::new(1.5, egui::Color32::from_rgb(55, 55, 65)));
         wp.circle_filled(center, radius * 0.18, egui::Color32::from_rgb(50, 50, 55));
-        let angle = playback_pos as f32 * 2.0; // wheel tracks position, frozen when paused
+        let angle = playback_pos as f32 * 2.0;
         let notch = egui::pos2(center.x + angle.cos() * radius * 0.7, center.y + angle.sin() * radius * 0.7);
         wp.line_segment([center, notch], egui::Stroke::new(1.5, egui::Color32::from_rgb(180, 180, 190)));
         for i in 1..3 {
@@ -248,7 +216,6 @@ pub fn render(
         // Buttons
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
-                // Play/Pause — accent color when ready to play
                 let icon = if is_playing { crate::icons::PAUSE } else { crate::icons::PLAY };
                 let accent = ui.ctx().data_mut(|d| d.get_temp::<[u8; 3]>(egui::Id::new("theme_accent")))
                     .unwrap_or([80, 160, 255]);
@@ -265,33 +232,27 @@ pub fn render(
                         audio.pause_file(node_id);
                     } else {
                         let _ = audio.play_file(node_id, file_path);
-                        // Store duration from AudioManager into the node
                         let dur = audio.get_file_duration(node_id);
                         if dur > 0.0 { *duration_secs = dur; }
-                        // Reset playback pos on fresh start (not resume)
-                        if is_paused {
-                            // Resuming — keep position
-                        } else {
-                            ui.ctx().data_mut(|d| d.insert_temp(pos_id, 0.0f64));
-                        }
                     }
                 }
-                // Stop — resets position to beginning
+                // Stop
                 if ui.add(egui::Button::new(egui::RichText::new(crate::icons::STOP).size(14.0)).min_size(egui::vec2(26.0, 22.0))).clicked() {
                     audio.stop_file(node_id);
-                    // Reset playback position
-                    ui.ctx().data_mut(|d| d.insert_temp(pos_id, 0.0f64));
                 }
                 // Loop
                 let lc = if *looping { egui::Color32::from_rgb(80, 170, 255) } else { egui::Color32::GRAY };
                 if ui.add(egui::Button::new(egui::RichText::new("↻").size(12.0).color(lc)).min_size(egui::vec2(22.0, 22.0))).clicked() {
                     *looping = !*looping;
+                    audio.set_file_looping(node_id, *looping);
                 }
                 // Open
                 if ui.add(egui::Button::new(egui::RichText::new(crate::icons::FOLDER_OPEN).size(12.0)).min_size(egui::vec2(22.0, 22.0))).clicked() {
                     if let Some(path) = rfd::FileDialog::new().add_filter("Audio", &["wav", "mp3", "ogg", "flac"]).pick_file() {
                         audio.stop_file(node_id);
                         *file_path = path.to_string_lossy().to_string();
+                        *duration_secs = 0.0; // will be re-probed next frame
+                        audio.file_durations.remove(&node_id);
                     }
                 }
             });
@@ -308,6 +269,14 @@ pub fn render(
 
     // ── Output port ──────────────────────────────────────────────
     crate::nodes::audio_port_row(ui, "Audio", node_id, 0, false, port_positions, dragging_from, connections, pending_disconnects, PortKind::Audio);
+
+    // Output: progress (for downstream nodes that want normalized position)
+    // Port 1 output = progress 0..1
+    ui.horizontal(|ui| {
+        let progress = if duration > 0.0 { (playback_pos / duration).clamp(0.0, 1.0) as f32 } else { 0.0 };
+        ui.label(egui::RichText::new(format!("Progress: {:.1}%", progress * 100.0)).small().color(egui::Color32::GRAY));
+        crate::nodes::inline_port_circle(ui, node_id, 1, false, connections, port_positions, dragging_from, pending_disconnects, PortKind::Normalized);
+    });
 
     if is_playing { ui.ctx().request_repaint(); }
 }

@@ -1,0 +1,52 @@
+{
+  "nodes": {
+    "100": { "id": 100, "node_type": "FileMenu", "pos": [10.0, 10.0] },
+    "101": { "id": 101, "node_type": { "ZoomControl": { "zoom_value": 1.0 } }, "pos": [1100.0, 10.0] },
+    "102": { "id": 102, "node_type": { "Palette": { "search": "" } }, "pos": [10.0, 200.0] },
+    "103": { "id": 103, "node_type": "Monitor", "pos": [1100.0, 500.0] },
+    "1": {
+      "id": 1,
+      "node_type": { "Slider": { "value": 5.0, "min": 0.0, "max": 10.0, "step": 0.1, "slider_color": [80, 160, 255], "label": "A" } },
+      "pos": [120.0, 120.0]
+    },
+    "2": {
+      "id": 2,
+      "node_type": { "Slider": { "value": 3.0, "min": 0.0, "max": 10.0, "step": 0.1, "slider_color": [100, 200, 120], "label": "B" } },
+      "pos": [120.0, 380.0]
+    },
+    "3": {
+      "id": 3,
+      "node_type": "Add",
+      "pos": [420.0, 180.0]
+    },
+    "4": {
+      "id": 4,
+      "node_type": "Multiply",
+      "pos": [420.0, 380.0]
+    },
+    "5": {
+      "id": 5,
+      "node_type": "Display",
+      "pos": [700.0, 180.0]
+    },
+    "6": {
+      "id": 6,
+      "node_type": "Display",
+      "pos": [700.0, 380.0]
+    },
+    "7": {
+      "id": 7,
+      "node_type": { "Comment": { "text": "Basic Math\n\nDrag sliders A and B.\nTop path: A + B\nBottom path: A \u00d7 B" } },
+      "pos": [120.0, 600.0]
+    }
+  },
+  "connections": [
+    { "from_node": 1, "from_port": 0, "to_node": 3, "to_port": 0 },
+    { "from_node": 2, "from_port": 0, "to_node": 3, "to_port": 1 },
+    { "from_node": 1, "from_port": 0, "to_node": 4, "to_port": 0 },
+    { "from_node": 2, "from_port": 0, "to_node": 4, "to_port": 1 },
+    { "from_node": 3, "from_port": 0, "to_node": 5, "to_port": 0 },
+    { "from_node": 4, "from_port": 0, "to_node": 6, "to_port": 0 }
+  ],
+  "next_id": 104
+}
