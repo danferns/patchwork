@@ -172,30 +172,26 @@ impl super::PatchworkApp {
         ctx.data_mut(|d| d.insert_temp(egui::Id::new("current_zoom"), self.canvas_zoom));
     }
 
-    /// Spawn default system nodes if graph is empty.
+    /// Spawn default system nodes if they don't already exist.
     pub(super) fn spawn_default_nodes(&mut self) {
-        if self.graph.nodes.is_empty() {
-            // File menu — pinned top-left
-            let file_id = self.graph.add_node(NodeType::FileMenu, [10.0, 10.0]);
-            self.pinned_nodes.insert(file_id);
-
-            // Zoom control — pinned top-right
-            let zoom_id = self.graph.add_node(
-                NodeType::ZoomControl { zoom_value: 1.0 },
-                [1100.0, 10.0],
-            );
-            self.pinned_nodes.insert(zoom_id);
-
-            // Node Palette — pinned bottom-left (higher up so list is visible)
-            let palette_id = self.graph.add_node(
-                NodeType::Palette { search: String::new() },
-                [10.0, 200.0],
-            );
-            self.pinned_nodes.insert(palette_id);
-
-            // Monitor — pinned bottom-right (higher up)
-            let monitor_id = self.graph.add_node(NodeType::Monitor, [1100.0, 500.0]);
-            self.pinned_nodes.insert(monitor_id);
+        let has = |nodes: &std::collections::HashMap<NodeId, crate::graph::Node>, check: &dyn Fn(&NodeType) -> bool| -> bool {
+            nodes.values().any(|n| check(&n.node_type))
+        };
+        if !has(&self.graph.nodes, &|t| matches!(t, NodeType::FileMenu)) {
+            let id = self.graph.add_node(NodeType::FileMenu, [10.0, 10.0]);
+            self.pinned_nodes.insert(id);
+        }
+        if !has(&self.graph.nodes, &|t| matches!(t, NodeType::ZoomControl { .. })) {
+            let id = self.graph.add_node(NodeType::ZoomControl { zoom_value: 1.0 }, [1100.0, 10.0]);
+            self.pinned_nodes.insert(id);
+        }
+        if !has(&self.graph.nodes, &|t| matches!(t, NodeType::Palette { .. })) {
+            let id = self.graph.add_node(NodeType::Palette { search: String::new() }, [10.0, 200.0]);
+            self.pinned_nodes.insert(id);
+        }
+        if !has(&self.graph.nodes, &|t| matches!(t, NodeType::Monitor)) {
+            let id = self.graph.add_node(NodeType::Monitor, [1100.0, 500.0]);
+            self.pinned_nodes.insert(id);
         }
     }
 }

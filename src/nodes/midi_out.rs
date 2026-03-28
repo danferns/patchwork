@@ -79,28 +79,7 @@ pub fn render(
         let is_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == i);
 
         ui.horizontal(|ui| {
-            // Port circle
-            let (rect, response) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
-            let (fill, border) = if response.hovered() || response.dragged() {
-                (egui::Color32::YELLOW, egui::Color32::WHITE)
-            } else if is_wired {
-                (egui::Color32::from_rgb(60, 140, 255), egui::Color32::from_rgb(120, 180, 255))
-            } else {
-                (egui::Color32::from_rgb(70, 75, 85), egui::Color32::from_rgb(120, 125, 135))
-            };
-            ui.painter().circle_filled(rect.center(), 6.0, fill);
-            ui.painter().circle_stroke(rect.center(), 6.0, egui::Stroke::new(2.5, border));
-            port_positions.insert((node_id, i, true), rect.center());
-
-            // Port drag handling
-            if response.drag_started() {
-                if let Some(existing) = connections.iter().find(|c| c.to_node == node_id && c.to_port == i) {
-                    *dragging_from = Some((existing.from_node, existing.from_port, true));
-                    pending_disconnects.push((node_id, i));
-                } else {
-                    *dragging_from = Some((node_id, i, false));
-                }
-            }
+            super::inline_port_circle(ui, node_id, i, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Number);
 
             // Label
             ui.label(egui::RichText::new(label).small());

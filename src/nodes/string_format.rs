@@ -1,5 +1,6 @@
 use eframe::egui;
-use crate::graph::{NodeId, PortValue, Connection, Graph};
+use crate::graph::{NodeId, PortValue, Connection, Graph, PortKind};
+use crate::nodes::{inline_port_circle, output_port_row};
 use std::collections::HashMap;
 
 pub fn render(
@@ -11,26 +12,14 @@ pub fn render(
     connections: &[Connection],
     port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
     dragging_from: &mut Option<(NodeId, usize, bool)>,
+    pending_disconnects: &mut Vec<(NodeId, usize)>,
 ) {
     // Input ports: port 0 = Template (optional), ports 1..=arg_count = args
     let tmpl_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 0);
 
     // Template input port
     ui.horizontal(|ui| {
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
-        let col = if resp.hovered() || resp.dragged() { egui::Color32::YELLOW }
-            else if tmpl_wired { egui::Color32::from_rgb(80, 170, 255) }
-            else { egui::Color32::from_rgb(140, 140, 140) };
-        ui.painter().circle_filled(rect.center(), 4.0, col);
-        ui.painter().circle_stroke(rect.center(), 4.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
-        port_positions.insert((node_id, 0, true), rect.center());
-        if resp.drag_started() {
-            if let Some(existing) = connections.iter().find(|c| c.to_node == node_id && c.to_port == 0) {
-                *dragging_from = Some((existing.from_node, existing.from_port, true));
-            } else {
-                *dragging_from = Some((node_id, 0, false));
-            }
-        }
+        inline_port_circle(ui, node_id, 0, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Text);
         ui.label(egui::RichText::new("Template:").small());
         if tmpl_wired {
             ui.label(egui::RichText::new("connected").small().color(egui::Color32::from_rgb(80, 170, 255)));
@@ -96,20 +85,7 @@ pub fn render(
         let port = i + 1; // port 0 is template
         let wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == port);
         ui.horizontal(|ui| {
-            let (rect, resp) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
-            let col = if resp.hovered() || resp.dragged() { egui::Color32::YELLOW }
-                else if wired { egui::Color32::from_rgb(80, 170, 255) }
-                else { egui::Color32::from_rgb(140, 140, 140) };
-            ui.painter().circle_filled(rect.center(), 4.0, col);
-            ui.painter().circle_stroke(rect.center(), 4.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
-            port_positions.insert((node_id, port, true), rect.center());
-            if resp.drag_started() {
-                if let Some(existing) = connections.iter().find(|c| c.to_node == node_id && c.to_port == port) {
-                    *dragging_from = Some((existing.from_node, existing.from_port, true));
-                } else {
-                    *dragging_from = Some((node_id, port, false));
-                }
-            }
+            inline_port_circle(ui, node_id, port, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Generic);
             ui.label(egui::RichText::new(format!("{{{}}}", i)).small().code());
             if wired {
                 let val = Graph::static_input_value(connections, values, node_id, port);
@@ -157,13 +133,6 @@ pub fn render(
     });
 
     // Output port
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(format!("Text: {} chars", result.len())).small());
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
-        let col = if resp.hovered() || resp.dragged() { egui::Color32::YELLOW } else { egui::Color32::from_rgb(80, 170, 255) };
-        ui.painter().circle_filled(rect.center(), 5.0, col);
-        ui.painter().circle_stroke(rect.center(), 5.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
-        port_positions.insert((node_id, 0, false), rect.center());
-        if resp.drag_started() { *dragging_from = Some((node_id, 0, true)); }
-    });
+    let out_val = format!("{} chars", result.len());
+    output_port_row(ui, "Text", &out_val, node_id, 0, port_positions, dragging_from, connections, pending_disconnects, PortKind::Text);
 }

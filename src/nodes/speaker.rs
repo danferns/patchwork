@@ -84,9 +84,9 @@ pub fn render(
     });
 
     ui.add_space(4.0);
-
-    // Update master volume
-    audio.set_master_volume(*volume);
+    // Speaker volume is applied as a per-chain Gain effect by build_audio_chains(),
+    // not as a global master_volume. This allows multiple speakers with independent volumes.
+    let _ = audio;
 }
 
 /// Walk the connection graph backward from a Speaker node to find the full audio chain.
@@ -112,7 +112,7 @@ pub fn trace_audio_chain(
 
                 // Stop at audio sources — don't walk through their parameter inputs
                 let is_source = graph.nodes.get(&from_id).map(|n| {
-                    matches!(n.node_type, NodeType::Synth { .. } | NodeType::AudioPlayer { .. } | NodeType::AudioMixer { .. })
+                    matches!(n.node_type, NodeType::Synth { .. } | NodeType::AudioPlayer { .. } | NodeType::AudioMixer { .. } | NodeType::AudioInput { .. })
                 }).unwrap_or(false);
                 if is_source { break; }
 

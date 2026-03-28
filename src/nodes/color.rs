@@ -12,6 +12,7 @@ pub fn render(
     connections: &[Connection],
     port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
     dragging_from: &mut Option<(NodeId, usize, bool)>,
+    pending_disconnects: &mut Vec<(NodeId, usize)>,
 ) {
     // Override from connected inputs first
     for i in 0..3 {
@@ -73,26 +74,7 @@ pub fn render(
 
         ui.horizontal(|ui| {
             // Input port (left)
-            {
-                let (rect, response) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
-                let (fill, border) = if response.hovered() || response.dragged() {
-                    (egui::Color32::YELLOW, egui::Color32::WHITE)
-                } else if is_input_wired {
-                    (egui::Color32::from_rgb(60, 140, 255), egui::Color32::from_rgb(120, 180, 255))
-                } else {
-                    (egui::Color32::from_rgb(70, 75, 85), egui::Color32::from_rgb(120, 125, 135))
-                };
-                ui.painter().circle_filled(rect.center(), 6.0, fill);
-                ui.painter().circle_stroke(rect.center(), 6.0, egui::Stroke::new(2.5, border));
-                port_positions.insert((node_id, i, true), rect.center());
-                if response.drag_started() {
-                    if let Some(existing) = connections.iter().find(|c| c.to_node == node_id && c.to_port == i) {
-                        *dragging_from = Some((existing.from_node, existing.from_port, true));
-                    } else {
-                        *dragging_from = Some((node_id, i, false));
-                    }
-                }
-            }
+            super::inline_port_circle(ui, node_id, i, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Color);
 
             // DragValue
             let current_val = match i { 0 => *r, 1 => *g, 2 => *b, _ => 0 };
@@ -112,20 +94,7 @@ pub fn render(
             }
 
             // Output port (right)
-            {
-                let (rect, response) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
-                let (fill, border) = if response.hovered() || response.dragged() {
-                    (egui::Color32::YELLOW, egui::Color32::WHITE)
-                } else {
-                    (egui::Color32::from_rgb(60, 140, 255), egui::Color32::from_rgb(120, 180, 255))
-                };
-                ui.painter().circle_filled(rect.center(), 6.0, fill);
-                ui.painter().circle_stroke(rect.center(), 6.0, egui::Stroke::new(2.5, border));
-                port_positions.insert((node_id, i, false), rect.center());
-                if response.drag_started() {
-                    *dragging_from = Some((node_id, i, true));
-                }
-            }
+            super::inline_port_circle(ui, node_id, i, false, connections, port_positions, dragging_from, pending_disconnects, PortKind::Color);
         });
     }
 }

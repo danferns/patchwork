@@ -219,10 +219,10 @@ impl super::PatchworkApp {
                         }
                         NodeType::AiRequest { provider, response, status, .. } => {
                             if resp.status >= 200 && resp.status < 300 {
-                                // Try to detect provider from response shape if not set
+                                // Auto-detect provider from response if not set
                                 let prov = if provider.is_empty() {
-                                    // Auto-detect: Anthropic has "content" array, OpenAI has "choices"
-                                    if resp.body.contains("\"content\":[{\"type\"") { "anthropic" }
+                                    if resp.body.contains("\"candidates\"") { "google" }
+                                    else if resp.body.contains("\"content\":[{\"type\"") { "anthropic" }
                                     else { "openai" }
                                 } else {
                                     provider.as_str()
@@ -246,8 +246,10 @@ impl super::PatchworkApp {
         // Receive completed results
         while let Ok(result) = self.ml_rx.try_recv() {
             if let Some(node) = self.graph.nodes.get_mut(&result.node_id) {
-                if let NodeType::MlModel { result_text, status, .. } = &mut node.node_type {
+                if let NodeType::MlModel { result_text, result_json, annotated_frame, status, .. } = &mut node.node_type {
                     *result_text = result.result_text;
+                    *result_json = result.result_json;
+                    *annotated_frame = result.annotated_frame;
                     *status = result.status;
                 }
             }
@@ -281,12 +283,29 @@ impl super::PatchworkApp {
         }
     }
 
+    /// Save to existing project path (Cmd+S). Falls back to Save As if no path set.
+    pub(super) fn save_project_quick(&mut self) {
+        if let Some(ref dir_str) = self.project_path.clone() {
+            let dir = std::path::Path::new(dir_str);
+            let project_file = dir.join("project.json");
+            let json = serde_json::to_string_pretty(&self.graph).unwrap_or_default();
+            let _ = std::fs::write(&project_file, json);
+            if !self.api_keys.is_empty() {
+                let keys_file = dir.join("api_keys.json");
+                let keys_json = serde_json::to_string_pretty(&self.api_keys).unwrap_or_default();
+                let _ = std::fs::write(&keys_file, keys_json);
+            }
+        } else {
+            self.save_project(); // No path yet → show dialog
+        }
+    }
+
+    /// Save As — always shows folder picker dialog (Cmd+Shift+S).
     pub(super) fn save_project(&mut self) {
         if let Some(dir) = rfd::FileDialog::new().set_title("Save Project Folder").pick_folder() {
             let project_file = dir.join("project.json");
             let json = serde_json::to_string_pretty(&self.graph).unwrap_or_default();
             let _ = std::fs::write(&project_file, json);
-            // Also save api_keys if any exist
             if !self.api_keys.is_empty() {
                 let keys_file = dir.join("api_keys.json");
                 let keys_json = serde_json::to_string_pretty(&self.api_keys).unwrap_or_default();
@@ -311,6 +330,8 @@ impl super::PatchworkApp {
                     self.port_positions.clear();
                     self.node_rects.clear();
                     self.undo_history.clear();
+                    self.pinned_nodes.clear();
+                    self.spawn_default_nodes();
                 }
             }
             // Load api_keys from the same folder

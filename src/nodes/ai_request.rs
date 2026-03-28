@@ -1,248 +1,306 @@
 use eframe::egui;
-use crate::graph::{NodeId, PortValue, Connection, Graph};
+use crate::graph::{NodeId, PortValue, Connection, Graph, PortKind};
 use crate::http::HttpAction;
 use std::collections::HashMap;
 
-/// Parse the config JSON to extract provider, model, api_key, max_tokens, temperature, custom_url
-fn parse_config(json_str: &str) -> Option<AiConfig> {
-    let v: serde_json::Value = serde_json::from_str(json_str).ok()?;
-    Some(AiConfig {
-        provider: v.get("provider").and_then(|v| v.as_str()).unwrap_or("anthropic").to_string(),
-        model: v.get("model").and_then(|v| v.as_str()).unwrap_or("claude-sonnet-4-20250514").to_string(),
-        api_key: v.get("api_key").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        max_tokens: v.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(4096) as u32,
-        temperature: v.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.7) as f32,
-        custom_url: v.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-    })
+/// Model presets per provider
+fn models_for_provider(provider: &str) -> Vec<(&'static str, &'static str)> {
+    match provider {
+        "anthropic" => vec![
+            ("claude-sonnet-4-20250514", "Claude Sonnet 4"),
+            ("claude-haiku-35-20241022", "Claude Haiku 3.5"),
+            ("claude-opus-4-20250514", "Claude Opus 4"),
+        ],
+        "openai" => vec![
+            ("gpt-4o", "GPT-4o"),
+            ("gpt-4o-mini", "GPT-4o Mini"),
+            ("gpt-4-turbo", "GPT-4 Turbo"),
+            ("o1-mini", "o1 Mini"),
+        ],
+        "google" => vec![
+            ("gemini-2.0-flash", "Gemini 2.0 Flash"),
+            ("gemini-2.0-pro", "Gemini 2.0 Pro"),
+            ("gemini-1.5-flash", "Gemini 1.5 Flash"),
+        ],
+        _ => vec![],
+    }
 }
 
-struct AiConfig {
-    provider: String,
-    model: String,
-    api_key: String,
-    max_tokens: u32,
-    temperature: f32,
-    custom_url: String,
+fn provider_label(provider: &str) -> &'static str {
+    match provider {
+        "anthropic" => "Anthropic",
+        "openai" => "OpenAI",
+        "google" => "Google",
+        _ => "Unknown",
+    }
 }
+
+const RESPONSE_TYPES: &[&str] = &["Text", "JSON", "Code", "WGSL", "HTML", "Image"];
 
 pub fn render(
     ui: &mut egui::Ui,
     provider: &mut String,
     model: &mut String,
+    system_prompt: &mut String,
+    user_prompt: &mut String,
     response: &str,
     status: &str,
     max_tokens: &mut u32,
     temperature: &mut f32,
-    api_key_name: &mut String,
-    custom_url: &mut String,
+    api_key: &mut String,
+    response_type: &mut u8,
+    last_trigger: &mut f32,
     node_id: NodeId,
     values: &HashMap<(NodeId, usize), PortValue>,
     connections: &[Connection],
     is_pending: bool,
     actions: &mut Vec<HttpAction>,
-    _api_keys: &HashMap<String, String>,
     port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
     dragging_from: &mut Option<(NodeId, usize, bool)>,
+    pending_disconnects: &mut Vec<(NodeId, usize)>,
 ) {
-    // Inline input ports
-    let cfg_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 0);
-    let sys_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 1);
-    let prm_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 2);
+    let system_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 0);
+    let prompt_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 1);
+    let trigger_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 2);
 
-    for (port, label, wired) in [(0, "Config", cfg_wired), (1, "System", sys_wired), (2, "Prompt", prm_wired)] {
-        ui.horizontal(|ui| {
-            let (rect, resp) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
-            let col = if resp.hovered() || resp.dragged() { egui::Color32::YELLOW }
-                else if wired { egui::Color32::from_rgb(80, 170, 255) }
-                else { egui::Color32::from_rgb(140, 140, 140) };
-            ui.painter().circle_filled(rect.center(), 4.0, col);
-            ui.painter().circle_stroke(rect.center(), 4.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
-            port_positions.insert((node_id, port, true), rect.center());
-            if resp.drag_started() {
-                if let Some(existing) = connections.iter().find(|c| c.to_node == node_id && c.to_port == port) {
-                    *dragging_from = Some((existing.from_node, existing.from_port, true));
-                } else {
-                    *dragging_from = Some((node_id, port, false));
-                }
-            }
-            ui.label(egui::RichText::new(format!("{}:", label)).small());
-            if wired {
-                ui.label(egui::RichText::new("connected").small().color(egui::Color32::from_rgb(80, 170, 255)));
-            } else {
-                ui.label(egui::RichText::new("—").small().color(egui::Color32::GRAY));
-            }
-        });
-    }
-    ui.separator();
-
-    // Input 0 = Config JSON, Input 1 = System, Input 2 = Prompt
-    let config_input = Graph::static_input_value(connections, values, node_id, 0);
-    let system_input = Graph::static_input_value(connections, values, node_id, 1);
-    let prompt_input = Graph::static_input_value(connections, values, node_id, 2);
-
-    let config_text = match &config_input {
-        PortValue::Text(s) => s.clone(),
-        _ => String::new(),
-    };
-    let system_prompt = match &system_input {
-        PortValue::Text(s) => s.clone(),
-        _ => String::new(),
-    };
-    let user_prompt = match &prompt_input {
-        PortValue::Text(s) => s.clone(),
-        _ => String::new(),
-    };
-
-    // Parse config from input or use node's stored values as fallback
-    let config = if !config_text.is_empty() {
-        parse_config(&config_text)
-    } else {
-        None
-    };
-
-    let eff_provider = config.as_ref().map(|c| c.provider.clone()).unwrap_or(provider.clone());
-    let eff_model = config.as_ref().map(|c| c.model.clone()).unwrap_or(model.clone());
-    let eff_key = config.as_ref().map(|c| c.api_key.clone()).unwrap_or_default();
-    let eff_max_tokens = config.as_ref().map(|c| c.max_tokens).unwrap_or(*max_tokens);
-    let eff_temp = config.as_ref().map(|c| c.temperature).unwrap_or(*temperature);
-    let eff_custom_url = config.as_ref().map(|c| c.custom_url.clone()).unwrap_or(custom_url.clone());
-
-    // Show parsed config summary
-    if config.is_some() {
-        ui.label(format!("Provider: {}", eff_provider));
-        ui.label(format!("Model: {}", eff_model));
-        if !eff_key.is_empty() {
-            let masked = format!("{}...{}", &eff_key[..eff_key.len().min(8)], &eff_key[eff_key.len().saturating_sub(4)..]);
-            ui.label(format!("Key: {}", masked));
-        } else {
-            ui.colored_label(egui::Color32::from_rgb(200, 80, 80), "Key: (missing in config)");
-        }
-        ui.label(format!("Temp: {:.1}", eff_temp));
-    } else {
-        // Fallback: manual UI when no config connected
-        ui.colored_label(egui::Color32::from_rgb(180, 180, 80), "No config connected — using manual:");
-        ui.horizontal(|ui| {
-            ui.label("Provider:");
-            egui::ComboBox::from_id_salt(format!("prov_{}", node_id))
-                .selected_text(provider.as_str())
-                .width(100.0)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(provider, "anthropic".into(), "Anthropic");
-                    ui.selectable_value(provider, "openai".into(), "OpenAI");
-                    ui.selectable_value(provider, "custom".into(), "Custom URL");
-                });
-        });
-        ui.horizontal(|ui| {
-            ui.label("Model:");
-            ui.text_edit_singleline(model);
-        });
-        if provider == "custom" {
-            ui.horizontal(|ui| {
-                ui.label("URL:");
-                ui.text_edit_singleline(custom_url);
-            });
-        }
-        ui.horizontal(|ui| {
-            ui.label("Key name:");
-            ui.text_edit_singleline(api_key_name);
-        });
-        ui.horizontal(|ui| {
-            ui.label("Temp:");
-            ui.add(egui::Slider::new(temperature, 0.0..=2.0).step_by(0.1));
-        });
-    }
-
-    // MCP trigger: fire send automatically when triggered via MCP
-    if status == "mcp_trigger" && !user_prompt.is_empty() && !eff_key.is_empty() && !is_pending {
-        let (url, headers, body) = build_request(
-            &eff_provider, &eff_model, &eff_custom_url, &eff_key,
-            &system_prompt, &user_prompt, eff_max_tokens, eff_temp,
-        );
-        actions.push(HttpAction::SendRequest {
-            node_id, url, method: "POST".into(), headers, body,
-        });
-        // Signal app layer to clear the mcp_trigger status
-        ui.ctx().data_mut(|d| d.insert_temp(
-            egui::Id::new(("mcp_ai_triggered", node_id)),
-            true,
-        ));
-    }
-
-    // Send button
-    ui.separator();
+    // ── Input ports ──
     ui.horizontal(|ui| {
-        let can_send = !user_prompt.is_empty() && !eff_key.is_empty() && !is_pending;
-        if ui.add_enabled(can_send, egui::Button::new(
-            if is_pending { "⏳ Thinking..." } else { "▶ Send" }
-        )).clicked() {
+        super::inline_port_circle(ui, node_id, 0, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Text);
+        ui.label(egui::RichText::new("System").small());
+        if system_wired {
+            ui.label(egui::RichText::new("●").small().color(egui::Color32::from_rgb(80, 200, 80)));
+        }
+    });
+    ui.horizontal(|ui| {
+        super::inline_port_circle(ui, node_id, 1, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Text);
+        ui.label(egui::RichText::new("Prompt").small());
+        if prompt_wired {
+            ui.label(egui::RichText::new("●").small().color(egui::Color32::from_rgb(80, 200, 80)));
+        }
+    });
+    ui.horizontal(|ui| {
+        super::inline_port_circle(ui, node_id, 2, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Trigger);
+        ui.label(egui::RichText::new("Send").small());
+        if trigger_wired {
+            ui.label(egui::RichText::new("▸").small().color(egui::Color32::from_rgb(220, 160, 40)));
+        }
+    });
+
+    ui.separator();
+
+    // ── Provider dropdown ──
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Provider").small());
+        let prev_provider = provider.clone();
+        egui::ComboBox::from_id_salt(format!("ai_prov_{}", node_id))
+            .selected_text(provider_label(provider))
+            .width(120.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(provider, "anthropic".into(), "Anthropic");
+                ui.selectable_value(provider, "openai".into(), "OpenAI");
+                ui.selectable_value(provider, "google".into(), "Google");
+            });
+        // Reset model when provider changes
+        if *provider != prev_provider {
+            if let Some((id, _)) = models_for_provider(provider).first() {
+                *model = id.to_string();
+            }
+        }
+    });
+
+    // ── Model dropdown ──
+    let models = models_for_provider(provider);
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Model").small());
+        let display_name = models.iter()
+            .find(|(id, _)| *id == model.as_str())
+            .map(|(_, name)| *name)
+            .unwrap_or(model.as_str());
+        egui::ComboBox::from_id_salt(format!("ai_model_{}", node_id))
+            .selected_text(display_name)
+            .width(140.0)
+            .show_ui(ui, |ui| {
+                for (id, name) in &models {
+                    ui.selectable_value(model, id.to_string(), *name);
+                }
+            });
+    });
+
+    // ── API Key (password field) ──
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("API Key").small());
+        ui.add(
+            egui::TextEdit::singleline(api_key)
+                .password(true)
+                .desired_width(140.0)
+                .hint_text("sk-...")
+        );
+    });
+
+    ui.separator();
+
+    // ── System Prompt (textarea, unless wired) ──
+    if !system_wired {
+        ui.label(egui::RichText::new("System Prompt").small().color(egui::Color32::from_rgb(140, 140, 155)));
+        egui::ScrollArea::vertical().max_height(60.0).show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::multiline(system_prompt)
+                    .desired_rows(2)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("You are a helpful assistant...")
+                    .font(egui::TextStyle::Small)
+            );
+        });
+    }
+
+    // ── User Prompt (textarea, unless wired) ──
+    if !prompt_wired {
+        ui.label(egui::RichText::new("Prompt").small().color(egui::Color32::from_rgb(140, 140, 155)));
+        ui.add(
+            egui::TextEdit::multiline(user_prompt)
+                .desired_rows(3)
+                .desired_width(f32::INFINITY)
+                .hint_text("Ask something...")
+                .font(egui::TextStyle::Small)
+        );
+    }
+
+    ui.separator();
+
+    // ── Temperature + Response Type ──
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Temp").small());
+        ui.add(egui::Slider::new(temperature, 0.0..=2.0).step_by(0.1).show_value(true));
+    });
+
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Return").small());
+        let rt = *response_type as usize;
+        let rt_label = RESPONSE_TYPES.get(rt).unwrap_or(&"Text");
+        egui::ComboBox::from_id_salt(format!("ai_rt_{}", node_id))
+            .selected_text(*rt_label)
+            .width(80.0)
+            .show_ui(ui, |ui| {
+                for (i, name) in RESPONSE_TYPES.iter().enumerate() {
+                    if ui.selectable_label(rt == i, *name).clicked() {
+                        *response_type = i as u8;
+                    }
+                }
+            });
+    });
+
+    // ── Resolve effective prompts (wired overrides inline) ──
+    let eff_system = if system_wired {
+        match Graph::static_input_value(connections, values, node_id, 0) {
+            PortValue::Text(s) => s,
+            _ => system_prompt.clone(),
+        }
+    } else {
+        system_prompt.clone()
+    };
+    let eff_prompt = if prompt_wired {
+        match Graph::static_input_value(connections, values, node_id, 1) {
+            PortValue::Text(s) => s,
+            _ => user_prompt.clone(),
+        }
+    } else {
+        user_prompt.clone()
+    };
+
+    // ── Send button ──
+    ui.horizontal(|ui| {
+        let can_send = !eff_prompt.is_empty() && !api_key.is_empty() && !is_pending;
+        let btn_text = if is_pending { "\u{23f3} Thinking..." } else { "\u{25b6} Send" };
+        if ui.add_enabled(can_send, egui::Button::new(btn_text)).clicked() {
             let (url, headers, body) = build_request(
-                &eff_provider, &eff_model, &eff_custom_url, &eff_key,
-                &system_prompt, &user_prompt, eff_max_tokens, eff_temp,
+                provider, model, "", api_key,
+                &eff_system, &eff_prompt, *max_tokens, *temperature, *response_type,
             );
             actions.push(HttpAction::SendRequest {
                 node_id, url, method: "POST".into(), headers, body,
             });
         }
 
-        if user_prompt.is_empty() {
-            ui.colored_label(egui::Color32::GRAY, "(connect Prompt)");
-        } else if eff_key.is_empty() {
-            ui.colored_label(egui::Color32::from_rgb(200, 80, 80), "(no API key)");
+        // Status indicator
+        if eff_prompt.is_empty() {
+            ui.label(egui::RichText::new("(type a prompt)").small().color(egui::Color32::GRAY));
+        } else if api_key.is_empty() {
+            ui.label(egui::RichText::new("(need API key)").small().color(egui::Color32::from_rgb(200, 80, 80)));
         } else {
-            let status_color = if status.contains("done") {
-                egui::Color32::from_rgb(80, 200, 80)
+            let (color, text) = if status.contains("done") {
+                (egui::Color32::from_rgb(80, 200, 80), "done")
             } else if status.contains("error") {
-                egui::Color32::from_rgb(220, 80, 80)
+                (egui::Color32::from_rgb(220, 80, 80), status)
             } else if is_pending {
-                egui::Color32::from_rgb(200, 200, 80)
+                (egui::Color32::from_rgb(200, 200, 80), "thinking...")
             } else {
-                egui::Color32::GRAY
+                (egui::Color32::GRAY, "ready")
             };
-            ui.colored_label(status_color, if status.is_empty() { "ready" } else { status });
+            ui.label(egui::RichText::new(text).small().color(color));
         }
     });
 
-    // Config JSON template hint
-    if config.is_none() && config_text.is_empty() {
-        ui.separator();
-        ui.collapsing("Config JSON format", |ui| {
-            ui.code(r#"{
-  "provider": "anthropic",
-  "model": "claude-sonnet-4-20250514",
-  "api_key": "sk-ant-...",
-  "temperature": 0.7
-}"#);
-            ui.label("Connect via Text Editor or File node");
-        });
+    // ── Trigger port auto-send (rising edge) ──
+    if trigger_wired {
+        let trigger_val = match Graph::static_input_value(connections, values, node_id, 2) {
+            PortValue::Float(v) => v,
+            _ => 0.0,
+        };
+        if trigger_val > 0.5 && *last_trigger <= 0.5 && !eff_prompt.is_empty() && !api_key.is_empty() && !is_pending {
+            let (url, headers, body) = build_request(
+                provider, model, "", api_key,
+                &eff_system, &eff_prompt, *max_tokens, *temperature, *response_type,
+            );
+            actions.push(HttpAction::SendRequest {
+                node_id, url, method: "POST".into(), headers, body,
+            });
+        }
+        *last_trigger = trigger_val as f32;
     }
 
-    // Output ports
+    // ── MCP auto-trigger ──
+    if status == "mcp_trigger" && !eff_prompt.is_empty() && !api_key.is_empty() && !is_pending {
+        let (url, headers, body) = build_request(
+            provider, model, "", api_key,
+            &eff_system, &eff_prompt, *max_tokens, *temperature, *response_type,
+        );
+        actions.push(HttpAction::SendRequest {
+            node_id, url, method: "POST".into(), headers, body,
+        });
+        ui.ctx().data_mut(|d| d.insert_temp(
+            egui::Id::new(("mcp_ai_triggered", node_id)),
+            true,
+        ));
+    }
+
+    // ── Output ports ──
     ui.separator();
-    for (port, label) in [(0, "Response"), (1, "Status")] {
-        ui.horizontal(|ui| {
-            let val_str = match port {
-                0 => if response.is_empty() { "—".to_string() } else { format!("{} chars", response.len()) },
-                1 => if status.is_empty() { "—".to_string() } else { status.to_string() },
-                _ => "—".to_string(),
-            };
-            ui.label(egui::RichText::new(format!("{}: {}", label, val_str)).small());
-            let (rect, resp) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
-            let col = if resp.hovered() || resp.dragged() { egui::Color32::YELLOW } else { egui::Color32::from_rgb(80, 170, 255) };
-            ui.painter().circle_filled(rect.center(), 5.0, col);
-            ui.painter().circle_stroke(rect.center(), 5.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
-            port_positions.insert((node_id, port, false), rect.center());
-            if resp.drag_started() { *dragging_from = Some((node_id, port, true)); }
-        });
+    {
+        let val_str = if response.is_empty() { "\u{2014}".to_string() } else { format!("{}ch", response.len()) };
+        super::output_port_row(ui, "Response", &val_str, node_id, 0, port_positions, dragging_from, connections, pending_disconnects, PortKind::Text);
+    }
+    {
+        let val_str = if status.is_empty() { "\u{2014}".to_string() } else { status.to_string() };
+        super::output_port_row(ui, "Status", &val_str, node_id, 1, port_positions, dragging_from, connections, pending_disconnects, PortKind::Text);
     }
 
-    // Response preview (collapsible)
+    // ── Response preview ──
     if !response.is_empty() {
-        ui.collapsing("Response Body", |ui| {
-            egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
-                ui.add(egui::TextEdit::multiline(&mut response.to_string())
-                    .code_editor()
-                    .desired_width(f32::INFINITY)
-                    .interactive(false));
+        ui.collapsing(format!("Response ({} chars)", response.len()), |ui| {
+            egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
+                let rt = *response_type;
+                if rt == 2 || rt == 3 || rt == 4 {
+                    // Code/WGSL/HTML — show as code
+                    ui.add(egui::TextEdit::multiline(&mut response.to_string())
+                        .code_editor()
+                        .desired_width(f32::INFINITY)
+                        .interactive(false));
+                } else {
+                    // Text/JSON — show as wrapped text
+                    ui.add(egui::TextEdit::multiline(&mut response.to_string())
+                        .desired_width(f32::INFINITY)
+                        .interactive(false));
+                }
             });
         });
     }
@@ -257,7 +315,10 @@ fn build_request(
     user_prompt: &str,
     max_tokens: u32,
     temperature: f32,
+    response_type: u8,
 ) -> (String, Vec<(String, String)>, String) {
+    let is_image = response_type == 5;
+
     match provider {
         "anthropic" => {
             let url = "https://api.anthropic.com/v1/messages".into();
@@ -266,67 +327,141 @@ fn build_request(
                 ("anthropic-version".into(), "2023-06-01".into()),
                 ("content-type".into(), "application/json".into()),
             ];
-            let messages = vec![
-                serde_json::json!({"role": "user", "content": user_prompt})
-            ];
             let mut body = serde_json::json!({
                 "model": model,
                 "max_tokens": max_tokens,
                 "temperature": temperature,
-                "messages": messages,
+                "messages": [{"role": "user", "content": user_prompt}],
             });
             if !system_prompt.is_empty() {
                 body["system"] = serde_json::json!(system_prompt);
             }
             (url, headers, body.to_string())
         }
-        "openai" => {
-            let url = "https://api.openai.com/v1/chat/completions".into();
+        "google" => {
+            let url = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+                model, api_key
+            );
             let headers = vec![
-                ("Authorization".into(), format!("Bearer {}", api_key)),
                 ("Content-Type".into(), "application/json".into()),
             ];
-            let mut messages = vec![];
-            if !system_prompt.is_empty() {
-                messages.push(serde_json::json!({"role": "system", "content": system_prompt}));
-            }
-            messages.push(serde_json::json!({"role": "user", "content": user_prompt}));
-            let body = serde_json::json!({
-                "model": model,
-                "messages": messages,
+            let mut body = serde_json::json!({
+                "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+                "generationConfig": {
+                    "maxOutputTokens": max_tokens,
+                    "temperature": temperature,
+                }
             });
+            if !system_prompt.is_empty() {
+                body["systemInstruction"] = serde_json::json!({
+                    "parts": [{"text": system_prompt}]
+                });
+            }
             (url, headers, body.to_string())
         }
-        _ => {
-            let url = custom_url.to_string();
-            let headers = vec![
-                ("Authorization".into(), format!("Bearer {}", api_key)),
-                ("Content-Type".into(), "application/json".into()),
-            ];
-            let mut messages = vec![];
-            if !system_prompt.is_empty() {
-                messages.push(serde_json::json!({"role": "system", "content": system_prompt}));
+        "openai" | _ => {
+            if is_image {
+                // DALL-E image generation endpoint
+                let url = if !custom_url.is_empty() {
+                    custom_url.to_string()
+                } else {
+                    "https://api.openai.com/v1/images/generations".into()
+                };
+                let headers = vec![
+                    ("Authorization".into(), format!("Bearer {}", api_key)),
+                    ("Content-Type".into(), "application/json".into()),
+                ];
+                let body = serde_json::json!({
+                    "model": "dall-e-3",
+                    "prompt": user_prompt,
+                    "n": 1,
+                    "size": "1024x1024",
+                    "response_format": "url",
+                });
+                (url, headers, body.to_string())
+            } else {
+                let url = if !custom_url.is_empty() {
+                    custom_url.to_string()
+                } else {
+                    "https://api.openai.com/v1/chat/completions".into()
+                };
+                let headers = vec![
+                    ("Authorization".into(), format!("Bearer {}", api_key)),
+                    ("Content-Type".into(), "application/json".into()),
+                ];
+                let mut messages = vec![];
+                if !system_prompt.is_empty() {
+                    messages.push(serde_json::json!({"role": "system", "content": system_prompt}));
+                }
+                messages.push(serde_json::json!({"role": "user", "content": user_prompt}));
+                let body = serde_json::json!({
+                    "model": model,
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                });
+                (url, headers, body.to_string())
             }
-            messages.push(serde_json::json!({"role": "user", "content": user_prompt}));
-            let body = serde_json::json!({
-                "model": model,
-                "messages": messages,
-            });
-            (url, headers, body.to_string())
         }
     }
 }
 
-/// Extract the text content from a provider's response JSON
+/// Strip markdown code fences from AI responses.
+/// Handles ```lang\n...\n``` and ```\n...\n```
+fn strip_code_fences(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.starts_with("```") {
+        // Find the end of the first line (the opening fence + optional language tag)
+        let after_opening = if let Some(newline_pos) = trimmed.find('\n') {
+            &trimmed[newline_pos + 1..]
+        } else {
+            return trimmed.to_string();
+        };
+        // Strip trailing ``` if present
+        let result = if after_opening.trim_end().ends_with("```") {
+            let end = after_opening.trim_end();
+            &end[..end.len() - 3]
+        } else {
+            after_opening
+        };
+        result.trim().to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+/// Extract the text content (or image URL) from a provider's response JSON
 pub fn extract_ai_response(provider: &str, body: &str) -> String {
+    // Check if this is a DALL-E image response
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(url) = json.get("data")
+            .and_then(|d| d.get(0))
+            .and_then(|d| d.get("url"))
+            .and_then(|u| u.as_str())
+        {
+            return url.to_string();
+        }
+    }
     let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
-        return body.to_string();
+        return strip_code_fences(body);
     };
-    match provider {
+    let raw = match provider {
         "anthropic" => {
             json.get("content")
                 .and_then(|c| c.get(0))
                 .and_then(|c| c.get("text"))
+                .and_then(|t| t.as_str())
+                .unwrap_or(body)
+                .to_string()
+        }
+        "google" => {
+            json.get("candidates")
+                .and_then(|c| c.get(0))
+                .and_then(|c| c.get("content"))
+                .and_then(|c| c.get("parts"))
+                .and_then(|p| p.get(0))
+                .and_then(|p| p.get("text"))
                 .and_then(|t| t.as_str())
                 .unwrap_or(body)
                 .to_string()
@@ -340,5 +475,6 @@ pub fn extract_ai_response(provider: &str, body: &str) -> String {
                 .unwrap_or(body)
                 .to_string()
         }
-    }
+    };
+    strip_code_fences(&raw)
 }

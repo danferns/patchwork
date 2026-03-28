@@ -88,7 +88,7 @@ pub fn render(
                 .suffix("s")
                 .logarithmic(true)
                 .custom_formatter(|v, _| format!("{:.3}", v))
-                .clamp_to_range(false));
+                .clamping(egui::SliderClamping::Never));
         });
     }
 
@@ -100,7 +100,7 @@ pub fn render(
             .suffix("s")
             .logarithmic(true)
             .custom_formatter(|v, _| format!("{:.3}", v))
-            .clamp_to_range(false));
+            .clamping(egui::SliderClamping::Never));
     });
 
     // BPM display

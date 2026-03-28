@@ -5,13 +5,23 @@ use std::io::Read;
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Arc};
 
-/// Background video decoder using ffmpeg subprocess
+/// Background video decoder using ffmpeg subprocess.
+/// Uses a bounded channel (capacity 2) to prevent unbounded memory growth
+/// when the UI thread can't keep up with frame production.
 struct VideoDecoder {
-    _process: Child,
+    process: Child,
     frame_rx: mpsc::Receiver<Arc<ImageData>>,
     _width: u32,
     _height: u32,
     frame_changed: bool,
+}
+
+impl Drop for VideoDecoder {
+    fn drop(&mut self) {
+        // Kill the ffmpeg process and wait for it to exit so we don't leak zombie processes.
+        let _ = self.process.kill();
+        let _ = self.process.wait();
+    }
 }
 
 impl VideoDecoder {
@@ -52,6 +62,11 @@ impl VideoDecoder {
         let process = Command::new("ffmpeg")
             .args([
                 "-hide_banner", "-loglevel", "error",
+                // Low-latency flags: skip probing/buffering for real-time capture
+                "-fflags", "nobuffer",
+                "-flags", "low_delay",
+                "-probesize", "32",
+                "-analyzeduration", "0",
                 "-f", "avfoundation",
                 "-framerate", "30",
                 "-video_size", &format!("{}x{}", width, height),
@@ -71,29 +86,28 @@ impl VideoDecoder {
 
     fn start_reader(mut process: Child, width: u32, height: u32) -> Result<Self, String> {
         let stdout = process.stdout.take().ok_or("No stdout")?;
-        let (tx, rx) = mpsc::channel();
+        // Bounded channel (capacity 1): minimal latency — at most 1 frame queued.
+        // The producer blocks briefly if the UI hasn't consumed the last frame yet.
+        let (tx, rx) = mpsc::sync_channel(1);
         let frame_size = (width * height * 4) as usize;
 
         std::thread::spawn(move || {
-            let mut reader = std::io::BufReader::with_capacity(frame_size * 2, stdout);
+            let mut reader = std::io::BufReader::with_capacity(frame_size, stdout);
             let mut buf = vec![0u8; frame_size];
-            let frame_duration = std::time::Duration::from_millis(33); // ~30fps pacing
             loop {
-                let frame_start = std::time::Instant::now();
+                // read_exact blocks until a full frame arrives from ffmpeg — this is
+                // the natural pacing.  The bounded sync_channel(1) provides backpressure
+                // if the UI hasn't consumed the previous frame yet, so no artificial
+                // sleep is needed.  Removing the sleep eliminates up to 33ms of latency
+                // per frame.
                 match reader.read_exact(&mut buf) {
                     Ok(()) => {
-                        let frame = Arc::new(ImageData {
-                            width,
-                            height,
-                            pixels: buf.clone(),
-                        });
+                        // Zero-copy: swap the filled buffer into the frame and replace
+                        // with a fresh buffer.  Avoids cloning ~8MB per frame at 1080p.
+                        let pixels = std::mem::replace(&mut buf, vec![0u8; frame_size]);
+                        let frame = Arc::new(ImageData { width, height, pixels });
                         if tx.send(frame).is_err() {
-                            break; // Receiver dropped
-                        }
-                        // Pace to ~30fps — don't flood the channel
-                        let elapsed = frame_start.elapsed();
-                        if elapsed < frame_duration {
-                            std::thread::sleep(frame_duration - elapsed);
+                            break; // Receiver dropped (node deleted)
                         }
                     }
                     Err(_) => break, // EOF or error
@@ -102,7 +116,7 @@ impl VideoDecoder {
         });
 
         Ok(Self {
-            _process: process,
+            process,
             frame_rx: rx,
             _width: width,
             _height: height,
@@ -318,7 +332,7 @@ fn cached_camera_list() -> Vec<(u32, String)> {
     let (last_refresh, ref cameras, ref mut refreshing) = *guard;
     if last_refresh.elapsed().as_secs() >= 10 && !*refreshing {
         *refreshing = true;
-        let cache_ref = cache.clone();
+        let cache_ref = cache;
         std::thread::spawn(move || {
             let result = list_cameras();
             if let Ok(mut g) = cache_ref.lock() {

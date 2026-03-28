@@ -1,7 +1,6 @@
 use crate::graph::*;
 use crate::icons;
 use eframe::egui;
-use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Clone)]
@@ -23,7 +22,7 @@ pub fn render(
     // Path input with folder icon
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(icons::FOLDER_OPEN).size(14.0));
-        let resp = ui.add(
+        let _resp = ui.add(
             egui::TextEdit::singleline(dir_path)
                 .hint_text("Drop folder or type path...")
                 .desired_width(ui.available_width() - 30.0),

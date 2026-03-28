@@ -11,14 +11,10 @@ use eframe::egui_wgpu;
 use std::collections::HashMap;
 
 
-const PORT_RADIUS: f32 = 7.0;    // slightly larger for shaped ports
-const PORT_INTERACT: f32 = 20.0;
+const PORT_RADIUS: f32 = 8.0;    // visual radius of port shapes
+const PORT_INTERACT: f32 = 22.0; // clickable/draggable hit area
 const PORT_BORDER: f32 = 2.5;    // border stroke
-const CONN_COLOR: egui::Color32 = egui::Color32::from_rgb(180, 180, 180);
-
-/// Legacy bridge: convert PortKind to the rendering system.
-/// Now delegates entirely to PortKind from graph.rs.
-pub(crate) type PortDataKind = PortKind;
+/// Get port fill + border colors based on PortKind.
 
 /// Get port fill + border colors based on PortKind.
 /// Fill is a darker shade for inputs, border is a lighter shade — matching the semantic type.
@@ -194,6 +190,9 @@ pub struct PatchworkApp {
     // Undo / Redo
     undo_history: UndoHistory,
     drag_undo_pushed: bool,
+    /// Coalescing flag for property edits (slider drags, DragValue, text fields, etc.).
+    /// Set true when a property-editing widget interaction starts, reset when interaction ends.
+    property_undo_pushed: bool,
     // Click-to-connect wiring mode (alternative to drag-and-drop)
     click_wiring: bool,
     // Monotonic clock reference for wall-clock timing
@@ -287,6 +286,7 @@ impl PatchworkApp {
             wgpu_render_state,
             undo_history: UndoHistory::new(100),
             drag_undo_pushed: false,
+            property_undo_pushed: false,
             click_wiring: false,
         };
         // Always start MCP server thread — auto-detects if stdin is a pipe (Claude Desktop)
@@ -316,6 +316,12 @@ impl PatchworkApp {
         // Collected updates to apply in a single lock
         let mut chain_updates: Vec<(NodeId, Vec<AudioEffect>)> = Vec::new();
         let mut mixer_updates: Vec<(NodeId, Vec<(NodeId, f32)>)> = Vec::new();
+        // Per-channel effect chains: (mixer_id, channel) → effects
+        // Keyed by channel so each channel has independent filter state and delay buffers,
+        // and the same source can feed two channels with different effects without conflict.
+        let mut channel_chain_updates: Vec<((NodeId, usize), Vec<AudioEffect>)> = Vec::new();
+        // Track which channel keys are active this frame (for stale-chain removal)
+        let mut active_channel_keys: std::collections::HashSet<(NodeId, usize)> = std::collections::HashSet::new();
 
         for (&speaker_id, node) in &self.graph.nodes {
             let is_active = match &node.node_type {
@@ -329,33 +335,127 @@ impl PatchworkApp {
 
             let source_id = chain[0];
             let is_source = self.graph.nodes.get(&source_id).map(|n| {
-                matches!(n.node_type, NodeType::Synth { .. } | NodeType::AudioPlayer { .. } | NodeType::AudioMixer { .. })
+                matches!(n.node_type, NodeType::Synth { .. } | NodeType::AudioPlayer { .. } | NodeType::AudioMixer { .. } | NodeType::AudioInput { .. })
             }).unwrap_or(false);
             if !is_source { continue; }
 
-            // Mixer: collect input sources
-            if let Some(node) = self.graph.nodes.get(&source_id) {
-                if let NodeType::AudioMixer { channel_count, gains } = &node.node_type {
+            // Mixer processing — iterative queue to support nested Mixers.
+            // Processes the top-level Mixer first; if any channel's source is another
+            // Mixer, that inner Mixer is queued for processing too (any nesting depth).
+            {
+                let mut mixers_to_process: Vec<NodeId> = Vec::new();
+                if self.graph.nodes.get(&source_id).map(|n| matches!(n.node_type, NodeType::AudioMixer { .. })).unwrap_or(false) {
+                    mixers_to_process.push(source_id);
+                }
+                // Track already-processed mixers to avoid infinite loops in cycles
+                let mut processed_mixers: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+
+                while let Some(mixer_id) = mixers_to_process.pop() {
+                    if !processed_mixers.insert(mixer_id) { continue; } // skip if already done
+
+                    let (channel_count, gains_snapshot) = match self.graph.nodes.get(&mixer_id) {
+                        Some(n) => match &n.node_type {
+                            NodeType::AudioMixer { channel_count, gains } => (*channel_count, gains.clone()),
+                            _ => continue,
+                        },
+                        None => continue,
+                    };
+
                     let mut mixer_inputs: Vec<(NodeId, f32)> = Vec::new();
-                    for ch in 0..*channel_count {
+                    for ch in 0..channel_count {
                         let audio_port = ch * 2;
-                        if let Some(conn) = self.graph.connections.iter().find(|c| c.to_node == source_id && c.to_port == audio_port) {
-                            let gain = gains.get(ch).copied().unwrap_or(0.8);
-                            let input_id = conn.from_node;
-                            mixer_inputs.push((input_id, gain));
-                            render_only_sources.insert(input_id);
-                            active_sources.insert(input_id);
-                            chain_updates.push((input_id, Vec::new()));
+                        let conn_from = self.graph.connections.iter()
+                            .find(|c| c.to_node == mixer_id && c.to_port == audio_port)
+                            .map(|c| c.from_node);
+                        let Some(from_node) = conn_from else { continue };
+                        let gain = gains_snapshot.get(ch).copied().unwrap_or(0.8);
+
+                        // Walk backward from the connected node to find the actual source + effects
+                        let mut sub_chain = Vec::new();
+                        let mut current = from_node;
+                        loop {
+                            if sub_chain.contains(&current) { break; } // cycle
+                            sub_chain.push(current);
+                            let is_source = self.graph.nodes.get(&current).map(|n| {
+                                matches!(n.node_type, NodeType::Synth { .. } | NodeType::AudioPlayer { .. } | NodeType::AudioMixer { .. } | NodeType::AudioInput { .. })
+                            }).unwrap_or(false);
+                            if is_source { break; }
+                            match self.graph.connections.iter().find(|c| c.to_node == current && c.to_port == 0) {
+                                Some(c) => { current = c.from_node; }
+                                None => break,
+                            }
+                        }
+                        sub_chain.reverse(); // source first, effects in order
+                        if sub_chain.is_empty() { continue; }
+                        let actual_source = sub_chain[0];
+
+                        // Determine what kind of source we found
+                        let source_type = self.graph.nodes.get(&actual_source).map(|n| &n.node_type);
+                        let is_synth_or_player = source_type.map(|nt| matches!(nt, NodeType::Synth { .. } | NodeType::AudioPlayer { .. } | NodeType::AudioInput { .. })).unwrap_or(false);
+                        let is_nested_mixer = source_type.map(|nt| matches!(nt, NodeType::AudioMixer { .. })).unwrap_or(false);
+
+                        if is_synth_or_player || is_nested_mixer {
+                            mixer_inputs.push((actual_source, gain));
+                            render_only_sources.insert(actual_source);
+                            active_sources.insert(actual_source);
+                            // Register source in active_chains so the callback renders it
+                            chain_updates.push((actual_source, Vec::new()));
+
+                            // Build per-channel effects from the sub-chain (effect nodes between source and mixer)
+                            let mut ch_effects: Vec<AudioEffect> = Vec::new();
+                            for &nid in &sub_chain[1..] {
+                                if let Some(n) = self.graph.nodes.get(&nid) {
+                                    match &n.node_type {
+                                        NodeType::AudioDelay { time_ms, feedback } => {
+                                            ch_effects.push(AudioEffect::Delay { time_ms: *time_ms, feedback: *feedback, buffer: Vec::new(), write_pos: 0 });
+                                        }
+                                        NodeType::AudioDistortion { drive } => {
+                                            ch_effects.push(AudioEffect::Distortion { drive: *drive });
+                                        }
+                                        NodeType::AudioLowPass { cutoff } => {
+                                            ch_effects.push(AudioEffect::LowPass { cutoff: *cutoff, state: 0.0 });
+                                        }
+                                        NodeType::AudioHighPass { cutoff } => {
+                                            ch_effects.push(AudioEffect::HighPass { cutoff: *cutoff, state: 0.0 });
+                                        }
+                                        NodeType::AudioGain { level } => {
+                                            ch_effects.push(AudioEffect::Gain { level: *level });
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            let ch_key = (mixer_id, ch);
+                            active_channel_keys.insert(ch_key);
+                            channel_chain_updates.push((ch_key, ch_effects));
+
+                            // If this is a nested mixer, queue it for processing its own channels
+                            if is_nested_mixer {
+                                mixers_to_process.push(actual_source);
+                            }
+
+                            // FM: check if a Synth source has an FM modulator
+                            if is_synth_or_player {
+                                if let Some(conn) = self.graph.connections.iter().find(|c| c.to_node == actual_source && c.to_port == 0 && c.from_port == 0) {
+                                    let fm_id = conn.from_node;
+                                    let is_fm_synth = self.graph.nodes.get(&fm_id).map(|n| matches!(n.node_type, NodeType::Synth { .. })).unwrap_or(false);
+                                    if is_fm_synth && !active_sources.contains(&fm_id) {
+                                        render_only_sources.insert(fm_id);
+                                        active_sources.insert(fm_id);
+                                        chain_updates.push((fm_id, Vec::new()));
+                                    }
+                                }
+                            }
                         }
                     }
-                    mixer_updates.push((source_id, mixer_inputs));
+                    mixer_updates.push((mixer_id, mixer_inputs));
                 }
             }
 
-            // FM: if Freq input (port 0) is connected to another Synth, register modulator as render-only
+            // FM: if source Synth's Freq input (port 0) is connected to another Synth, register modulator
             if let Some(node) = self.graph.nodes.get(&source_id) {
                 if let NodeType::Synth { .. } = &node.node_type {
-                    if let Some(conn) = self.graph.connections.iter().find(|c| c.to_node == source_id && c.to_port == 0) {
+                    if let Some(conn) = self.graph.connections.iter().find(|c| c.to_node == source_id && c.to_port == 0 && c.from_port == 0) {
                         let fm_id = conn.from_node;
                         let is_synth = self.graph.nodes.get(&fm_id).map(|n| matches!(n.node_type, NodeType::Synth { .. })).unwrap_or(false);
                         if is_synth && !active_sources.contains(&fm_id) {
@@ -398,6 +498,15 @@ impl PatchworkApp {
                 }
             }
 
+            // Append the Speaker's volume as the final gain stage in the chain.
+            // This makes each Speaker's volume control independent and per-chain,
+            // rather than a global master_volume that affects all audio.
+            if let Some(spk) = self.graph.nodes.get(&speaker_id) {
+                if let NodeType::Speaker { volume, .. } = &spk.node_type {
+                    effects.push(AudioEffect::Gain { level: *volume });
+                }
+            }
+
             chain_updates.push((source_id, effects));
             active_sources.insert(source_id);
         }
@@ -409,7 +518,7 @@ impl PatchworkApp {
                 s.sources.insert(mixer_id, AudioSource::Mixer { inputs });
             }
 
-            // Apply active chains (with effect merging for existing chains)
+            // Apply active chains (merge params to preserve filter/delay state)
             for (node_id, effects) in chain_updates {
                 if let Some(existing) = s.active_chains.get_mut(&node_id) {
                     if existing.len() != effects.len() || !crate::audio::effects_same_types(existing, &effects) {
@@ -424,16 +533,40 @@ impl PatchworkApp {
                 }
             }
 
+            // Apply per-channel effect chains (merge params to preserve internal state)
+            for (ch_key, effects) in channel_chain_updates {
+                if let Some(existing) = s.channel_chains.get_mut(&ch_key) {
+                    if existing.len() != effects.len() || !crate::audio::effects_same_types(existing, &effects) {
+                        s.channel_chains.insert(ch_key, effects);
+                    } else {
+                        for (old, new) in existing.iter_mut().zip(effects.iter()) {
+                            old.merge_params(new);
+                        }
+                    }
+                } else {
+                    s.channel_chains.insert(ch_key, effects);
+                }
+            }
+
             // Update render_only set
             s.render_only = render_only_sources;
 
-            // Remove stale chains
+            // Remove stale source chains
             let stale: Vec<NodeId> = s.active_chains.keys()
                 .filter(|id| !active_sources.contains(id))
                 .copied()
                 .collect();
             for id in stale {
                 s.active_chains.remove(&id);
+            }
+
+            // Remove stale per-channel chains (mixer removed or channel count changed)
+            let stale_ch: Vec<(NodeId, usize)> = s.channel_chains.keys()
+                .filter(|k| !active_channel_keys.contains(k))
+                .copied()
+                .collect();
+            for k in stale_ch {
+                s.channel_chains.remove(&k);
             }
         }
 
@@ -518,7 +651,7 @@ impl PatchworkApp {
             let osc_listening = self.osc.is_listening(node_id);
             let http_pending = self.http.is_pending(node_id);
 
-            let mut open = true;
+            let _open = true;
             let inline = node.node_type.inline_ports();
             // With set_zoom_factor: logical = screen / zoom.
             // Normal: egui_pos = canvas_pos + offset/zoom
@@ -572,10 +705,10 @@ impl PatchworkApp {
             let custom_frame = match &node.node_type {
                 NodeType::Comment { bg_color, .. } => {
                     let bg = egui::Color32::from_rgb(bg_color[0], bg_color[1], bg_color[2]);
-                    Some(egui::Frame::NONE.fill(bg).rounding(8.0).inner_margin(12.0))
+                    Some(egui::Frame::NONE.fill(bg).corner_radius(8.0).inner_margin(12.0))
                 }
                 NodeType::Display { .. } => {
-                    Some(egui::Frame::NONE.fill(egui::Color32::from_rgb(15, 15, 20)).rounding(8.0).inner_margin(6.0))
+                    Some(egui::Frame::NONE.fill(egui::Color32::from_rgb(15, 15, 20)).corner_radius(8.0).inner_margin(6.0))
                 }
                 _ => None,
             };
@@ -585,7 +718,7 @@ impl PatchworkApp {
                 .default_width(node_width)
                 .resizable(is_display || (!is_custom_render && !is_comment && !is_monitor && !is_audio_player && !is_math))
                 .constrain(false)
-                .collapsible(!is_custom_render && !no_title)
+                .collapsible(!is_custom_render && !no_title && !is_pinned)
                 .title_bar(!is_custom_render && !no_title);
             if is_pinned {
                 win = win.order(egui::Order::Foreground);
@@ -749,31 +882,7 @@ impl PatchworkApp {
                 }
                 node_rects.insert(node_id, r.response.rect);
 
-                // ── Pin badge for user-pinned nodes (not system nodes) ──
-                let is_system_node = matches!(node.node_type,
-                    NodeType::FileMenu | NodeType::ZoomControl { .. } | NodeType::Monitor | NodeType::Profiler
-                );
-                if is_pinned && !is_system_node && !matches!(node.node_type, NodeType::Palette { .. }) {
-                    let rect = r.response.rect;
-                    let badge_size = 22.0;
-                    let badge_center = egui::pos2(rect.left() - 2.0, rect.top() - 2.0);
-                    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new(("pin_badge", node_id))));
-                    // Accent color circle
-                    painter.circle_filled(badge_center, badge_size / 2.0, accent);
-                    // Pin icon
-                    let icon_col = if cr as u16 + cg as u16 + cb as u16 > 380 {
-                        egui::Color32::from_rgb(20, 20, 25)
-                    } else {
-                        egui::Color32::from_rgb(240, 240, 245)
-                    };
-                    painter.text(
-                        badge_center,
-                        egui::Align2::CENTER_CENTER,
-                        crate::icons::PUSH_PIN,
-                        egui::FontId::new(13.0, egui::FontFamily::Proportional),
-                        icon_col,
-                    );
-                }
+                // Pin badge removed — pinned state is shown via the title bar accent color
 
                 // Selection on click (Shift = toggle, no Shift = replace)
                 // For custom_render nodes (Slider), only select on drag — click opens their popup
@@ -819,28 +928,18 @@ impl PatchworkApp {
                         .unwrap_or([80, 160, 255]);
                     painter.rect_stroke(r.response.rect.expand(2.0), 4.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(sel_accent[0], sel_accent[1], sel_accent[2])), egui::StrokeKind::Outside);
                 }
-                // Pin indicator
+                // Pin indicator — single accent-colored icon, no background circle
                 if is_pinned {
                     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("pins")));
-                    let badge_center = egui::pos2(r.response.rect.left() + 10.0, r.response.rect.top() - 6.0);
-                    let badge_r = 8.0;
-                    // Use theme accent color
+                    let badge_pos = egui::pos2(r.response.rect.left() + 10.0, r.response.rect.top() - 6.0);
                     let theme_accent = ctx.data_mut(|d| d.get_temp::<[u8; 3]>(egui::Id::new("theme_accent")))
                         .unwrap_or([80, 160, 255]);
                     let accent_color = egui::Color32::from_rgb(theme_accent[0], theme_accent[1], theme_accent[2]);
-                    // Darker version for background
-                    let bg = egui::Color32::from_rgb(
-                        theme_accent[0] / 4,
-                        theme_accent[1] / 4,
-                        theme_accent[2] / 4,
-                    );
-                    painter.circle_filled(badge_center, badge_r, bg);
-                    painter.circle_stroke(badge_center, badge_r, egui::Stroke::new(1.0, accent_color.linear_multiply(0.5)));
                     painter.text(
-                        badge_center,
+                        badge_pos,
                         egui::Align2::CENTER_CENTER,
                         crate::icons::PUSH_PIN,
-                        egui::FontId::proportional(10.0),
+                        egui::FontId::proportional(12.0),
                         accent_color,
                     );
                 }
@@ -873,6 +972,17 @@ impl PatchworkApp {
                 }
                 if r.response.drag_stopped() {
                     self.drag_undo_pushed = false;
+                }
+
+                // Undo snapshot for property edits (slider drags, DragValue, text fields, etc.).
+                // render_content() signals via temp data when a widget interaction starts.
+                let prop_signal_id = egui::Id::new("_patchwork_prop_edit_signal");
+                if ctx.data_mut(|d| d.get_temp::<bool>(prop_signal_id).unwrap_or(false)) {
+                    ctx.data_mut(|d| d.remove::<bool>(prop_signal_id));
+                    if !self.property_undo_pushed {
+                        self.push_undo();
+                        self.property_undo_pushed = true;
+                    }
                 }
 
                 // Track drag delta for multi-node movement
@@ -957,11 +1067,34 @@ impl PatchworkApp {
                 // Normal drag mode: complete on release
                 if ctx.input(|i| i.pointer.any_released()) {
                     if let Some(pointer) = ctx.pointer_latest_pos() {
+                        // Find the CLOSEST compatible port within the hit radius,
+                        // not the first arbitrary one from HashMap iteration.
+                        let hit_radius = PORT_INTERACT * 2.0;
+                        let mut best: Option<(f32, NodeId, usize, bool)> = None;
                         for (&(nid, pidx, is_input), &pos) in &port_positions {
-                            if pos.distance(pointer) < PORT_INTERACT * 1.5 {
-                                if is_output && is_input && nid != src_node { pending_connections.push((src_node, src_port, nid, pidx)); }
-                                else if !is_output && !is_input && nid != src_node { pending_connections.push((nid, pidx, src_node, src_port)); }
-                                break;
+                            let dist = pos.distance(pointer);
+                            if dist < hit_radius && nid != src_node {
+                                // Must be opposite direction (output→input or input→output)
+                                let valid_dir = (is_output && is_input) || (!is_output && !is_input);
+                                if valid_dir {
+                                    // Check port type compatibility
+                                    let src_kind = self.graph.port_kind(src_node, src_port, is_output);
+                                    let tgt_kind = self.graph.port_kind(nid, pidx, !is_input);
+                                    let compatible = src_kind.is_none() || tgt_kind.is_none()
+                                        || PortKind::compatible(src_kind.unwrap(), tgt_kind.unwrap());
+                                    if compatible {
+                                        if best.is_none() || dist < best.unwrap().0 {
+                                            best = Some((dist, nid, pidx, is_input));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if let Some((_, nid, pidx, is_input)) = best {
+                            if is_output && is_input {
+                                pending_connections.push((src_node, src_port, nid, pidx));
+                            } else {
+                                pending_connections.push((nid, pidx, src_node, src_port));
                             }
                         }
                     }
@@ -987,6 +1120,12 @@ impl PatchworkApp {
         self.ob = ob_manager;
         self.audio = audio_manager;
 
+        // Reset property-edit undo coalescing when no interaction is active.
+        // This lets the NEXT widget interaction push a fresh undo snapshot.
+        if !ctx.input(|i| i.pointer.any_down()) && ctx.memory(|mem| mem.focused().is_none()) {
+            self.property_undo_pushed = false;
+        }
+
         // ── Build audio chains from Speaker nodes ────────────────────────
         self.build_audio_chains();
 
@@ -998,9 +1137,12 @@ impl PatchworkApp {
         for id in nodes_to_delete { self.midi.cleanup_node(id); self.serial.cleanup_node(id); self.osc.cleanup_node(id); self.ob.cleanup_node(id); self.audio.cleanup_node(id); crate::nodes::video_player::cleanup_node(id); self.graph.remove_node(id); }
         for (nid, port) in pending_disconnects { self.graph.remove_connections_to_port(nid, port); }
         for (fn_, fp, tn, tp) in pending_connections { self.graph.add_connection(fn_, fp, tn, tp); }
-        // Spawn nodes from Palette clicks (place to the right of the palette node)
-        for (palette_pos, nt) in palette_spawns {
-            self.graph.add_node(nt, [palette_pos[0] + 250.0, palette_pos[1]]);
+        // Spawn nodes from Palette clicks (place at center of the current viewport)
+        for (_palette_pos, nt) in palette_spawns {
+            let screen_center = ctx.screen_rect().center();
+            let cx = (screen_center.x - self.canvas_offset.x) / self.canvas_zoom;
+            let cy = (screen_center.y - self.canvas_offset.y) / self.canvas_zoom;
+            self.graph.add_node(nt, [cx, cy]);
         }
         // Clear MCP trigger flags on AI Request nodes
         for (&nid, node) in &mut self.graph.nodes {
@@ -1021,6 +1163,38 @@ impl PatchworkApp {
 
 impl eframe::App for PatchworkApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // ── OS-level menu bar (always visible) ──
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            egui::menu::bar(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.button("\u{2795} New Project").clicked() {
+                        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("file_action_new"), true));
+                        ui.close_menu();
+                    }
+                    if ui.button("\u{1f4c2} Open...").clicked() {
+                        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("file_action_load"), true));
+                        ui.close_menu();
+                    }
+                    if ui.button("\u{1f4be} Save").clicked() {
+                        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("file_action_save"), true));
+                        ui.close_menu();
+                    }
+                });
+                ui.menu_button("Edit", |ui| {
+                    let can_undo = self.undo_history.can_undo();
+                    let can_redo = self.undo_history.can_redo();
+                    if ui.add_enabled(can_undo, egui::Button::new("\u{21a9} Undo")).clicked() {
+                        self.perform_undo();
+                        ui.close_menu();
+                    }
+                    if ui.add_enabled(can_redo, egui::Button::new("\u{21aa} Redo")).clicked() {
+                        self.perform_redo();
+                        ui.close_menu();
+                    }
+                });
+            });
+        });
+
         // set_zoom_factor scales everything (nodes, text, chrome) via GPU — zero overhead.
         // Pinned nodes compensate with inverse zoom style + zoom-keyed window IDs.
         ctx.set_zoom_factor(self.canvas_zoom);
@@ -1194,6 +1368,24 @@ impl eframe::App for PatchworkApp {
                             values.insert((id, 0), PortValue::Image(result));
                         }
                     }
+                    NodeType::Crop { top, left, bottom, right } => {
+                        if let Some(img) = inputs.first().and_then(|v| v.as_image()) {
+                            let cache_key = (std::sync::Arc::as_ptr(img) as u64)
+                                ^ ((*top * 1000.0) as u64) ^ ((*left * 1000.0) as u64) << 10
+                                ^ ((*bottom * 1000.0) as u64) << 20 ^ ((*right * 1000.0) as u64) << 30;
+                            let cache_id = egui::Id::new(("crop_cache", id));
+                            let cached: Option<(u64, std::sync::Arc<ImageData>)> = ctx.data_mut(|d| d.get_temp(cache_id));
+                            if let Some((prev_key, prev_result)) = cached {
+                                if prev_key == cache_key {
+                                    values.insert((id, 0), PortValue::Image(prev_result));
+                                    continue;
+                                }
+                            }
+                            let result = nodes::crop::process(img, *top, *left, *bottom, *right);
+                            ctx.data_mut(|d| d.insert_temp(cache_id, (cache_key, result.clone())));
+                            values.insert((id, 0), PortValue::Image(result));
+                        }
+                    }
                     NodeType::Blend { mode, mix } => {
                         let a = inputs.first().and_then(|v| v.as_image());
                         let b = inputs.get(1).and_then(|v| v.as_image());
@@ -1310,15 +1502,64 @@ impl eframe::App for PatchworkApp {
                             values.insert((id, 0), PortValue::Image(frame.clone()));
                         }
                     }
-                    NodeType::MlModel { result_text, .. } => {
+                    NodeType::MlModel { annotated_frame, result_text, result_json, .. } => {
+                        if let Some(frame) = annotated_frame {
+                            values.insert((id, 0), PortValue::Image(frame.clone()));
+                        }
                         if !result_text.is_empty() {
-                            values.insert((id, 0), PortValue::Text(result_text.clone()));
+                            values.insert((id, 1), PortValue::Text(result_text.clone()));
+                        }
+                        if !result_json.is_empty() {
+                            values.insert((id, 2), PortValue::Text(result_json.clone()));
                         }
                     }
                     _ => {}
                 }
             }
         } // end img_pass loop
+
+        // Inject AudioAnalyzer output values — trace back to source, get analysis, store in temp data
+        {
+            let connections = self.graph.connections.clone();
+            let analyzer_ids: Vec<NodeId> = self.graph.nodes.iter()
+                .filter(|(_, n)| matches!(n.node_type, NodeType::AudioAnalyzer))
+                .map(|(&id, _)| id)
+                .collect();
+            for id in analyzer_ids {
+                // Trace backward from the Analyzer's Audio input to find the actual source
+                let source_id = crate::nodes::audio_analyzer::trace_audio_source(id, &connections, &self.graph.nodes);
+                let (amp, peak, bass, mid, treble, source_name) = if let Some(src_id) = source_id {
+                    // Request per-source analysis
+                    self.audio.request_analysis(src_id);
+                    let a = self.audio.get_source_analysis(src_id);
+                    let name = self.graph.nodes.get(&src_id).map(|n| n.node_type.title().to_string()).unwrap_or_default();
+                    if let Some(a) = a {
+                        (a.amplitude, a.peak, a.bass, a.mid, a.treble, name)
+                    } else {
+                        (0.0, 0.0, 0.0, 0.0, 0.0, name)
+                    }
+                } else {
+                    // Not connected — analyze master output mix
+                    let a = self.audio.get_analysis();
+                    if let Some(a) = a {
+                        (a.amplitude, a.peak, a.bass, a.mid, a.treble, String::new())
+                    } else {
+                        (0.0, 0.0, 0.0, 0.0, 0.0, String::new())
+                    }
+                };
+                // Store for the node's render function to display
+                ctx.data_mut(|d| {
+                    d.insert_temp(egui::Id::new(("audio_analysis", id)), [amp, peak, bass, mid, treble]);
+                    d.insert_temp(egui::Id::new(("audio_analysis_source", id)), source_name);
+                });
+                // Inject output port values into graph
+                values.insert((id, 0), PortValue::Float(amp));
+                values.insert((id, 1), PortValue::Float(peak));
+                values.insert((id, 2), PortValue::Float(bass));
+                values.insert((id, 3), PortValue::Float(mid));
+                values.insert((id, 4), PortValue::Float(treble));
+            }
+        }
 
         // Sync OB Hub detected_devices from ObManager + auto-connect saved ports
         {
@@ -1368,6 +1609,30 @@ impl eframe::App for PatchworkApp {
 
         // Process MCP commands (if MCP server is active)
         self.process_mcp_commands(&values);
+
+        // Store BG image/shader for canvas drawing (from Theme node's BG Image port 20)
+        {
+            let mut bg_img: Option<std::sync::Arc<ImageData>> = None;
+            let mut bg_wgsl_node: Option<NodeId> = None;
+
+            if let Some((&theme_id, _)) = self.graph.nodes.iter().find(|(_, n)| matches!(n.node_type, NodeType::Theme { .. })) {
+                if let Some(conn) = self.graph.connections.iter().find(|c| c.to_node == theme_id && c.to_port == 21) {
+                    let source_node = conn.from_node;
+                    // Check if the source is a WGSL Viewer — render shader directly as BG
+                    if self.graph.nodes.get(&source_node).map(|n| matches!(n.node_type, NodeType::WgslViewer { .. })).unwrap_or(false) {
+                        bg_wgsl_node = Some(source_node);
+                    } else {
+                        // Regular image source
+                        let val = Graph::static_input_value(&self.graph.connections, &values, theme_id, 20);
+                        if let PortValue::Image(img) = val { bg_img = Some(img); }
+                    }
+                }
+            }
+            ctx.data_mut(|d| {
+                d.insert_temp(egui::Id::new("canvas_bg_image"), bg_img);
+                d.insert_temp(egui::Id::new("canvas_bg_wgsl"), bg_wgsl_node);
+            });
+        }
 
         self.canvas(ctx);
         self.render_connections(ctx, &values);

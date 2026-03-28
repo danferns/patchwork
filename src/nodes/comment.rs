@@ -156,7 +156,7 @@ pub fn render(
             .fixed_pos(popup_pos)
             .order(egui::Order::Tooltip)
             .show(ui.ctx(), |ui| {
-                egui::Frame::popup(ui.style()).rounding(10.0).inner_margin(8.0).show(ui, |ui| {
+                egui::Frame::popup(ui.style()).corner_radius(10.0).inner_margin(8.0).show(ui, |ui| {
                     ui.set_min_width(130.0);
 
                     // Color picker

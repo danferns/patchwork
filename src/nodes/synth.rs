@@ -177,34 +177,7 @@ pub fn render(
 
     // ── Output port: Audio (port 0, output) — right-aligned ──────────
     ui.separator();
-    ui.horizontal(|ui| {
-        let remaining = ui.available_width() - 14.0;
-        let label = "Audio";
-        let text_w = ui.fonts(|f| f.layout_no_wrap(label.to_string(), egui::FontId::new(11.0, egui::FontFamily::Proportional), egui::Color32::WHITE).size().x);
-        let space = (remaining - text_w).max(0.0);
-        if space > 0.0 { ui.add_space(space); }
-        ui.label(egui::RichText::new(label).small());
-        let (rect, response) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::click_and_drag());
-        let audio_kind = PortKind::Audio;
-        let base = audio_kind.base_color();
-        let (fill, border) = if response.hovered() || response.dragged() {
-            (egui::Color32::YELLOW, egui::Color32::WHITE)
-        } else {
-            (
-                egui::Color32::from_rgb(base[0], base[1], base[2]),
-                egui::Color32::from_rgb(
-                    (base[0] as u16 + 60).min(255) as u8,
-                    (base[1] as u16 + 60).min(255) as u8,
-                    (base[2] as u16 + 60).min(255) as u8,
-                ),
-            )
-        };
-        crate::app::draw_shaped_port(ui.painter(), rect.center(), 6.0, fill, border, 2.0, audio_kind, true);
-        port_positions.insert((node_id, 0, false), rect.center());
-        if response.drag_started() {
-            *dragging_from = Some((node_id, 0, true));
-        }
-    });
+    crate::nodes::audio_port_row(ui, "Audio", node_id, 0, false, port_positions, dragging_from, connections, pending_disconnects, PortKind::Audio);
 
     // ── Update audio ─────────────────────────────────────────────────
     audio.set_synth(node_id, SynthParams {

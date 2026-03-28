@@ -1,5 +1,6 @@
 use crate::graph::*;
 use crate::gpu_image::GpuBlendCallback;
+use crate::nodes::{inline_port_circle, output_port_row};
 use eframe::egui;
 use eframe::egui_wgpu;
 use std::collections::HashMap;
@@ -16,14 +17,13 @@ pub fn render(
     wgpu_render_state: &Option<egui_wgpu::RenderState>,
     port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
     dragging_from: &mut Option<(NodeId, usize, bool)>,
+    pending_disconnects: &mut Vec<(NodeId, usize)>,
 ) {
     let (mode, mix) = match node_type {
         NodeType::Blend { mode, mix } => (mode, mix),
         _ => return,
     };
 
-    let a_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 0);
-    let b_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 1);
     let mix_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 2);
 
     if mix_wired {
@@ -36,14 +36,28 @@ pub fn render(
     let has_b = matches!(&b, PortValue::Image(_));
 
     // Port 0: Image A
-    render_port_row(ui, node_id, 0, "A", a_wired, &a, true, port_positions, dragging_from, connections);
+    ui.horizontal(|ui| {
+        inline_port_circle(ui, node_id, 0, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Image);
+        ui.label(egui::RichText::new("A:").small());
+        match &a {
+            PortValue::Image(img) => { ui.label(egui::RichText::new(format!("[{}x{}]", img.width, img.height)).small().color(egui::Color32::from_rgb(80, 170, 255))); }
+            _ => { ui.label(egui::RichText::new("—").small().color(egui::Color32::GRAY)); }
+        }
+    });
 
     // Port 1: Image B
-    render_port_row(ui, node_id, 1, "B", b_wired, &b, true, port_positions, dragging_from, connections);
-
-    // Port 2: Mix — ● Mix: slider or wired value
     ui.horizontal(|ui| {
-        port_circle(ui, node_id, 2, mix_wired, true, port_positions, dragging_from, connections);
+        inline_port_circle(ui, node_id, 1, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Image);
+        ui.label(egui::RichText::new("B:").small());
+        match &b {
+            PortValue::Image(img) => { ui.label(egui::RichText::new(format!("[{}x{}]", img.width, img.height)).small().color(egui::Color32::from_rgb(80, 170, 255))); }
+            _ => { ui.label(egui::RichText::new("—").small().color(egui::Color32::GRAY)); }
+        }
+    });
+
+    // Port 2: Mix — inline_port_circle + slider or wired value
+    ui.horizontal(|ui| {
+        inline_port_circle(ui, node_id, 2, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Normalized);
         ui.label(egui::RichText::new("Mix:").small());
         if mix_wired {
             ui.label(egui::RichText::new(format!("{:.2}", *mix)).small().monospace().color(egui::Color32::from_rgb(80, 170, 255)));
@@ -98,104 +112,12 @@ pub fn render(
 
     // Output port
     ui.separator();
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Image:").small());
-        if let Some(PortValue::Image(img)) = values.get(&(node_id, 0)) {
-            ui.label(egui::RichText::new(format!("[{}x{}]", img.width, img.height)).small().color(egui::Color32::from_rgb(80, 170, 255)));
-        } else {
-            ui.label(egui::RichText::new("—").small());
-        }
-        let (rect, response) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click_and_drag());
-        let (fill, border) = if response.hovered() || response.dragged() { (egui::Color32::YELLOW, egui::Color32::WHITE) } else { (egui::Color32::from_rgb(200, 30, 255), egui::Color32::from_rgb(230, 100, 255)) };
-        // Diamond shape for image output
-        let d = 7.0;
-        let c = rect.center();
-        let points = vec![
-            egui::pos2(c.x, c.y - d),
-            egui::pos2(c.x + d, c.y),
-            egui::pos2(c.x, c.y + d),
-            egui::pos2(c.x - d, c.y),
-        ];
-        ui.painter().add(egui::Shape::convex_polygon(points, fill, egui::Stroke::new(2.0, border)));
-        if response.hovered() || response.dragged() || connections.iter().any(|c| c.from_node == node_id && c.from_port == 0) {
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                crate::icons::IMAGE,
-                egui::FontId::new(8.0, egui::FontFamily::Proportional),
-                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 180),
-            );
-        }
-        port_positions.insert((node_id, 0, false), rect.center());
-        if response.drag_started() { *dragging_from = Some((node_id, 0, true)); }
-    });
-}
-
-fn render_port_row(
-    ui: &mut egui::Ui,
-    node_id: NodeId, port: usize, label: &str, is_wired: bool,
-    value: &PortValue, is_input: bool,
-    port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
-    dragging_from: &mut Option<(NodeId, usize, bool)>,
-    connections: &[Connection],
-) {
-    ui.horizontal(|ui| {
-        port_circle(ui, node_id, port, is_wired, is_input, port_positions, dragging_from, connections);
-        ui.label(egui::RichText::new(format!("{}:", label)).small());
-        if is_wired {
-            match value {
-                PortValue::Image(img) => { ui.label(egui::RichText::new(format!("[{}x{}]", img.width, img.height)).small().color(egui::Color32::from_rgb(80, 170, 255))); }
-                _ => { ui.label(egui::RichText::new("—").small()); }
-            }
-        } else {
-            ui.label(egui::RichText::new("—").small().color(egui::Color32::GRAY));
-        }
-    });
-}
-
-fn port_circle(
-    ui: &mut egui::Ui,
-    node_id: NodeId, port: usize, is_wired: bool, is_input: bool,
-    port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
-    dragging_from: &mut Option<(NodeId, usize, bool)>,
-    connections: &[Connection],
-) {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click_and_drag());
-    let (fill, border) = if response.hovered() || response.dragged() { (egui::Color32::YELLOW, egui::Color32::WHITE) }
-        else if is_wired { (egui::Color32::from_rgb(200, 30, 255), egui::Color32::from_rgb(230, 100, 255)) }
-        else { (egui::Color32::from_rgb(70, 75, 85), egui::Color32::from_rgb(120, 125, 135)) };
-    // Diamond shape for image ports
-    let d = 7.0;
-    let c = rect.center();
-    let points = vec![
-        egui::pos2(c.x, c.y - d),
-        egui::pos2(c.x + d, c.y),
-        egui::pos2(c.x, c.y + d),
-        egui::pos2(c.x - d, c.y),
-    ];
-    ui.painter().add(egui::Shape::convex_polygon(points, fill, egui::Stroke::new(2.0, border)));
-    // Image icon when wired
-    if is_wired {
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            crate::icons::IMAGE,
-            egui::FontId::new(8.0, egui::FontFamily::Proportional),
-            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 180),
-        );
-    }
-    port_positions.insert((node_id, port, is_input), rect.center());
-    if response.drag_started() {
-        if is_input {
-            if let Some(existing) = connections.iter().find(|c| c.to_node == node_id && c.to_port == port) {
-                *dragging_from = Some((existing.from_node, existing.from_port, true));
-            } else {
-                *dragging_from = Some((node_id, port, false));
-            }
-        } else {
-            *dragging_from = Some((node_id, port, true));
-        }
-    }
+    let out_val = if let Some(PortValue::Image(img)) = values.get(&(node_id, 0)) {
+        format!("[{}x{}]", img.width, img.height)
+    } else {
+        "—".into()
+    };
+    output_port_row(ui, "Image", &out_val, node_id, 0, port_positions, dragging_from, connections, pending_disconnects, PortKind::Image);
 }
 
 /// Blend two images. Called during evaluation.

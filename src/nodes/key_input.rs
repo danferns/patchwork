@@ -1,4 +1,3 @@
-use crate::graph::NodeId;
 use eframe::egui;
 
 // ── All supported keys with display names ────────────────────────────────────
@@ -144,7 +143,7 @@ pub fn render(
         }
 
         // Also capture modifier keys alone
-        let modifier_captured = ui.ctx().input(|i| {
+        let modifier_captured = ui.ctx().input(|_i| {
             // Modifiers are harder — they don't fire key_pressed.
             // We detect them via modifiers changing.
             None::<String>

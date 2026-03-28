@@ -237,6 +237,7 @@ pub(super) fn draw_wire_3d(painter: &egui::Painter, from: egui::Pos2, to: egui::
 }
 
 /// Backward-compatible wrapper
+#[allow(dead_code)]
 pub(super) fn draw_bezier(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos2, color: egui::Color32, width: f32) {
     draw_wire(painter, from, to, color, width, 0, &WiggleParams::default());
 }
@@ -247,6 +248,76 @@ impl super::PatchworkApp {
             let painter = ui.painter();
             let rect = ui.max_rect();
             let zoom = self.canvas_zoom;
+
+            // ── Background image (from Theme BG Image port) ──────────────
+            let bg_img: Option<std::sync::Arc<crate::graph::ImageData>> =
+                ctx.data_mut(|d| d.get_temp(egui::Id::new("canvas_bg_image")).flatten());
+            if let Some(img) = bg_img {
+                use std::cell::RefCell;
+                thread_local! {
+                    static BG_TEX: RefCell<Option<(u64, egui::TextureHandle)>> = const { RefCell::new(None) };
+                }
+                // Hash width+height+first few pixels to detect changes
+                let hash = {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    img.width.hash(&mut h);
+                    img.height.hash(&mut h);
+                    // Sample a few pixels for change detection (not all — too slow)
+                    let step = (img.pixels.len() / 64).max(1);
+                    for i in (0..img.pixels.len()).step_by(step) {
+                        img.pixels[i].hash(&mut h);
+                    }
+                    h.finish()
+                };
+                BG_TEX.with(|cell| {
+                    let mut cached = cell.borrow_mut();
+                    let needs_update = cached.as_ref().map(|(h, _)| *h != hash).unwrap_or(true);
+                    if needs_update {
+                        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                            [img.width as usize, img.height as usize],
+                            &img.pixels,
+                        );
+                        let tex = ui.ctx().load_texture("canvas_bg", color_image, egui::TextureOptions::LINEAR);
+                        *cached = Some((hash, tex));
+                    }
+                    if let Some((_, tex)) = cached.as_ref() {
+                        // Draw image covering the full canvas, maintaining aspect ratio
+                        let img_aspect = img.width as f32 / img.height as f32;
+                        let rect_aspect = rect.width() / rect.height();
+                        let draw_rect = if img_aspect > rect_aspect {
+                            // Image wider → fill height, crop sides
+                            let w = rect.height() * img_aspect;
+                            let x_off = (w - rect.width()) * 0.5;
+                            egui::Rect::from_min_size(
+                                egui::pos2(rect.left() - x_off, rect.top()),
+                                egui::vec2(w, rect.height()),
+                            )
+                        } else {
+                            // Image taller → fill width, crop top/bottom
+                            let h = rect.width() / img_aspect;
+                            let y_off = (h - rect.height()) * 0.5;
+                            egui::Rect::from_min_size(
+                                egui::pos2(rect.left(), rect.top() - y_off),
+                                egui::vec2(rect.width(), h),
+                            )
+                        };
+                        painter.image(tex.id(), draw_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                    }
+                });
+            }
+
+            // ── WGSL shader as background (from Theme BG Image connected to WgslViewer) ─
+            let bg_wgsl_node: Option<crate::graph::NodeId> =
+                ctx.data_mut(|d| d.get_temp(egui::Id::new("canvas_bg_wgsl")).flatten());
+            if let Some(wgsl_node_id) = bg_wgsl_node {
+                // Paint the WGSL shader fullscreen using the existing GPU pipeline
+                ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+                    rect,
+                    crate::nodes::wgsl_viewer::WgslBgCallback { node_id: wgsl_node_id },
+                ));
+            }
+
             let grid = 25.0; // Logical units; set_zoom_factor scales to screen
             // Grid style + color from Theme
             let (gc, gs) = self.graph.nodes.values()
@@ -561,15 +632,50 @@ impl super::PatchworkApp {
         if let Some((nid, pidx, is_output)) = self.dragging_from {
             if let Some(&from) = self.port_positions.get(&(nid, pidx, !is_output)) {
                 if let Some(ptr) = ctx.pointer_latest_pos() {
+                    // Find closest compatible port and snap the wire endpoint to it
+                    let src_kind = self.graph.port_kind(nid, pidx, is_output);
+                    let hit_radius = PORT_INTERACT * 2.0;
+                    let mut snap_target: Option<(f32, egui::Pos2, bool)> = None; // (dist, pos, compatible)
+                    for (&(tnid, tpidx, tis_input), &tpos) in &self.port_positions {
+                        if tnid == nid { continue; }
+                        let valid_dir = (is_output && tis_input) || (!is_output && !tis_input);
+                        if !valid_dir { continue; }
+                        let dist = tpos.distance(ptr);
+                        if dist < hit_radius {
+                            let tgt_kind = self.graph.port_kind(tnid, tpidx, !tis_input);
+                            let compat = src_kind.is_none() || tgt_kind.is_none()
+                                || PortKind::compatible(src_kind.unwrap(), tgt_kind.unwrap());
+                            if snap_target.is_none() || dist < snap_target.unwrap().0 {
+                                snap_target = Some((dist, tpos, compat));
+                            }
+                        }
+                    }
+
+                    let wire_end = if let Some((_, snap_pos, true)) = snap_target {
+                        snap_pos // Snap to compatible port
+                    } else {
+                        ptr
+                    };
+
                     let drag_wp = WiggleParams { activity: 0.3, time: now, gravity: wiggle_gravity, range: wiggle_range, speed: wiggle_speed };
                     if is_output {
-                        draw_wire_3d(&painter, from, ptr, drag_color, wire_thickness, wire_style, &drag_wp);
+                        draw_wire_3d(&painter, from, wire_end, drag_color, wire_thickness, wire_style, &drag_wp);
                         draw_wire_connector(&painter, from, drag_color, true);
-                        draw_wire_connector(&painter, ptr, drag_color, false);
+                        draw_wire_connector(&painter, wire_end, drag_color, false);
                     } else {
-                        draw_wire_3d(&painter, ptr, from, drag_color, wire_thickness, wire_style, &drag_wp);
+                        draw_wire_3d(&painter, wire_end, from, drag_color, wire_thickness, wire_style, &drag_wp);
                         draw_wire_connector(&painter, from, drag_color, false);
-                        draw_wire_connector(&painter, ptr, drag_color, true);
+                        draw_wire_connector(&painter, wire_end, drag_color, true);
+                    }
+
+                    // Draw highlight ring on snap target
+                    if let Some((_, snap_pos, compat)) = snap_target {
+                        let ring_color = if compat {
+                            egui::Color32::from_rgba_unmultiplied(100, 255, 100, 180) // green = compatible
+                        } else {
+                            egui::Color32::from_rgba_unmultiplied(255, 80, 80, 180) // red = incompatible
+                        };
+                        painter.circle_stroke(snap_pos, 12.0, egui::Stroke::new(2.5, ring_color));
                     }
                 }
             }

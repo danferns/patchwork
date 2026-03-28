@@ -20,6 +20,7 @@ pub fn render(
     connections: &[Connection],
     port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
     dragging_from: &mut Option<(NodeId, usize, bool)>,
+    pending_disconnects: &mut Vec<(NodeId, usize)>,
 ) {
     let in_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 0);
     if in_wired {
@@ -31,7 +32,7 @@ pub fn render(
 
     // ── Input port (top center) ─────────────────────────
     ui.vertical_centered(|ui| {
-        port_circle(ui, node_id, 0, true, in_wired, port_positions, dragging_from, connections);
+        super::inline_port_circle(ui, node_id, 0, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Number);
     });
 
     ui.add_space(4.0);
@@ -126,7 +127,7 @@ pub fn render(
 
     // ── Output port (bottom center) ─────────────────────
     ui.vertical_centered(|ui| {
-        port_circle(ui, node_id, 0, false, true, port_positions, dragging_from, connections);
+        super::inline_port_circle(ui, node_id, 0, false, connections, port_positions, dragging_from, pending_disconnects, PortKind::Number);
     });
 
     // ── Accent highlight when popup is open ─────────────
@@ -150,7 +151,7 @@ pub fn render(
             .fixed_pos(popup_pos)
             .order(egui::Order::Tooltip)
             .show(ui.ctx(), |ui| {
-                egui::Frame::popup(ui.style()).rounding(12.0).inner_margin(12.0).show(ui, |ui| {
+                egui::Frame::popup(ui.style()).corner_radius(12.0).inner_margin(12.0).show(ui, |ui| {
                     ui.set_min_width(200.0);
 
                     // Row 1: Pin | Color | Label | Delete
@@ -218,46 +219,6 @@ pub fn render(
 
         if esc || click_outside {
             ui.ctx().data_mut(|d| d.insert_temp(popup_id, false));
-        }
-    }
-}
-
-fn port_circle(
-    ui: &mut egui::Ui, node_id: NodeId, port: usize, is_input: bool, is_wired: bool,
-    port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
-    dragging_from: &mut Option<(NodeId, usize, bool)>,
-    connections: &[Connection],
-) {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click_and_drag());
-    let (fill, border) = if response.hovered() || response.dragged() {
-        (egui::Color32::YELLOW, egui::Color32::WHITE)
-    } else if is_wired {
-        (egui::Color32::from_rgb(60, 140, 255), egui::Color32::from_rgb(120, 180, 255))
-    } else {
-        (egui::Color32::from_rgb(70, 75, 85), egui::Color32::from_rgb(120, 125, 135))
-    };
-    ui.painter().circle_filled(rect.center(), 7.0, fill);
-    ui.painter().circle_stroke(rect.center(), 7.0, egui::Stroke::new(2.0, border));
-    // Show math icon when connected
-    if is_wired {
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            crate::icons::MATH_OPERATIONS,
-            egui::FontId::new(8.0, egui::FontFamily::Proportional),
-            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 180),
-        );
-    }
-    port_positions.insert((node_id, port, is_input), rect.center());
-    if response.drag_started() {
-        if is_input {
-            if let Some(existing) = connections.iter().find(|c| c.to_node == node_id && c.to_port == port) {
-                *dragging_from = Some((existing.from_node, existing.from_port, true));
-            } else {
-                *dragging_from = Some((node_id, port, false));
-            }
-        } else {
-            *dragging_from = Some((node_id, port, true));
         }
     }
 }

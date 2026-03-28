@@ -2,7 +2,7 @@ use crate::graph::*;
 use eframe::egui;
 use std::collections::HashMap;
 
-const SCOPE_W: f32 = 148.0;
+const _SCOPE_W: f32 = 148.0;
 const SCOPE_H: f32 = 80.0;
 
 pub fn render(
@@ -21,6 +21,7 @@ pub fn render(
     auto_fit: &mut bool,
     port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
     dragging_from: &mut Option<(NodeId, usize, bool)>,
+    pending_disconnects: &mut Vec<(NodeId, usize)>,
 ) {
     let is_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 0);
     let val = Graph::static_input_value(connections, values, node_id, 0);
@@ -44,24 +45,7 @@ pub fn render(
 
     // ── Input port + value ──────────────────────────────
     ui.horizontal(|ui| {
-        let (rect, response) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
-        let (fill, border) = if response.hovered() || response.dragged() {
-            (egui::Color32::YELLOW, egui::Color32::WHITE)
-        } else if is_wired {
-            (egui::Color32::from_rgb(60, 140, 255), egui::Color32::from_rgb(120, 180, 255))
-        } else {
-            (egui::Color32::from_rgb(70, 75, 85), egui::Color32::from_rgb(120, 125, 135))
-        };
-        ui.painter().circle_filled(rect.center(), 5.0, fill);
-        ui.painter().circle_stroke(rect.center(), 5.0, egui::Stroke::new(1.5, border));
-        port_positions.insert((node_id, 0, true), rect.center());
-        if response.drag_started() {
-            if let Some(existing) = connections.iter().find(|c| c.to_node == node_id && c.to_port == 0) {
-                *dragging_from = Some((existing.from_node, existing.from_port, true));
-            } else {
-                *dragging_from = Some((node_id, 0, false));
-            }
-        }
+        super::inline_port_circle(ui, node_id, 0, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Generic);
         ui.label(egui::RichText::new(format!("{:.3}", current)).monospace().strong().color(wave_color));
     });
 
@@ -154,7 +138,7 @@ pub fn render(
             .fixed_pos(popup_pos)
             .order(egui::Order::Foreground)
             .show(ui.ctx(), |ui| {
-                egui::Frame::popup(ui.style()).rounding(10.0).inner_margin(10.0).show(ui, |ui| {
+                egui::Frame::popup(ui.style()).corner_radius(10.0).inner_margin(10.0).show(ui, |ui| {
                     ui.set_min_width(170.0);
 
                     ui.horizontal(|ui| {

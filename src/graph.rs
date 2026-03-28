@@ -21,14 +21,70 @@ fn default_scope_length() -> usize { 200 }
 fn default_scope_min() -> f32 { 0.0 }
 fn default_scope_max() -> f32 { 1.0 }
 fn default_scope_height() -> f32 { 80.0 }
-fn default_canvas_w() -> f32 { 800.0 }
-fn default_canvas_h() -> f32 { 600.0 }
+fn default_canvas_w() -> f32 { 400.0 }
+fn default_canvas_h() -> f32 { 300.0 }
 fn default_wiggle_range() -> f32 { 1.0 }
 fn default_wiggle_speed() -> f32 { 1.0 }
 fn default_resolution() -> u32 { 120 }
 fn default_max_tokens() -> u32 { 1024 }
+fn default_provider() -> String { "anthropic".into() }
+fn default_model() -> String { "claude-sonnet-4-20250514".into() }
+fn default_temperature() -> f32 { 0.7 }
 
 pub type NodeId = u64;
+
+// ── ML Model Presets ────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum MlPreset {
+    /// ImageNet-style classification (softmax over classes). Input: 224×224, NCHW, ImageNet norm.
+    #[default]
+    Classification,
+    /// YOLO-style object detection. Outputs bounding boxes + class + confidence.
+    /// Input: 640×640, NCHW, 0–1 norm. Output: [1, N, 5+classes] or [1, 5+classes, N].
+    ObjectDetection,
+    /// Pose estimation (e.g., MoveNet, MediaPipe Pose). Outputs keypoints.
+    /// Input: 192×192 or 256×256, NHWC or NCHW, 0–1 norm.
+    PoseEstimation,
+    /// Custom model — user sets input size and normalization manually.
+    Custom,
+}
+
+impl MlPreset {
+    pub fn all() -> &'static [MlPreset] {
+        &[MlPreset::Classification, MlPreset::ObjectDetection, MlPreset::PoseEstimation, MlPreset::Custom]
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            MlPreset::Classification => "Classification",
+            MlPreset::ObjectDetection => "Object Detection",
+            MlPreset::PoseEstimation => "Pose Estimation",
+            MlPreset::Custom => "Custom",
+        }
+    }
+
+    /// Default input size for this preset
+    pub fn input_size(&self) -> u32 {
+        match self {
+            MlPreset::Classification => 224,
+            MlPreset::ObjectDetection => 640,
+            MlPreset::PoseEstimation => 128,  // MediaPipe pose detector uses 128
+            MlPreset::Custom => 224,
+        }
+    }
+
+    /// Whether to use ImageNet normalization (mean/std) vs simple 0–1
+    pub fn imagenet_norm(&self) -> bool {
+        matches!(self, MlPreset::Classification)
+    }
+
+    /// Whether the model expects NHWC [1, H, W, 3] instead of NCHW [1, 3, H, W].
+    /// Most ONNX models use NCHW. If wrong, the auto-detect retry will correct it.
+    pub fn is_nhwc(&self) -> bool {
+        false // Default to NCHW; auto-detect handles the rest
+    }
+}
 
 // ── Image Data ──────────────────────────────────────────────────────────────
 
@@ -215,6 +271,27 @@ impl PortKind {
             PortValue::None => Self::Generic,
         }
     }
+
+    /// Check if two port kinds are compatible for connection.
+    /// Rules are intentionally permissive — numeric types (Number, Normalized, Trigger, Gate, Color)
+    /// can interconnect since they all carry float values. Audio and Image are exclusive.
+    /// Generic is compatible with everything. Text only connects to Text or Generic.
+    pub fn compatible(from: PortKind, to: PortKind) -> bool {
+        use PortKind::*;
+        if from == Generic || to == Generic { return true; }
+        match (from, to) {
+            // Numeric family: all interchangeable (they're all f32 underneath)
+            (Number | Normalized | Trigger | Gate | Color, Number | Normalized | Trigger | Gate | Color) => true,
+            // Audio only connects to Audio
+            (Audio, Audio) => true,
+            // Image only connects to Image
+            (Image, Image) => true,
+            // Text only connects to Text
+            (Text, Text) => true,
+            // Everything else is incompatible
+            _ => false,
+        }
+    }
 }
 
 pub struct PortDef {
@@ -268,6 +345,10 @@ pub enum NodeType {
         label: String,
         #[serde(default)]
         auto_fit: bool,
+    },
+    VisualOutput {
+        #[serde(default = "default_preview_size")]
+        preview_size: f32,
     },
     Add,
     Multiply,
@@ -476,20 +557,31 @@ pub enum NodeType {
         last_hash: u64,
     },
     AiRequest {
-        #[serde(default)]
-        provider: String,      // "anthropic" / "openai" / "custom"
-        #[serde(default)]
+        #[serde(default = "default_provider")]
+        provider: String,      // "anthropic" / "openai" / "google"
+        #[serde(default = "default_model")]
         model: String,
+        #[serde(default)]
+        system_prompt: String,
+        #[serde(default)]
+        user_prompt: String,
         #[serde(default)]
         response: String,
         #[serde(default)]
         status: String,
         #[serde(default = "default_max_tokens")]
         max_tokens: u32,
-        #[serde(default)]
+        #[serde(default = "default_temperature")]
         temperature: f32,
         #[serde(default)]
-        api_key_name: String,  // Key name in project api_keys.json
+        api_key: String,
+        #[serde(default)]
+        response_type: u8,     // 0=Text, 1=JSON, 2=Code, 3=WGSL, 4=HTML, 5=Image
+        #[serde(default)]
+        last_trigger: f32,     // for rising-edge detection on trigger port
+        // Legacy fields kept for backward compatibility
+        #[serde(default)]
+        api_key_name: String,
         #[serde(default)]
         custom_url: String,
     },
@@ -548,6 +640,16 @@ pub enum NodeType {
         #[serde(default)]
         duration_secs: f64,
     },
+    AudioInput {
+        #[serde(default)]
+        selected_device: String,
+        #[serde(default = "default_mic_gain")]
+        gain: f32,
+        #[serde(default)]
+        active: bool,
+    },
+    /// Real-time audio analysis — outputs amplitude, bass, mid, treble from the master mix.
+    AudioAnalyzer,
     AudioDevice {
         #[serde(default)]
         selected_output: String,
@@ -641,6 +743,17 @@ pub enum NodeType {
         exposure: f32,
         #[serde(default = "default_one")]
         gamma: f32,
+    },
+    Crop {
+        /// Crop margins as fractions 0.0–1.0 of the image dimension
+        #[serde(default)]
+        top: f32,
+        #[serde(default)]
+        left: f32,
+        #[serde(default)]
+        bottom: f32,
+        #[serde(default)]
+        right: f32,
     },
     Blend {
         #[serde(default)]
@@ -744,7 +857,13 @@ pub enum NodeType {
         #[serde(default = "default_confidence")]
         confidence: f32,
         #[serde(default)]
+        preset: MlPreset,
+        #[serde(default)]
         result_text: String,
+        #[serde(default)]
+        result_json: String,
+        #[serde(skip)]
+        annotated_frame: Option<std::sync::Arc<ImageData>>,
         #[serde(default)]
         status: String,
         #[serde(skip)]
@@ -854,6 +973,7 @@ fn default_mixer_gains() -> Vec<f32> { vec![0.8, 0.8] }
 fn default_440() -> f32 { 440.0 }
 fn default_half() -> f32 { 0.5 }
 fn default_one() -> f32 { 1.0 }
+fn default_mic_gain() -> f32 { 1.0 }
 fn default_point_eight() -> f32 { 0.8 }
 fn default_delay_ms() -> f32 { 250.0 }
 fn default_distortion_drive() -> f32 { 4.0 }
@@ -865,6 +985,7 @@ impl NodeType {
         match self {
             NodeType::Slider { .. } => "Slider",
             NodeType::Display { .. } => "Display",
+            NodeType::VisualOutput { .. } => "Visual Output",
             NodeType::Add => "Add",
             NodeType::Multiply => "Multiply",
             NodeType::Math { .. } => "Math",
@@ -897,6 +1018,8 @@ impl NodeType {
             NodeType::ObEncoder { .. } => "OB Encoder",
             NodeType::Synth { .. } => "Synth",
             NodeType::AudioPlayer { .. } => "Audio Player",
+            NodeType::AudioInput { .. } => "Audio Input",
+            NodeType::AudioAnalyzer => "Audio Analyzer",
             NodeType::AudioDevice { .. } => "Audio Device",
             NodeType::AudioFx { .. } => "Audio FX",
             NodeType::AudioDelay { .. } => "Delay",
@@ -911,6 +1034,7 @@ impl NodeType {
             NodeType::Profiler => "System Profiler",
             NodeType::HtmlViewer => "HTML Viewer",
             NodeType::ImageNode { .. } => "Image",
+            NodeType::Crop { .. } => "Crop",
             NodeType::ImageEffects { .. } => "Image Effects",
             NodeType::Blend { .. } => "Blend",
             NodeType::Curve { .. } => "Curve",
@@ -934,6 +1058,7 @@ impl NodeType {
         match self {
             NodeType::Slider { .. } => vec![PortDef::new("In", Number), PortDef::new("Min", Number), PortDef::new("Max", Number)],
             NodeType::Display { .. } => vec![PortDef::new("Value", Generic)],
+            NodeType::VisualOutput { .. } => vec![PortDef::new("Image", Image)],
             NodeType::Add => vec![PortDef::new("A", Number), PortDef::new("B", Number)],
             NodeType::Multiply => vec![PortDef::new("A", Number), PortDef::new("B", Number)],
             NodeType::Math { variables, .. } => {
@@ -978,6 +1103,7 @@ impl NodeType {
                 PortDef::new("Spacing", Number),
                 PortDef::new("Win Alpha", Normalized),
                 PortDef::new("Background", Text),
+                PortDef::new("BG Image", Image),
             ],
             NodeType::Serial { .. } => vec![PortDef::new("Send", Text)],
             NodeType::Comment { .. } => vec![],
@@ -990,7 +1116,7 @@ impl NodeType {
             NodeType::KeyInput { .. } => vec![],
             NodeType::Palette { .. } => vec![],
             NodeType::HttpRequest { .. } => vec![PortDef::new("URL", Text), PortDef::new("Body", Text), PortDef::new("Headers", Text)],
-            NodeType::AiRequest { .. } => vec![PortDef::new("Config", Text), PortDef::new("System", Text), PortDef::new("Prompt", Text)],
+            NodeType::AiRequest { .. } => vec![PortDef::new("System", Text), PortDef::new("Prompt", Text), PortDef::new("Send", Trigger)],
             NodeType::JsonExtract { .. } => vec![PortDef::new("JSON", Text)],
             NodeType::FileMenu => vec![],
             NodeType::ZoomControl { .. } => vec![PortDef::new("Zoom", Number)],
@@ -999,6 +1125,8 @@ impl NodeType {
             NodeType::ObEncoder { .. } => vec![],
             NodeType::Synth { .. } => vec![PortDef::new("Freq", Number), PortDef::new("Amp", Normalized), PortDef::new("Gate", Gate), PortDef::new("FM Wt", Normalized)],
             NodeType::AudioPlayer { .. } => vec![PortDef::new("Play", Trigger), PortDef::new("Volume", Normalized)],
+            NodeType::AudioInput { .. } => vec![PortDef::new("Gain", Normalized)],
+            NodeType::AudioAnalyzer => vec![PortDef::new("Audio", Audio)],
             NodeType::AudioDevice { .. } => vec![],
             NodeType::AudioFx { .. } => vec![PortDef::new("Source", Audio)],
             NodeType::AudioDelay { .. } => vec![PortDef::new("Audio", Audio), PortDef::new("Time", Number), PortDef::new("Feedback", Normalized)],
@@ -1023,6 +1151,11 @@ impl NodeType {
             NodeType::Profiler => vec![],
             NodeType::HtmlViewer => vec![PortDef::new("HTML", Text)],
             NodeType::ImageNode { .. } => vec![PortDef::new("Image In", Image)],
+            NodeType::Crop { .. } => vec![
+                PortDef::new("Image", Image),
+                PortDef::new("Top", Normalized), PortDef::new("Left", Normalized),
+                PortDef::new("Bottom", Normalized), PortDef::new("Right", Normalized),
+            ],
             NodeType::ImageEffects { .. } => vec![
                 PortDef::new("Image", Image), PortDef::new("Brightness", Normalized), PortDef::new("Contrast", Normalized),
                 PortDef::new("Saturation", Normalized), PortDef::new("Hue", Number), PortDef::new("Exposure", Number), PortDef::new("Gamma", Number),
@@ -1070,13 +1203,14 @@ impl NodeType {
         match self {
             NodeType::Slider { .. } => vec![PortDef::new("Value", Number)],
             NodeType::Display { .. } => vec![],
+            NodeType::VisualOutput { .. } => vec![],
             NodeType::Add => vec![PortDef::new("Result", Number)],
             NodeType::Multiply => vec![PortDef::new("Result", Number)],
             NodeType::Math { .. } => vec![PortDef::new("Result", Number)],
             NodeType::File { .. } => vec![PortDef::new("Content", Text)],
             NodeType::FolderBrowser { .. } => vec![PortDef::new("Path", Text), PortDef::new("Name", Text), PortDef::new("Content", Text)],
             NodeType::TextEditor { .. } => vec![PortDef::new("Text Out", Text)],
-            NodeType::WgslViewer { .. } => vec![],
+            NodeType::WgslViewer { .. } => vec![PortDef::new("Image", Image)],
             NodeType::Time { .. } => vec![PortDef::new("Seconds", Number), PortDef::new("Beat", Normalized)],
             NodeType::Color { .. } => vec![PortDef::new("R", Color), PortDef::new("G", Color), PortDef::new("B", Color)],
             NodeType::MouseTracker { .. } => vec![PortDef::new("X", Number), PortDef::new("Y", Number)],
@@ -1138,6 +1272,12 @@ impl NodeType {
             NodeType::ObEncoder { .. } => vec![PortDef::new("Turn", Number), PortDef::new("Click", Gate), PortDef::new("Position", Number)],
             NodeType::Synth { .. } => vec![PortDef::new("Audio", Audio)],
             NodeType::AudioPlayer { .. } => vec![PortDef::new("Audio", Audio)],
+            NodeType::AudioInput { .. } => vec![PortDef::new("Audio", Audio)],
+            NodeType::AudioAnalyzer => vec![
+                PortDef::new("Amp", Normalized), PortDef::new("Peak", Normalized),
+                PortDef::new("Bass", Normalized), PortDef::new("Mid", Normalized),
+                PortDef::new("Treble", Normalized),
+            ],
             NodeType::AudioDevice { .. } => vec![],
             NodeType::AudioFx { .. } => vec![PortDef::new("Audio", Audio)],
             NodeType::AudioDelay { .. } => vec![PortDef::new("Audio", Audio)],
@@ -1154,6 +1294,7 @@ impl NodeType {
             NodeType::HtmlViewer => vec![PortDef::new("URL", Text)],
             NodeType::Profiler => vec![PortDef::new("FPS", Number), PortDef::new("CPU %", Number), PortDef::new("RAM %", Number), PortDef::new("Proc MB", Number)],
             NodeType::ImageNode { .. } => vec![PortDef::new("Image", Image)],
+            NodeType::Crop { .. } => vec![PortDef::new("Cropped", Image)],
             NodeType::ImageEffects { .. } => vec![PortDef::new("Image", Image)],
             NodeType::Blend { .. } => vec![PortDef::new("Image", Image)],
             NodeType::Curve { .. } => vec![
@@ -1165,7 +1306,7 @@ impl NodeType {
             NodeType::ColorCurves { .. } => vec![PortDef::new("Image", Image)],
             NodeType::VideoPlayer { .. } => vec![PortDef::new("Frame", Image), PortDef::new("Progress", Normalized)],
             NodeType::Camera { .. } => vec![PortDef::new("Frame", Image)],
-            NodeType::MlModel { .. } => vec![PortDef::new("Result", Text)],
+            NodeType::MlModel { .. } => vec![PortDef::new("Annotated", Image), PortDef::new("Result", Text), PortDef::new("JSON", Text)],
             NodeType::Gate { .. } => vec![PortDef::new("Out", Number), PortDef::new("Pass", Gate)],
             NodeType::Timer { .. } => vec![PortDef::new("Trigger", Trigger), PortDef::new("Phase", Normalized), PortDef::new("BPM", Number)],
             NodeType::MapRange { .. } => vec![PortDef::new("Value", Number)],
@@ -1179,6 +1320,7 @@ impl NodeType {
         match self {
             NodeType::Slider { .. } => [80, 160, 255],
             NodeType::Display { .. } => [100, 200, 100],
+            NodeType::VisualOutput { .. } => [200, 100, 255],
             NodeType::Add | NodeType::Multiply | NodeType::Math { .. } => [200, 160, 80],
             NodeType::File { .. } => [180, 120, 200],
             NodeType::FolderBrowser { .. } => [140, 160, 200],
@@ -1209,6 +1351,8 @@ impl NodeType {
             NodeType::ObEncoder { .. } => [200, 140, 80],
             NodeType::Synth { .. } => [100, 220, 180],
             NodeType::AudioPlayer { .. } => [180, 100, 220],
+            NodeType::AudioInput { .. } => [220, 80, 120],
+            NodeType::AudioAnalyzer => [255, 180, 60],
             NodeType::AudioDevice { .. } => [220, 180, 100],
             NodeType::AudioFx { .. } => [200, 100, 160],
             NodeType::AudioDelay { .. } => [180, 120, 200],
@@ -1223,6 +1367,7 @@ impl NodeType {
             NodeType::Profiler => [255, 160, 60],
             NodeType::HtmlViewer => [60, 180, 220],
             NodeType::ImageNode { .. } => [200, 140, 220],
+            NodeType::Crop { .. } => [160, 140, 200],
             NodeType::ImageEffects { .. } => [180, 120, 200],
             NodeType::Blend { .. } => [160, 100, 180],
             NodeType::Curve { .. } => [100, 200, 160],
@@ -1244,7 +1389,7 @@ impl NodeType {
     /// Whether this node renders its ports inline within the content
     /// instead of as separate lists at top/bottom.
     pub fn inline_ports(&self) -> bool {
-        matches!(self, NodeType::Theme { .. } | NodeType::MidiOut { .. } | NodeType::Synth { .. } | NodeType::WgslViewer { .. } | NodeType::Color { .. } | NodeType::ImageEffects { .. } | NodeType::Slider { .. } | NodeType::Display { .. } | NodeType::Blend { .. } | NodeType::HttpRequest { .. } | NodeType::AiRequest { .. } | NodeType::Math { .. } | NodeType::AudioDelay { .. } | NodeType::AudioDistortion { .. } | NodeType::AudioLowPass { .. } | NodeType::AudioHighPass { .. } | NodeType::AudioGain { .. } | NodeType::AudioPlayer { .. } | NodeType::Timer { .. } | NodeType::MapRange { .. } | NodeType::StringFormat { .. } | NodeType::SampleHold { .. } | NodeType::Select { .. } | NodeType::Curve { .. } | NodeType::AudioMixer { .. } | NodeType::Gate { .. } | NodeType::Speaker { .. })
+        matches!(self, NodeType::Theme { .. } | NodeType::MidiOut { .. } | NodeType::Synth { .. } | NodeType::WgslViewer { .. } | NodeType::Color { .. } | NodeType::ImageEffects { .. } | NodeType::Slider { .. } | NodeType::Display { .. } | NodeType::VisualOutput { .. } | NodeType::Blend { .. } | NodeType::HttpRequest { .. } | NodeType::AiRequest { .. } | NodeType::Math { .. } | NodeType::AudioDelay { .. } | NodeType::AudioDistortion { .. } | NodeType::AudioLowPass { .. } | NodeType::AudioHighPass { .. } | NodeType::AudioGain { .. } | NodeType::AudioPlayer { .. } | NodeType::Timer { .. } | NodeType::MapRange { .. } | NodeType::StringFormat { .. } | NodeType::SampleHold { .. } | NodeType::Select { .. } | NodeType::Curve { .. } | NodeType::AudioMixer { .. } | NodeType::Gate { .. } | NodeType::Speaker { .. } | NodeType::AudioInput { .. } | NodeType::Crop { .. })
     }
 
     /// Whether this node skips the standard egui::Window and renders itself completely custom.
@@ -1277,34 +1422,136 @@ pub struct Graph {
     /// Last evaluate timestamp for computing real dt (not serialized)
     #[serde(skip)]
     last_eval_time: f64,
+    /// Topologically sorted node evaluation order (rebuilt when graph topology changes)
+    #[serde(skip)]
+    topo_order: Vec<NodeId>,
+    /// Nodes detected to be in dependency cycles (appended after acyclic nodes)
+    #[serde(skip)]
+    cyclic_nodes: Vec<NodeId>,
+    /// True when nodes/connections changed and topo_order must be rebuilt before next eval
+    /// Uses skip_serializing + default_true so it starts as true after deserialization
+    #[serde(skip_serializing, default = "default_true")]
+    topo_dirty: bool,
 }
 
 impl Graph {
     pub fn new() -> Self {
-        Self { nodes: HashMap::new(), connections: Vec::new(), next_id: 1, last_eval_time: 0.0 }
+        Self {
+            nodes: HashMap::new(),
+            connections: Vec::new(),
+            next_id: 1,
+            last_eval_time: 0.0,
+            topo_order: Vec::new(),
+            cyclic_nodes: Vec::new(),
+            topo_dirty: true,
+        }
     }
+    /// Get the PortKind for a specific port on a node.
+    /// `is_output`: true for output ports, false for input ports.
+    pub fn port_kind(&self, node_id: NodeId, port_idx: usize, is_output: bool) -> Option<PortKind> {
+        let node = self.nodes.get(&node_id)?;
+        let ports = if is_output { node.node_type.outputs() } else { node.node_type.inputs() };
+        ports.get(port_idx).map(|p| p.kind)
+    }
+
     pub fn add_node(&mut self, node_type: NodeType, pos: [f32; 2]) -> NodeId {
         let id = self.next_id; self.next_id += 1;
-        self.nodes.insert(id, Node { id, node_type, pos }); id
+        self.nodes.insert(id, Node { id, node_type, pos });
+        self.topo_dirty = true;
+        id
     }
     pub fn remove_node(&mut self, id: NodeId) {
         self.nodes.remove(&id);
         self.connections.retain(|c| c.from_node != id && c.to_node != id);
+        self.topo_dirty = true;
     }
     pub fn remove_connections_to_port(&mut self, node_id: NodeId, port: usize) {
         self.connections.retain(|c| !(c.to_node == node_id && c.to_port == port));
+        self.topo_dirty = true;
     }
     pub fn add_connection(&mut self, from_node: NodeId, from_port: usize, to_node: NodeId, to_port: usize) {
         self.connections.retain(|c| !(c.to_node == to_node && c.to_port == to_port));
         self.connections.push(Connection { from_node, from_port, to_node, to_port, label: String::new() });
+        self.topo_dirty = true;
+    }
+
+    /// Rebuild topological evaluation order using Kahn's algorithm.
+    /// Called automatically before evaluate() when topo_dirty is set.
+    ///
+    /// Result: acyclic nodes in dependency order, then any cyclic nodes appended.
+    /// For a stable graph this runs at most once between topology changes (add/remove node/wire).
+    fn rebuild_topo_order(&mut self) {
+        use std::collections::{VecDeque, HashSet};
+
+        let node_ids: Vec<NodeId> = self.nodes.keys().copied().collect();
+
+        // Build a unique set of dependency edges: (producer, consumer).
+        // Multiple connections A→B on different ports count as a single edge.
+        let mut edge_set: HashSet<(NodeId, NodeId)> = HashSet::new();
+        for conn in &self.connections {
+            if self.nodes.contains_key(&conn.from_node)
+                && self.nodes.contains_key(&conn.to_node)
+                && conn.from_node != conn.to_node   // ignore self-loops
+            {
+                edge_set.insert((conn.from_node, conn.to_node));
+            }
+        }
+
+        // Build per-node in_degree and successor list from the unique edges.
+        let mut in_degree: HashMap<NodeId, usize> = node_ids.iter().map(|&id| (id, 0)).collect();
+        let mut successors: HashMap<NodeId, Vec<NodeId>> = node_ids.iter().map(|&id| (id, Vec::new())).collect();
+        for &(from, to) in &edge_set {
+            *in_degree.get_mut(&to).unwrap() += 1;
+            successors.get_mut(&from).unwrap().push(to);
+        }
+
+        // Seed with all zero-in-degree nodes, sorted for deterministic ordering.
+        let mut zero: Vec<NodeId> = node_ids.iter().filter(|&&id| in_degree[&id] == 0).copied().collect();
+        zero.sort_unstable();
+        let mut queue: VecDeque<NodeId> = zero.into_iter().collect();
+
+        let mut sorted: Vec<NodeId> = Vec::with_capacity(node_ids.len());
+        let mut in_sorted: HashSet<NodeId> = HashSet::new();
+
+        while let Some(nid) = queue.pop_front() {
+            sorted.push(nid);
+            in_sorted.insert(nid);
+            // Clone successor list so we can mutably borrow in_degree simultaneously.
+            let succs: Vec<NodeId> = successors[&nid].clone();
+            let mut newly_zero: Vec<NodeId> = Vec::new();
+            for succ in succs {
+                let deg = in_degree.get_mut(&succ).unwrap();
+                *deg -= 1;
+                if *deg == 0 { newly_zero.push(succ); }
+            }
+            newly_zero.sort_unstable();   // keep deterministic
+            queue.extend(newly_zero);
+        }
+
+        // Any node not emitted by Kahn is in a cycle — append in sorted order.
+        let mut cyclic: Vec<NodeId> = node_ids.iter()
+            .filter(|&&id| !in_sorted.contains(&id))
+            .copied()
+            .collect();
+        cyclic.sort_unstable();
+        sorted.extend_from_slice(&cyclic);
+
+        self.topo_order = sorted;
+        self.cyclic_nodes = cyclic;
+        self.topo_dirty = false;
     }
 
     /// Re-evaluate with pre-existing values (for injected hardware data).
-    /// Runs 2 passes to propagate injected values through downstream nodes.
+    /// Evaluates in topological order so downstream nodes see fresh values in one pass.
     pub fn evaluate_with_existing(&mut self, values: &mut HashMap<(NodeId, usize), PortValue>, _now_secs: f64) {
-        let ids: Vec<NodeId> = self.nodes.keys().copied().collect();
+        if self.topo_dirty || self.topo_order.is_empty() {
+            self.rebuild_topo_order();
+        }
+        let eval_order = self.topo_order.clone();
+        // Two passes: first follows topo order for acyclic chains; second catches any
+        // remaining propagation for nodes that receive injected values indirectly.
         for _ in 0..2 {
-            for &id in &ids {
+            for &id in &eval_order {
                 let inputs = self.collect_inputs(id, values);
                 let node = match self.nodes.get_mut(&id) { Some(n) => n, None => continue };
                 match &mut node.node_type {
@@ -1338,25 +1585,18 @@ impl Graph {
         }
     }
 
-    /// Evaluate the graph. `now_secs` is the monotonic wall-clock time in seconds
-    /// (from `std::time::Instant` elapsed since app start). Used by Timer for drift-free tempo.
-    pub fn evaluate(&mut self, now_secs: f64) -> HashMap<(NodeId, usize), PortValue> {
-        // Compute real frame dt from wall clock (clamped to avoid huge jumps)
-        let real_dt = if self.last_eval_time > 0.0 {
-            ((now_secs - self.last_eval_time) as f32).clamp(0.0001, 0.25)
-        } else {
-            1.0 / 60.0  // first frame fallback
-        };
-        self.last_eval_time = now_secs;
-
-        let mut values: HashMap<(NodeId, usize), PortValue> = HashMap::new();
-        let ids: Vec<NodeId> = self.nodes.keys().copied().collect();
-
-        for _ in 0..5 {
-            for &id in &ids {
-                let inputs = self.collect_inputs(id, &values);
-                let node = match self.nodes.get_mut(&id) { Some(n) => n, None => continue };
-                match &mut node.node_type {
+    /// Per-node evaluation kernel — contains all node logic.
+    /// Extracted so that topo-ordered and cyclic-fallback passes share the same code.
+    /// `continue` in the original match block is replaced by `return` here.
+    fn evaluate_node(
+        id: NodeId,
+        node_type: &mut NodeType,
+        inputs: &[PortValue],
+        values: &mut HashMap<(NodeId, usize), PortValue>,
+        real_dt: f32,
+        now_secs: f64,
+    ) {
+        match node_type {
                     NodeType::Slider { value, min, max, .. } => {
                         // Override min/max from inputs if connected
                         if let Some(PortValue::Float(v)) = inputs.get(1) { *min = *v; }
@@ -1652,7 +1892,7 @@ impl Graph {
                             for (i, v) in last_values.iter().enumerate() {
                                 values.insert((id, i), PortValue::Float(*v));
                             }
-                            continue;
+                            return; // emit last values and skip eval for this node
                         }
 
                         // In manual mode, only run if triggered
@@ -1669,7 +1909,7 @@ impl Graph {
                             for (i, v) in last_values.iter().enumerate() {
                                 values.insert((id, i), PortValue::Float(*v));
                             }
-                            continue;
+                            return; // emit last values and skip eval for this node
                         }
 
                         let engine = rhai::Engine::new();
@@ -1760,8 +2000,53 @@ impl Graph {
                     }
                     _ => {}
                 }
+    }
+
+    /// Evaluate the graph. `now_secs` is the monotonic wall-clock time in seconds
+    /// (from `std::time::Instant` elapsed since app start). Used by Timer for drift-free tempo.
+    pub fn evaluate(&mut self, now_secs: f64) -> HashMap<(NodeId, usize), PortValue> {
+        // Compute real frame dt from wall clock (clamped to avoid huge jumps).
+        let real_dt = if self.last_eval_time > 0.0 {
+            ((now_secs - self.last_eval_time) as f32).clamp(0.0001, 0.25)
+        } else {
+            1.0 / 60.0  // first-frame fallback
+        };
+        self.last_eval_time = now_secs;
+
+        // Rebuild topo order only when graph topology has changed.
+        if self.topo_dirty || self.topo_order.is_empty() {
+            self.rebuild_topo_order();
+        }
+        // Clone ID vecs into locals so we can mutably borrow self.nodes inside the loop.
+        let eval_order = self.topo_order.clone();
+        let cyclic_ids = self.cyclic_nodes.clone();
+
+        let mut values: HashMap<(NodeId, usize), PortValue> = HashMap::new();
+
+        // ── Single topo-ordered pass ─────────────────────────────────────────
+        // All predecessors of any node are evaluated before it, so one pass is
+        // correct and O(n) for any acyclic graph.
+        for &id in &eval_order {
+            let inputs = self.collect_inputs(id, &values);
+            if let Some(node) = self.nodes.get_mut(&id) {
+                Self::evaluate_node(id, &mut node.node_type, &inputs, &mut values, real_dt, now_secs);
             }
         }
+
+        // ── Extra passes for cyclic nodes (feedback loops) ───────────────────
+        // Kahn's algorithm could not linearize these nodes. Two extra passes let
+        // values propagate around short cycles without running the full graph again.
+        if !cyclic_ids.is_empty() {
+            for _ in 0..2 {
+                for &id in &cyclic_ids {
+                    let inputs = self.collect_inputs(id, &values);
+                    if let Some(node) = self.nodes.get_mut(&id) {
+                        Self::evaluate_node(id, &mut node.node_type, &inputs, &mut values, real_dt, now_secs);
+                    }
+                }
+            }
+        }
+
         values
     }
 

@@ -532,6 +532,15 @@ pub fn execute_command(
                     *active = false;
                     McpResult::Json(json!({ "success": true, "triggered": "deactivate" }))
                 }
+                // AudioInput (mic)
+                (NodeType::AudioInput { active, .. }, "activate" | "listen") => {
+                    *active = true;
+                    McpResult::Json(json!({ "success": true, "triggered": "activate" }))
+                }
+                (NodeType::AudioInput { active, .. }, "deactivate" | "stop") => {
+                    *active = false;
+                    McpResult::Json(json!({ "success": true, "triggered": "deactivate" }))
+                }
                 _ => McpResult::Error { error: format!(
                     "Action '{}' not supported for node type '{}'", action, node.node_type.title()
                 ) },

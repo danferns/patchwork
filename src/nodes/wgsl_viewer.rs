@@ -247,6 +247,50 @@ impl egui_wgpu::CallbackTrait for WgslPaintCallback {
     }
 }
 
+/// Public callback for rendering a WGSL shader as canvas background.
+/// Reuses the same GPU pipeline/uniforms as the node's preview.
+pub struct WgslBgCallback {
+    pub node_id: NodeId,
+}
+
+impl egui_wgpu::CallbackTrait for WgslBgCallback {
+    fn prepare(
+        &self,
+        _device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        _screen_descriptor: &egui_wgpu::ScreenDescriptor,
+        _encoder: &mut wgpu::CommandEncoder,
+        resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        // Uniforms already uploaded by the node's own WgslPaintCallback::prepare.
+        // But if the BG renders before the node, we upload here too.
+        let uni_store = resources.get::<WgslUniformStore>();
+        let gpu_store = resources.get::<WgslGpuStore>();
+        if let (Some(unis), Some(gpus)) = (uni_store, gpu_store) {
+            if let (Some(data), Some(node_gpu)) = (unis.data.get(&self.node_id), gpus.nodes.get(&self.node_id)) {
+                let bytes: &[u8] = bytemuck::cast_slice(data);
+                queue.write_buffer(&node_gpu.uniform_buffer, 0, bytes);
+            }
+        }
+        Vec::new()
+    }
+
+    fn paint(
+        &self,
+        _info: egui::PaintCallbackInfo,
+        render_pass: &mut wgpu::RenderPass<'static>,
+        resources: &egui_wgpu::CallbackResources,
+    ) {
+        if let Some(store) = resources.get::<WgslGpuStore>() {
+            if let Some(gpu) = store.nodes.get(&self.node_id) {
+                render_pass.set_pipeline(&gpu.pipeline);
+                render_pass.set_bind_group(0, &gpu.bind_group, &[]);
+                render_pass.draw(0..gpu.vertex_count, 0..1);
+            }
+        }
+    }
+}
+
 // ── Main Render Function ────────────────────────────────────────────────────
 
 pub fn render(
@@ -269,21 +313,7 @@ pub fn render(
     {
         let is_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 0);
         ui.horizontal(|ui| {
-            let (rect, response) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
-            let (fill, border) = if response.hovered() || response.dragged() { (egui::Color32::YELLOW, egui::Color32::WHITE) }
-                else if is_wired { (egui::Color32::from_rgb(60, 140, 255), egui::Color32::from_rgb(120, 180, 255)) }
-                else { (egui::Color32::from_rgb(70, 75, 85), egui::Color32::from_rgb(120, 125, 135)) };
-            ui.painter().circle_filled(rect.center(), 6.0, fill);
-            ui.painter().circle_stroke(rect.center(), 6.0, egui::Stroke::new(2.5, border));
-            port_positions.insert((node_id, 0, true), rect.center());
-            if response.drag_started() {
-                if let Some(existing) = connections.iter().find(|c| c.to_node == node_id && c.to_port == 0) {
-                    *dragging_from = Some((existing.from_node, existing.from_port, true));
-                    pending_disconnects.push((node_id, 0));
-                } else {
-                    *dragging_from = Some((node_id, 0, false));
-                }
-            }
+            super::inline_port_circle(ui, node_id, 0, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Text);
             ui.label(egui::RichText::new("WGSL").small());
             if is_wired {
                 ui.label(egui::RichText::new("⟵ connected").small().color(egui::Color32::from_rgb(80, 170, 255)));
@@ -412,20 +442,7 @@ pub fn render(
                     for c in 0..3 {
                         let port = pi;
                         let is_wired = connections.iter().any(|cn| cn.to_node == node_id && cn.to_port == port);
-                        // Port circle
-                        let (rect, response) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::click_and_drag());
-                        let (fill, border) = if response.hovered() || response.dragged() { (egui::Color32::YELLOW, egui::Color32::WHITE) }
-                            else if is_wired { (egui::Color32::from_rgb(60, 140, 255), egui::Color32::from_rgb(120, 180, 255)) }
-                            else { (egui::Color32::from_rgb(70, 75, 85), egui::Color32::from_rgb(120, 125, 135)) };
-                        ui.painter().circle_filled(rect.center(), 6.0, fill);
-                        ui.painter().circle_stroke(rect.center(), 6.0, egui::Stroke::new(2.5, border));
-                        port_positions.insert((node_id, port, true), rect.center());
-                        if response.drag_started() {
-                            if let Some(existing) = connections.iter().find(|cn| cn.to_node == node_id && cn.to_port == port) {
-                                *dragging_from = Some((existing.from_node, existing.from_port, true));
-                                pending_disconnects.push((node_id, port));
-                            } else { *dragging_from = Some((node_id, port, false)); }
-                        }
+                        super::inline_port_circle(ui, node_id, port, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Color);
                         ui.label(egui::RichText::new(ch_labels[c]).small());
                         if is_wired {
                             let v = if vi + c < uniform_values.len() { uniform_values[vi + c] } else { 0.0 };
@@ -442,19 +459,7 @@ pub fn render(
                 let port = pi;
                 let is_wired = connections.iter().any(|cn| cn.to_node == node_id && cn.to_port == port);
                 ui.horizontal(|ui| {
-                    let (rect, response) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::click_and_drag());
-                    let (fill, border) = if response.hovered() || response.dragged() { (egui::Color32::YELLOW, egui::Color32::WHITE) }
-                        else if is_wired { (egui::Color32::from_rgb(60, 140, 255), egui::Color32::from_rgb(120, 180, 255)) }
-                        else { (egui::Color32::from_rgb(70, 75, 85), egui::Color32::from_rgb(120, 125, 135)) };
-                    ui.painter().circle_filled(rect.center(), 6.0, fill);
-                    ui.painter().circle_stroke(rect.center(), 6.0, egui::Stroke::new(2.5, border));
-                    port_positions.insert((node_id, port, true), rect.center());
-                    if response.drag_started() {
-                        if let Some(existing) = connections.iter().find(|cn| cn.to_node == node_id && cn.to_port == port) {
-                            *dragging_from = Some((existing.from_node, existing.from_port, true));
-                            pending_disconnects.push((node_id, port));
-                        } else { *dragging_from = Some((node_id, port, false)); }
-                    }
+                    super::inline_port_circle(ui, node_id, port, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Number);
                     ui.label(egui::RichText::new(format!("u.{}", name)).small());
                     if is_wired {
                         let v = if vi < uniform_values.len() { uniform_values[vi] } else { 0.0 };
@@ -501,6 +506,9 @@ pub fn render(
             }
         }
     }
+
+    // Image output port (right-aligned)
+    super::audio_port_row(ui, "Image", node_id, 0, false, port_positions, dragging_from, connections, pending_disconnects, PortKind::Image);
 
     // Show code preview (collapsible)
     ui.collapsing("Shader Code", |ui| {

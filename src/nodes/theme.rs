@@ -1,34 +1,23 @@
-use crate::graph::{NodeId, PortValue, Connection};
+use crate::graph::{NodeId, PortValue, Connection, PortKind};
 use std::collections::HashMap;
 use eframe::egui;
 
-const PORT_RADIUS: f32 = 7.0;
 const PORT_SIZE: f32 = 14.0;
-const IN_COLOR: egui::Color32 = egui::Color32::from_rgb(70, 75, 85);
-const IN_BORDER: egui::Color32 = egui::Color32::from_rgb(120, 125, 135);
-const WIRED_COLOR: egui::Color32 = egui::Color32::from_rgb(60, 140, 255);
-const WIRED_BORDER: egui::Color32 = egui::Color32::from_rgb(120, 180, 255);
-const OUT_COLOR: egui::Color32 = egui::Color32::from_rgb(60, 140, 255);
-const OUT_BORDER: egui::Color32 = egui::Color32::from_rgb(120, 180, 255);
-const PORT_STROKE: f32 = 2.5;
 
 /// Draw a small inline input port, register its position.
 fn inline_input(
     ui: &mut egui::Ui,
     port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
     dragging_from: &mut Option<(NodeId, usize, bool)>,
+    pending_disconnects: &mut Vec<(NodeId, usize)>,
     node_id: NodeId,
     port: usize,
     values: &HashMap<(NodeId, usize), PortValue>,
     connections: &[Connection],
+    kind: PortKind,
 ) -> Option<f32> {
     let connected = connections.iter().any(|c| c.to_node == node_id && c.to_port == port);
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(PORT_SIZE, PORT_SIZE), egui::Sense::click_and_drag());
-    let (fill, border) = if resp.hovered() || resp.dragged() { (egui::Color32::YELLOW, egui::Color32::WHITE) } else if connected { (WIRED_COLOR, WIRED_BORDER) } else { (IN_COLOR, IN_BORDER) };
-    ui.painter().circle_filled(rect.center(), PORT_RADIUS, fill);
-    ui.painter().circle_stroke(rect.center(), PORT_RADIUS, egui::Stroke::new(PORT_STROKE, border));
-    port_positions.insert((node_id, port, true), rect.center());
-    if resp.drag_started() { *dragging_from = Some((node_id, port, false)); }
+    super::inline_port_circle(ui, node_id, port, true, connections, port_positions, dragging_from, pending_disconnects, kind);
     if connected {
         for c in connections {
             if c.to_node == node_id && c.to_port == port {
@@ -44,15 +33,13 @@ fn inline_output(
     ui: &mut egui::Ui,
     port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
     dragging_from: &mut Option<(NodeId, usize, bool)>,
+    pending_disconnects: &mut Vec<(NodeId, usize)>,
+    connections: &[Connection],
     node_id: NodeId,
     port: usize,
+    kind: PortKind,
 ) {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(PORT_SIZE, PORT_SIZE), egui::Sense::click_and_drag());
-    let (fill, border) = if resp.hovered() || resp.dragged() { (egui::Color32::YELLOW, egui::Color32::WHITE) } else { (OUT_COLOR, OUT_BORDER) };
-    ui.painter().circle_filled(rect.center(), PORT_RADIUS, fill);
-    ui.painter().circle_stroke(rect.center(), PORT_RADIUS, egui::Stroke::new(PORT_STROKE, border));
-    port_positions.insert((node_id, port, false), rect.center());
-    if resp.drag_started() { *dragging_from = Some((node_id, port, true)); }
+    super::inline_port_circle(ui, node_id, port, false, connections, port_positions, dragging_from, pending_disconnects, kind);
 }
 
 /// Color row: [in R] [in G] [in B] label [picker] R G B [out R] [out G] [out B]
@@ -63,11 +50,12 @@ fn color_row(
     use_hsl: bool,
     port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
     dragging_from: &mut Option<(NodeId, usize, bool)>,
+    pending_disconnects: &mut Vec<(NodeId, usize)>,
+    connections: &[Connection],
     node_id: NodeId,
     in_base: usize,
     out_base: usize,
     values: &HashMap<(NodeId, usize), PortValue>,
-    connections: &[Connection],
 ) {
     // Apply overrides from inputs
     if let Some(v) = inline_input_val(values, connections, node_id, in_base) { rgb[0] = v.clamp(0.0, 255.0) as u8; }
@@ -83,9 +71,9 @@ fn color_row(
         }
         // Output ports
         if out_base > 0 {
-            inline_output(ui, port_positions, dragging_from, node_id, out_base);
-            inline_output(ui, port_positions, dragging_from, node_id, out_base + 1);
-            inline_output(ui, port_positions, dragging_from, node_id, out_base + 2);
+            inline_output(ui, port_positions, dragging_from, pending_disconnects, connections, node_id, out_base, PortKind::Color);
+            inline_output(ui, port_positions, dragging_from, pending_disconnects, connections, node_id, out_base + 1, PortKind::Color);
+            inline_output(ui, port_positions, dragging_from, pending_disconnects, connections, node_id, out_base + 2, PortKind::Color);
         }
     });
 
@@ -102,26 +90,7 @@ fn color_row(
             let port = in_base + ci;
             let is_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == port);
 
-            // Port circle
-            let (rect, response) = ui.allocate_exact_size(egui::vec2(PORT_SIZE, PORT_SIZE), egui::Sense::click_and_drag());
-            let (fill, border) = if response.hovered() || response.dragged() {
-                (egui::Color32::YELLOW, egui::Color32::WHITE)
-            } else if is_wired {
-                (WIRED_COLOR, WIRED_BORDER)
-            } else {
-                (IN_COLOR, IN_BORDER)
-            };
-            ui.painter().circle_filled(rect.center(), PORT_RADIUS, fill);
-            ui.painter().circle_stroke(rect.center(), PORT_RADIUS, egui::Stroke::new(PORT_STROKE, border));
-            port_positions.insert((node_id, port, true), rect.center());
-
-            if response.drag_started() {
-                if let Some(existing) = connections.iter().find(|c| c.to_node == node_id && c.to_port == port) {
-                    *dragging_from = Some((existing.from_node, existing.from_port, true));
-                } else {
-                    *dragging_from = Some((node_id, port, false));
-                }
-            }
+            super::inline_port_circle(ui, node_id, port, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Color);
 
             // Label + value
             ui.label(egui::RichText::new(*ch_label).small());
@@ -132,7 +101,7 @@ fn color_row(
                 let (h, s, l) = rgb_to_hsl(rgb[0], rgb[1], rgb[2]);
                 let mut vals = [h, s, l];
                 if ui.add(egui::DragValue::new(&mut vals[ci]).range(*min..=*max).speed(1.0)).changed() {
-                    let (r, g, b) = hsl_to_rgb(vals[0], vals[1], vals[2]);
+                    let (_r, _g, _b) = hsl_to_rgb(vals[0], vals[1], vals[2]);
                     // Only update the changed channel's effect
                     match ci {
                         0 => { let (nr, ng, nb) = hsl_to_rgb(vals[0], s, l); *rgb = [nr, ng, nb]; }
@@ -157,14 +126,16 @@ fn float_row(
     suffix: &str,
     port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
     dragging_from: &mut Option<(NodeId, usize, bool)>,
+    pending_disconnects: &mut Vec<(NodeId, usize)>,
+    connections: &[Connection],
     node_id: NodeId,
     port: usize,
     values: &HashMap<(NodeId, usize), PortValue>,
-    connections: &[Connection],
+    kind: PortKind,
 ) {
     if let Some(v) = inline_input_val(values, connections, node_id, port) { *val = v; }
     ui.horizontal(|ui| {
-        inline_input(ui, port_positions, dragging_from, node_id, port, values, connections);
+        inline_input(ui, port_positions, dragging_from, pending_disconnects, node_id, port, values, connections, kind);
         ui.label(egui::RichText::new(label).small());
         ui.add(egui::Slider::new(val, range).suffix(suffix));
     });
@@ -176,15 +147,17 @@ fn u8_row(
     val: &mut u8,
     port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
     dragging_from: &mut Option<(NodeId, usize, bool)>,
+    pending_disconnects: &mut Vec<(NodeId, usize)>,
+    connections: &[Connection],
     node_id: NodeId,
     port: usize,
     values: &HashMap<(NodeId, usize), PortValue>,
-    connections: &[Connection],
+    kind: PortKind,
 ) {
     if let Some(v) = inline_input_val(values, connections, node_id, port) { *val = v.clamp(0.0, 255.0) as u8; }
     let mut f = *val as f32;
     ui.horizontal(|ui| {
-        inline_input(ui, port_positions, dragging_from, node_id, port, values, connections);
+        inline_input(ui, port_positions, dragging_from, pending_disconnects, node_id, port, values, connections, kind);
         ui.label(egui::RichText::new(label).small());
         if ui.add(egui::Slider::new(&mut f, 0.0..=255.0)).changed() { *val = f as u8; }
     });
@@ -201,7 +174,7 @@ fn inline_input_val(values: &HashMap<(NodeId, usize), PortValue>, connections: &
     None
 }
 
-// Input ports: 0-2 BG, 3-5 Text, 6-8 Accent, 9-11 Win, 12-14 Grid, 15 Font, 16 Round, 17 Space, 18 Alpha
+// Input ports: 0-2 BG, 3-5 Text, 6-8 Accent, 9-11 Win, 12-14 Grid, 15 Font, 16 Round, 17 Space, 18 Alpha, 19 BG Path, 20 Wire, 21 BG Image
 // Output ports: 0-2 BG, 3-5 Text, 6-8 Accent
 
 pub fn render(
@@ -229,6 +202,7 @@ pub fn render(
     connections: &[Connection],
     port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
     dragging_from: &mut Option<(NodeId, usize, bool)>,
+    pending_disconnects: &mut Vec<(NodeId, usize)>,
 ) {
     // Save / Open
     ui.horizontal(|ui| {
@@ -317,11 +291,11 @@ pub fn render(
     ui.separator();
 
     // Colors with inline ports: in ports (left) ● ● ● label [picker] ● ● ● out ports (right)
-    color_row(ui, "BG", bg_color, *use_hsl, port_positions, dragging_from, node_id, 0, 1, values, connections);
-    color_row(ui, "Text", text_color, *use_hsl, port_positions, dragging_from, node_id, 3, 0, values, connections);
-    color_row(ui, "Accent", accent, *use_hsl, port_positions, dragging_from, node_id, 6, 0, values, connections);
-    color_row(ui, "Window", window_bg, *use_hsl, port_positions, dragging_from, node_id, 9, 0, values, connections);
-    color_row(ui, "Grid", grid_color, *use_hsl, port_positions, dragging_from, node_id, 12, 0, values, connections);
+    color_row(ui, "BG", bg_color, *use_hsl, port_positions, dragging_from, pending_disconnects, connections, node_id, 0, 1, values);
+    color_row(ui, "Text", text_color, *use_hsl, port_positions, dragging_from, pending_disconnects, connections, node_id, 3, 0, values);
+    color_row(ui, "Accent", accent, *use_hsl, port_positions, dragging_from, pending_disconnects, connections, node_id, 6, 0, values);
+    color_row(ui, "Window", window_bg, *use_hsl, port_positions, dragging_from, pending_disconnects, connections, node_id, 9, 0, values);
+    color_row(ui, "Grid", grid_color, *use_hsl, port_positions, dragging_from, pending_disconnects, connections, node_id, 12, 0, values);
 
     // Grid style selector
     ui.horizontal(|ui| {
@@ -368,38 +342,19 @@ pub fn render(
     ui.separator();
 
     // Float params with inline input ports
-    float_row(ui, "Font", font_size, 8.0..=28.0, "px", port_positions, dragging_from, node_id, 15, values, connections);
-    float_row(ui, "Wire", wire_thickness, 1.0..=16.0, "px", port_positions, dragging_from, node_id, 20, values, connections);
-    float_row(ui, "Round", rounding, 0.0..=32.0, "px", port_positions, dragging_from, node_id, 16, values, connections);
-    float_row(ui, "Space", spacing, 0.0..=12.0, "px", port_positions, dragging_from, node_id, 17, values, connections);
-    u8_row(ui, "Opacity", window_alpha, port_positions, dragging_from, node_id, 18, values, connections);
+    float_row(ui, "Font", font_size, 8.0..=28.0, "px", port_positions, dragging_from, pending_disconnects, connections, node_id, 15, values, PortKind::Number);
+    float_row(ui, "Wire", wire_thickness, 1.0..=16.0, "px", port_positions, dragging_from, pending_disconnects, connections, node_id, 20, values, PortKind::Number);
+    float_row(ui, "Round", rounding, 0.0..=32.0, "px", port_positions, dragging_from, pending_disconnects, connections, node_id, 16, values, PortKind::Number);
+    float_row(ui, "Space", spacing, 0.0..=12.0, "px", port_positions, dragging_from, pending_disconnects, connections, node_id, 17, values, PortKind::Number);
+    u8_row(ui, "Opacity", window_alpha, port_positions, dragging_from, pending_disconnects, connections, node_id, 18, values, PortKind::Normalized);
 
     ui.separator();
 
     // ── Background image/video ───────────────────────────────────────
     // Port 19: Background (accepts Image from Image node, WGSL, Video, Blend)
     ui.horizontal(|ui| {
-        // Input port circle
-        let (rect, response) = ui.allocate_exact_size(egui::vec2(PORT_SIZE, PORT_SIZE), egui::Sense::click_and_drag());
         let bg_connected = connections.iter().any(|c| c.to_node == node_id && c.to_port == 19);
-        let (fill, border) = if response.hovered() || response.dragged() {
-            (egui::Color32::YELLOW, egui::Color32::WHITE)
-        } else if bg_connected {
-            (WIRED_COLOR, WIRED_BORDER)
-        } else {
-            (IN_COLOR, IN_BORDER)
-        };
-        ui.painter().circle_filled(rect.center(), PORT_RADIUS, fill);
-        ui.painter().circle_stroke(rect.center(), PORT_RADIUS, egui::Stroke::new(PORT_STROKE, border));
-        port_positions.insert((node_id, 19, true), rect.center());
-
-        if response.drag_started() {
-            if let Some(existing) = connections.iter().find(|c| c.to_node == node_id && c.to_port == 19) {
-                *dragging_from = Some((existing.from_node, existing.from_port, true));
-            } else {
-                *dragging_from = Some((node_id, 19, false));
-            }
-        }
+        super::inline_port_circle(ui, node_id, 19, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Text);
 
         ui.label(egui::RichText::new("BG").small());
 
@@ -434,6 +389,15 @@ pub fn render(
             ui.label(egui::RichText::new(short).small().monospace().color(egui::Color32::GRAY));
         });
     }
+
+    // BG Image input port (accepts Image from WGSL Viewer, Camera, Image node, etc.)
+    ui.horizontal(|ui| {
+        super::inline_port_circle(ui, node_id, 21, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Image);
+        let img_connected = connections.iter().any(|c| c.to_node == node_id && c.to_port == 21);
+        if img_connected {
+            ui.label(egui::RichText::new("BG Image connected").small().color(egui::Color32::from_rgb(80, 200, 120)));
+        }
+    });
 }
 
 /// Apply theme settings to the egui context.

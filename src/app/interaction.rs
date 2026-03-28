@@ -100,6 +100,55 @@ impl super::PatchworkApp {
             self.fit_all_nodes(ctx);
         }
 
+        // ── File shortcuts (only when no text field is focused) ───────
+        let no_focus = ctx.memory(|mem| mem.focused().is_none());
+        let cmd = modifiers.mac_cmd || modifiers.ctrl;
+        if no_focus && cmd {
+            // Cmd+N → New project
+            if ctx.input(|i| i.key_pressed(egui::Key::N)) {
+                self.push_undo();
+                self.graph = crate::graph::Graph::new();
+                self.project_path = None;
+                self.pinned_nodes.clear();
+                self.undo_history.clear();
+                self.spawn_default_nodes();
+            }
+            // Cmd+O → Open project
+            if ctx.input(|i| i.key_pressed(egui::Key::O)) {
+                self.load_project();
+            }
+            // Cmd+S → Save (quick save to existing path)
+            if !modifiers.shift && ctx.input(|i| i.key_pressed(egui::Key::S)) {
+                self.save_project_quick();
+            }
+            // Cmd+Shift+S → Save As (always shows dialog)
+            if modifiers.shift && ctx.input(|i| i.key_pressed(egui::Key::S)) {
+                self.save_project();
+            }
+            // Cmd+Z → Undo
+            if !modifiers.shift && ctx.input(|i| i.key_pressed(egui::Key::Z)) {
+                self.perform_undo();
+            }
+            // Cmd+Shift+Z → Redo
+            if modifiers.shift && ctx.input(|i| i.key_pressed(egui::Key::Z)) {
+                self.perform_redo();
+            }
+        }
+
+        // Delete / Backspace → delete selected nodes (when no text field focused)
+        if no_focus && ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
+            if !self.selected_nodes.is_empty() {
+                self.push_undo();
+                let to_delete: Vec<_> = self.selected_nodes.iter().copied().collect();
+                for id in to_delete {
+                    self.audio.cleanup_node(id);
+                    crate::nodes::video_player::cleanup_node(id);
+                    self.graph.remove_node(id);
+                }
+                self.selected_nodes.clear();
+            }
+        }
+
         // Cursor icon: grab when panning, move when dragging a node
         if self.panning {
             ctx.set_cursor_icon(egui::CursorIcon::Grabbing);

@@ -1,6 +1,7 @@
 use eframe::egui;
-use crate::graph::{NodeId, PortValue, Connection, Graph};
+use crate::graph::{NodeId, PortValue, Connection, Graph, PortKind};
 use crate::http::HttpAction;
+use crate::nodes::{inline_port_circle, output_port_row};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
@@ -20,6 +21,7 @@ pub fn render(
     actions: &mut Vec<HttpAction>,
     port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
     dragging_from: &mut Option<(NodeId, usize, bool)>,
+    pending_disconnects: &mut Vec<(NodeId, usize)>,
 ) {
     if method.is_empty() { *method = "POST".into(); }
 
@@ -51,7 +53,7 @@ pub fn render(
 
     // Port 0: URL
     ui.horizontal(|ui| {
-        port_circle(ui, node_id, 0, url_wired, port_positions, dragging_from, connections);
+        inline_port_circle(ui, node_id, 0, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Text);
         ui.label(egui::RichText::new("URL:").small());
         if url_wired {
             let short = if effective_url.len() > 30 { format!("{}...", &effective_url[..30]) } else { effective_url.clone() };
@@ -78,7 +80,7 @@ pub fn render(
 
     // Port 1: Body
     ui.horizontal(|ui| {
-        port_circle(ui, node_id, 1, body_wired, port_positions, dragging_from, connections);
+        inline_port_circle(ui, node_id, 1, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Text);
         ui.label(egui::RichText::new("Body:").small());
         if body_wired {
             let short = if body.len() > 25 { format!("{}...", &body[..25]) } else { body.clone() };
@@ -90,7 +92,7 @@ pub fn render(
 
     // Port 2: Headers (collapsible when not wired)
     ui.horizontal(|ui| {
-        port_circle(ui, node_id, 2, hdr_wired, port_positions, dragging_from, connections);
+        inline_port_circle(ui, node_id, 2, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Text);
         ui.label(egui::RichText::new("Headers:").small());
         if hdr_wired {
             ui.label(egui::RichText::new("connected").small().color(egui::Color32::from_rgb(80, 170, 255)));
@@ -141,26 +143,10 @@ pub fn render(
 
     // Output ports: Response + Status
     ui.separator();
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Response:").small());
-        let short = if response.len() > 30 { format!("{}...", &response[..30]) } else if response.is_empty() { "—".into() } else { response.to_string() };
-        ui.label(egui::RichText::new(short).small().monospace());
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
-        let col = if resp.hovered() || resp.dragged() { egui::Color32::YELLOW } else { egui::Color32::from_rgb(80, 170, 255) };
-        ui.painter().circle_filled(rect.center(), 5.0, col);
-        ui.painter().circle_stroke(rect.center(), 5.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
-        port_positions.insert((node_id, 0, false), rect.center());
-        if resp.drag_started() { *dragging_from = Some((node_id, 0, true)); }
-    });
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(format!("Status: {}", if status.is_empty() { "—" } else { status })).small());
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
-        let col = if resp.hovered() || resp.dragged() { egui::Color32::YELLOW } else { egui::Color32::from_rgb(80, 170, 255) };
-        ui.painter().circle_filled(rect.center(), 5.0, col);
-        ui.painter().circle_stroke(rect.center(), 5.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
-        port_positions.insert((node_id, 1, false), rect.center());
-        if resp.drag_started() { *dragging_from = Some((node_id, 1, true)); }
-    });
+    let resp_short = if response.len() > 30 { format!("{}...", &response[..30]) } else if response.is_empty() { "—".into() } else { response.to_string() };
+    output_port_row(ui, "Response", &resp_short, node_id, 0, port_positions, dragging_from, connections, pending_disconnects, PortKind::Text);
+    let status_val = if status.is_empty() { "—" } else { status };
+    output_port_row(ui, "Status", status_val, node_id, 1, port_positions, dragging_from, connections, pending_disconnects, PortKind::Text);
 
     // Response preview (collapsible)
     if !response.is_empty() {
@@ -170,32 +156,6 @@ pub fn render(
                     .code_editor().desired_width(ui.available_width()));
             });
         });
-    }
-}
-
-fn port_circle(
-    ui: &mut egui::Ui,
-    node_id: NodeId, port: usize, is_wired: bool,
-    port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
-    dragging_from: &mut Option<(NodeId, usize, bool)>,
-    connections: &[Connection],
-) {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::click_and_drag());
-    let col = if response.hovered() || response.dragged() { egui::Color32::YELLOW }
-        else if is_wired { egui::Color32::from_rgb(80, 170, 255) }
-        else { egui::Color32::from_rgb(140, 140, 140) };
-    // Rounded square for text ports
-    let half = 5.0;
-    let r = egui::Rect::from_center_size(rect.center(), egui::vec2(half * 2.0, half * 2.0));
-    ui.painter().rect_filled(r, 3.0, col);
-    ui.painter().rect_stroke(r, 3.0, egui::Stroke::new(1.5, egui::Color32::WHITE), egui::StrokeKind::Outside);
-    port_positions.insert((node_id, port, true), rect.center());
-    if response.drag_started() {
-        if let Some(existing) = connections.iter().find(|c| c.to_node == node_id && c.to_port == port) {
-            *dragging_from = Some((existing.from_node, existing.from_port, true));
-        } else {
-            *dragging_from = Some((node_id, port, false));
-        }
     }
 }
 

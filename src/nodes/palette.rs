@@ -8,6 +8,21 @@ pub fn render(
     search: &mut String,
     _node_id: NodeId,
 ) {
+    // ── File actions (always accessible) ──
+    ui.horizontal(|ui| {
+        if ui.button("\u{2795} New").clicked() {
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("file_action_new"), true));
+        }
+        if ui.button("\u{1f4c2} Open").clicked() {
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("file_action_load"), true));
+        }
+        if ui.button("\u{1f4be} Save").clicked() {
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("file_action_save"), true));
+        }
+    });
+
+    ui.separator();
+
     // Search box
     ui.add(
         egui::TextEdit::singleline(search)
@@ -113,7 +128,7 @@ fn render_node_card(
             rect.min,
             egui::vec2(3.0, card_height),
         );
-        painter.rect_filled(accent_rect, egui::Rounding { nw: 4, sw: 4, ne: 0, se: 0 }, accent);
+        painter.rect_filled(accent_rect, egui::CornerRadius { nw: 4, sw: 4, ne: 0, se: 0 }, accent);
 
         // Input port dots (left side)
         if n_inputs > 0 {

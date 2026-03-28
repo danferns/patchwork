@@ -11,6 +11,7 @@ pub fn render(
     connections: &[Connection],
     port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
     dragging_from: &mut Option<(NodeId, usize, bool)>,
+    pending_disconnects: &mut Vec<(NodeId, usize)>,
 ) {
     let (brightness, contrast, saturation, hue, exposure, gamma) = match node_type {
         NodeType::ImageEffects { brightness, contrast, saturation, hue, exposure, gamma } =>
@@ -19,19 +20,37 @@ pub fn render(
     };
 
     // Port 0: Image input
-    render_image_port(ui, node_id, 0, "Image", connections, values, port_positions, dragging_from);
+    {
+        let is_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 0);
+        ui.horizontal(|ui| {
+            super::inline_port_circle(ui, node_id, 0, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Image);
+            ui.label(egui::RichText::new("Image:").small());
+            if is_wired {
+                let v = Graph::static_input_value(connections, values, node_id, 0);
+                match &v {
+                    PortValue::Image(img) => {
+                        ui.label(egui::RichText::new(format!("[{}x{}]", img.width, img.height))
+                            .small().color(egui::Color32::from_rgb(80, 170, 255)));
+                    }
+                    _ => { ui.label(egui::RichText::new("—").small()); }
+                }
+            } else {
+                ui.label(egui::RichText::new("—").small().color(egui::Color32::GRAY));
+            }
+        });
+    }
 
     ui.separator();
 
     // Parameters: each is ● Label: on first line, slider + value on second
-    struct Param<'a> { port: usize, label: &'a str, val: &'a mut f32, min: f32, max: f32, suffix: &'a str }
+    struct Param<'a> { port: usize, label: &'a str, val: &'a mut f32, min: f32, max: f32, suffix: &'a str, kind: PortKind }
     let mut params = [
-        Param { port: 1, label: "Brightness", val: brightness, min: 0.0, max: 3.0, suffix: "" },
-        Param { port: 2, label: "Contrast", val: contrast, min: 0.0, max: 3.0, suffix: "" },
-        Param { port: 3, label: "Saturation", val: saturation, min: 0.0, max: 3.0, suffix: "" },
-        Param { port: 4, label: "Hue", val: hue, min: 0.0, max: 360.0, suffix: "°" },
-        Param { port: 5, label: "Exposure", val: exposure, min: -3.0, max: 3.0, suffix: "" },
-        Param { port: 6, label: "Gamma", val: gamma, min: 0.1, max: 3.0, suffix: "" },
+        Param { port: 1, label: "Brightness", val: brightness, min: 0.0, max: 3.0, suffix: "", kind: PortKind::Normalized },
+        Param { port: 2, label: "Contrast", val: contrast, min: 0.0, max: 3.0, suffix: "", kind: PortKind::Normalized },
+        Param { port: 3, label: "Saturation", val: saturation, min: 0.0, max: 3.0, suffix: "", kind: PortKind::Normalized },
+        Param { port: 4, label: "Hue", val: hue, min: 0.0, max: 360.0, suffix: "°", kind: PortKind::Number },
+        Param { port: 5, label: "Exposure", val: exposure, min: -3.0, max: 3.0, suffix: "", kind: PortKind::Number },
+        Param { port: 6, label: "Gamma", val: gamma, min: 0.1, max: 3.0, suffix: "", kind: PortKind::Number },
     ];
 
     for param in &mut params {
@@ -45,25 +64,7 @@ pub fn render(
 
         // Row 1: ● Label:
         ui.horizontal(|ui| {
-            // Port circle
-            let (rect, response) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
-            let (fill, border) = if response.hovered() || response.dragged() {
-                (egui::Color32::YELLOW, egui::Color32::WHITE)
-            } else if is_wired {
-                (egui::Color32::from_rgb(60, 140, 255), egui::Color32::from_rgb(120, 180, 255))
-            } else {
-                (egui::Color32::from_rgb(70, 75, 85), egui::Color32::from_rgb(120, 125, 135))
-            };
-            ui.painter().circle_filled(rect.center(), 6.0, fill);
-            ui.painter().circle_stroke(rect.center(), 6.0, egui::Stroke::new(2.5, border));
-            port_positions.insert((node_id, param.port, true), rect.center());
-            if response.drag_started() {
-                if let Some(existing) = connections.iter().find(|c| c.to_node == node_id && c.to_port == param.port) {
-                    *dragging_from = Some((existing.from_node, existing.from_port, true));
-                } else {
-                    *dragging_from = Some((node_id, param.port, false));
-                }
-            }
+            super::inline_port_circle(ui, node_id, param.port, true, connections, port_positions, dragging_from, pending_disconnects, param.kind);
 
             ui.label(egui::RichText::new(format!("{}:", param.label)).small());
 
@@ -87,7 +88,14 @@ pub fn render(
 
     // Output port for processed image
     ui.separator();
-    render_output_port(ui, node_id, 0, "Image", connections, values, port_positions, dragging_from);
+    {
+        let v = values.get(&(node_id, 0));
+        let val_str = match v {
+            Some(PortValue::Image(img)) => format!("[{}x{}]", img.width, img.height),
+            _ => "—".to_string(),
+        };
+        super::output_port_row(ui, "Image", &val_str, node_id, 0, port_positions, dragging_from, connections, pending_disconnects, PortKind::Image);
+    }
 
     // Preview info
     let input_val = Graph::static_input_value(connections, values, node_id, 0);
@@ -96,90 +104,6 @@ pub fn render(
     } else {
         ui.colored_label(egui::Color32::GRAY, "Connect image input");
     }
-}
-
-/// Render an input port with label
-fn render_image_port(
-    ui: &mut egui::Ui,
-    node_id: NodeId,
-    port: usize,
-    label: &str,
-    connections: &[Connection],
-    values: &HashMap<(NodeId, usize), PortValue>,
-    port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
-    dragging_from: &mut Option<(NodeId, usize, bool)>,
-) {
-    let is_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == port);
-    ui.horizontal(|ui| {
-        let (rect, response) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
-        let (fill, border) = if response.hovered() || response.dragged() {
-            (egui::Color32::YELLOW, egui::Color32::WHITE)
-        } else if is_wired {
-            (egui::Color32::from_rgb(60, 140, 255), egui::Color32::from_rgb(120, 180, 255))
-        } else {
-            (egui::Color32::from_rgb(70, 75, 85), egui::Color32::from_rgb(120, 125, 135))
-        };
-        ui.painter().circle_filled(rect.center(), 6.0, fill);
-        ui.painter().circle_stroke(rect.center(), 6.0, egui::Stroke::new(2.5, border));
-        port_positions.insert((node_id, port, true), rect.center());
-        if response.drag_started() {
-            if let Some(existing) = connections.iter().find(|c| c.to_node == node_id && c.to_port == port) {
-                *dragging_from = Some((existing.from_node, existing.from_port, true));
-            } else {
-                *dragging_from = Some((node_id, port, false));
-            }
-        }
-
-        ui.label(egui::RichText::new(format!("{}:", label)).small());
-        if is_wired {
-            let v = Graph::static_input_value(connections, values, node_id, port);
-            match &v {
-                PortValue::Image(img) => {
-                    ui.label(egui::RichText::new(format!("[{}x{}]", img.width, img.height))
-                        .small().color(egui::Color32::from_rgb(80, 170, 255)));
-                }
-                _ => { ui.label(egui::RichText::new("—").small()); }
-            }
-        } else {
-            ui.label(egui::RichText::new("—").small().color(egui::Color32::GRAY));
-        }
-    });
-}
-
-/// Render an output port with label
-fn render_output_port(
-    ui: &mut egui::Ui,
-    node_id: NodeId,
-    port: usize,
-    label: &str,
-    _connections: &[Connection],
-    values: &HashMap<(NodeId, usize), PortValue>,
-    port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
-    dragging_from: &mut Option<(NodeId, usize, bool)>,
-) {
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(format!("{}:", label)).small());
-        let v = values.get(&(node_id, port));
-        match v {
-            Some(PortValue::Image(img)) => {
-                ui.label(egui::RichText::new(format!("[{}x{}]", img.width, img.height))
-                    .small().color(egui::Color32::from_rgb(80, 170, 255)));
-            }
-            _ => { ui.label(egui::RichText::new("—").small()); }
-        }
-        let (rect, response) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
-        let (fill, border) = if response.hovered() || response.dragged() {
-            (egui::Color32::YELLOW, egui::Color32::WHITE)
-        } else {
-            (egui::Color32::from_rgb(60, 140, 255), egui::Color32::from_rgb(120, 180, 255))
-        };
-        ui.painter().circle_filled(rect.center(), 6.0, fill);
-        ui.painter().circle_stroke(rect.center(), 6.0, egui::Stroke::new(2.5, border));
-        port_positions.insert((node_id, port, false), rect.center());
-        if response.drag_started() {
-            *dragging_from = Some((node_id, port, true));
-        }
-    });
 }
 
 /// Process image with effects. Works on full resolution.

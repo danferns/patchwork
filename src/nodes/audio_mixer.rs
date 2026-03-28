@@ -104,27 +104,10 @@ pub fn render(
     ui.separator();
 
     // ── Output port (right-aligned) ───────────────────────────────────
-    ui.horizontal(|ui| {
-        let label = "Mix Out";
-        let port_w = 14.0;
-        let avail = ui.available_width() - port_w;
-        let text_w = ui.fonts(|f| f.layout_no_wrap(label.to_string(), egui::FontId::new(11.0, egui::FontFamily::Proportional), egui::Color32::WHITE).size().x);
-        let space = (avail - text_w).max(0.0);
-        if space > 0.0 { ui.add_space(space); }
-        ui.label(egui::RichText::new(label).small());
-        crate::nodes::inline_port_circle(
-            ui, node_id, 0, false, connections,
-            port_positions, dragging_from, pending_disconnects, PortKind::Audio,
-        );
-    });
-
-    // ── Update audio mixer ────────────────────────────────────────────
-    let mut mixer_inputs: Vec<(NodeId, f32)> = Vec::new();
-    for ch in 0..*channel_count {
-        let audio_port = ch * 2;
-        if let Some(conn) = connections.iter().find(|c| c.to_node == node_id && c.to_port == audio_port) {
-            mixer_inputs.push((conn.from_node, gains[ch]));
-        }
-    }
-    audio.set_mixer(node_id, mixer_inputs);
+    crate::nodes::audio_port_row(ui, "Mix Out", node_id, 0, false, port_positions, dragging_from, connections, pending_disconnects, PortKind::Audio);
+    // Mixer source registration is handled by build_audio_chains() in app/mod.rs,
+    // which correctly walks backward through effect nodes to find the actual Synth sources.
+    // Calling set_mixer() here would incorrectly register effect nodes (e.g. Delay) as
+    // mixer inputs instead of the actual audio sources.
+    let _ = audio; // suppress unused warning
 }

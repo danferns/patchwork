@@ -17,7 +17,7 @@ pub fn render(
     pending_disconnects: &mut Vec<(NodeId, usize)>,
 ) {
     let dim = egui::Color32::from_rgb(140, 140, 140);
-    let accent = egui::Color32::from_rgb(220, 180, 60);
+    let _accent = egui::Color32::from_rgb(220, 180, 60);
 
     // ── Input ports ───────────────────────────────────────────────────
     // Port 0: Value (Number)

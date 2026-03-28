@@ -43,7 +43,7 @@ fn evaluate_formula(formula: &str, var_values: &HashMap<char, f64>) -> Result<f6
 
     for &ch in var_names.iter().rev() {
         // Only replace standalone letters (not inside function names)
-        let from = ch.to_string();
+        let _from = ch.to_string();
         let to = format!("_var_{}_", ch.to_ascii_lowercase());
         // Simple replacement — assumes single uppercase letters are variables
         let mut result = String::new();
@@ -124,6 +124,7 @@ pub fn render(
     connections: &[Connection],
     port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
     dragging_from: &mut Option<(NodeId, usize, bool)>,
+    pending_disconnects: &mut Vec<(NodeId, usize)>,
 ) {
     // ── Input ports (one per detected variable) ─────────────
     let mut var_values: HashMap<char, f64> = HashMap::new();
@@ -137,25 +138,7 @@ pub fn render(
         var_values.insert(ch, val);
 
         ui.horizontal(|ui| {
-            // Port circle
-            let (rect, response) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click_and_drag());
-            let (fill, border) = if response.hovered() || response.dragged() {
-                (egui::Color32::YELLOW, egui::Color32::WHITE)
-            } else if is_wired {
-                (egui::Color32::from_rgb(60, 140, 255), egui::Color32::from_rgb(120, 180, 255))
-            } else {
-                (egui::Color32::from_rgb(70, 75, 85), egui::Color32::from_rgb(120, 125, 135))
-            };
-            ui.painter().circle_filled(rect.center(), 5.0, fill);
-            ui.painter().circle_stroke(rect.center(), 5.0, egui::Stroke::new(1.5, border));
-            port_positions.insert((node_id, i, true), rect.center());
-            if response.drag_started() {
-                if let Some(existing) = connections.iter().find(|c| c.to_node == node_id && c.to_port == i) {
-                    *dragging_from = Some((existing.from_node, existing.from_port, true));
-                } else {
-                    *dragging_from = Some((node_id, i, false));
-                }
-            }
+            super::inline_port_circle(ui, node_id, i, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Number);
 
             ui.label(egui::RichText::new(format!("{}", ch)).strong());
             ui.label(egui::RichText::new(format!("{:.3}", val)).monospace().small().color(egui::Color32::GRAY));
@@ -196,25 +179,7 @@ pub fn render(
 
     // ── Result display ──────────────────────────────────────
     if error.is_empty() {
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(format!("= {:.4}", result)).monospace().strong().size(15.0));
-
-            // Output port
-            let remaining = ui.available_width() - 14.0;
-            if remaining > 0.0 { ui.add_space(remaining); }
-            let (rect, response) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::click_and_drag());
-            let (fill, border) = if response.hovered() || response.dragged() {
-                (egui::Color32::YELLOW, egui::Color32::WHITE)
-            } else {
-                (egui::Color32::from_rgb(60, 140, 255), egui::Color32::from_rgb(120, 180, 255))
-            };
-            ui.painter().circle_filled(rect.center(), 5.0, fill);
-            ui.painter().circle_stroke(rect.center(), 5.0, egui::Stroke::new(1.5, border));
-            port_positions.insert((node_id, 0, false), rect.center());
-            if response.drag_started() {
-                *dragging_from = Some((node_id, 0, true));
-            }
-        });
+        super::output_port_row(ui, "=", &format!("{:.4}", result), node_id, 0, port_positions, dragging_from, connections, pending_disconnects, PortKind::Number);
     } else {
         ui.colored_label(egui::Color32::from_rgb(255, 100, 100),
             egui::RichText::new(&*error).small());
