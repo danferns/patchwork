@@ -114,6 +114,9 @@ pub fn render(
                     ui.add(egui::Slider::new(drive, 1.0..=20.0));
                 });
             }
+            AudioEffect::ParametricEq { bands, .. } => {
+                ui.label(format!("EQ: {} bands", bands.len()));
+            }
         }
 
         if i < num_effects - 1 {

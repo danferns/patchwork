@@ -61,10 +61,13 @@ impl super::PatchworkApp {
                 let mut last_cat = "";
                 let mut any_shown = false;
 
-                // Place new node at the original double-click position
-                // canvas_pos = (screen_pos - offset) / zoom
-                let spawn_x = (self.node_menu_pos.x - self.canvas_offset.x) / self.canvas_zoom;
-                let mut spawn_y_base = (self.node_menu_pos.y - self.canvas_offset.y) / self.canvas_zoom;
+                // Place new node at the original double-click position.
+                // pointer_latest_pos() returns egui logical coords.
+                // Rendering: egui_pos = canvas_pos + offset/zoom
+                // Inverse:   canvas_pos = egui_pos - offset/zoom
+                let off_e = self.canvas_offset / self.canvas_zoom;
+                let spawn_x = self.node_menu_pos.x - off_e.x;
+                let mut spawn_y_base = self.node_menu_pos.y - off_e.y;
 
                 for entry in &catalog {
                     // Hide system nodes (auto-created, not user-addable)

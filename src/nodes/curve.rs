@@ -163,15 +163,23 @@ pub fn render(
         let sx = rect.left() + pt[0] * size;
         let sy = rect.bottom() - pt[1].clamp(0.0, 1.0) * size;
         let screen_pt = egui::pos2(sx, sy);
-        let hit = response.hover_pos().map(|p| p.distance(screen_pt) < 10.0).unwrap_or(false);
+        let hit = response.hover_pos().map(|p| p.distance(screen_pt) < 14.0).unwrap_or(false);
+        let is_active = active_drag == Some(i);
 
-        let color = if hit || active_drag == Some(i) {
-            egui::Color32::WHITE
+        if is_active {
+            // Active/dragging: bright glow ring
+            painter.circle_filled(screen_pt, 12.0, egui::Color32::from_rgba_premultiplied(100, 200, 160, 30));
+            painter.circle_filled(screen_pt, 8.0, egui::Color32::WHITE);
+            painter.circle_stroke(screen_pt, 8.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 220, 160)));
+        } else if hit {
+            // Hovered: slightly larger + bright
+            painter.circle_filled(screen_pt, 7.5, egui::Color32::from_rgb(220, 240, 230));
+            painter.circle_stroke(screen_pt, 7.5, egui::Stroke::new(1.5, egui::Color32::from_rgb(100, 200, 160)));
         } else {
-            egui::Color32::from_rgb(160, 200, 180)
-        };
-        painter.circle_filled(screen_pt, 5.0, color);
-        painter.circle_stroke(screen_pt, 5.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 80, 80)));
+            // Default: solid, easy to see
+            painter.circle_filled(screen_pt, 6.5, egui::Color32::from_rgb(160, 200, 180));
+            painter.circle_stroke(screen_pt, 6.5, egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 100, 90)));
+        }
 
         if hit && response.drag_started() {
             dragged_idx = Some(i);

@@ -25,15 +25,35 @@ pub fn render(
     let is_playing = audio.file_playing.get(&node_id).copied().unwrap_or(false);
     let is_paused = audio.is_file_paused(node_id);
 
-    // Auto-detect duration when file is loaded but duration unknown
+    // Auto-detect duration when file is loaded but duration unknown.
+    // Uses a background thread to avoid blocking the UI — checks once, stores result.
     if !file_path.is_empty() && *duration_secs <= 0.0 {
         let cached = audio.get_file_duration(node_id);
         if cached > 0.0 {
             *duration_secs = cached;
         } else {
-            // Use Symphonia to probe file for duration (fast metadata read)
-            if let Some(dur) = crate::audio::probe_file_duration(file_path) {
-                *duration_secs = dur;
+            // Check if a background probe is already running or completed
+            let probe_id = egui::Id::new(("duration_probe", node_id));
+            let probe_result: Option<f64> = ui.ctx().data_mut(|d| d.get_temp(probe_id));
+            match probe_result {
+                Some(dur) if dur > 0.0 => {
+                    *duration_secs = dur;
+                    audio.file_durations.insert(node_id, dur);
+                }
+                Some(_) => {} // Probe returned 0 or failed — don't retry
+                None => {
+                    // Spawn background probe (runs once)
+                    let path = file_path.clone();
+                    let ctx = ui.ctx().clone();
+                    let pid = probe_id;
+                    std::thread::spawn(move || {
+                        let dur = crate::audio::probe_file_duration(&path).unwrap_or(0.0);
+                        ctx.data_mut(|d| d.insert_temp(pid, dur));
+                        ctx.request_repaint();
+                    });
+                    // Mark as "probing" so we don't spawn again
+                    ui.ctx().data_mut(|d| d.insert_temp(probe_id, -1.0f64));
+                }
             }
         }
     }

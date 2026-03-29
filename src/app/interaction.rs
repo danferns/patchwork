@@ -104,7 +104,7 @@ impl super::PatchworkApp {
         let no_focus = ctx.memory(|mem| mem.focused().is_none());
         let cmd = modifiers.mac_cmd || modifiers.ctrl;
         if no_focus && cmd {
-            // Cmd+N → New project
+            // Cmd+N → New project (fresh graph + randomised accent color)
             if ctx.input(|i| i.key_pressed(egui::Key::N)) {
                 self.push_undo();
                 self.graph = crate::graph::Graph::new();
@@ -112,6 +112,15 @@ impl super::PatchworkApp {
                 self.pinned_nodes.clear();
                 self.undo_history.clear();
                 self.spawn_default_nodes();
+                // Randomise accent on any Theme node (or apply to egui temp for next Theme creation)
+                let new_accent = crate::nodes::theme::random_accent();
+                for node in self.graph.nodes.values_mut() {
+                    if let NodeType::Theme { accent, .. } = &mut node.node_type {
+                        *accent = new_accent;
+                    }
+                }
+                // Store for nodes/wires that read accent from egui temp data
+                ctx.data_mut(|d| d.insert_temp(egui::Id::new("theme_accent"), new_accent));
             }
             // Cmd+O → Open project
             if ctx.input(|i| i.key_pressed(egui::Key::O)) {
@@ -280,6 +289,9 @@ impl super::PatchworkApp {
                     if let Some(node) = self.graph.nodes.get(&id) {
                         (node.pos[0] + 30.0, node.pos[1] + 30.0)
                     } else {
+                        // pointer_latest_pos() is in egui logical coords.
+                        // Rendering: egui_pos = canvas_pos + offset/zoom
+                        // Inverse:   canvas_pos = egui_pos - offset/zoom
                         let pos = ctx.pointer_latest_pos().unwrap_or(egui::pos2(200.0, 200.0));
                         let off_e = self.canvas_offset / self.canvas_zoom;
                         (pos.x - off_e.x + 20.0, pos.y - off_e.y + 20.0)

@@ -449,6 +449,32 @@ pub fn apply(
 // ── Defaults & Presets ───────────────────────────────────────────────────
 
 /// The canonical defaults — used by Reset button and initial Theme node creation
+/// Generate a random accent color by picking a random hue with fixed saturation/lightness.
+/// Produces vibrant, readable colors on dark backgrounds every time.
+pub fn random_accent() -> [u8; 3] { random_accent_color() }
+
+fn random_accent_color() -> [u8; 3] {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let seed = SystemTime::now().duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos()).unwrap_or(0);
+    let hue = (seed % 360) as f32; // 0–359 degrees
+    let s = 0.7_f32;  // saturation
+    let l = 0.65_f32; // lightness
+    // HSL to RGB
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - ((hue / 60.0) % 2.0 - 1.0).abs());
+    let m = l - c / 2.0;
+    let (r, g, b) = match hue as u32 {
+        0..=59 => (c, x, 0.0),
+        60..=119 => (x, c, 0.0),
+        120..=179 => (0.0, c, x),
+        180..=239 => (0.0, x, c),
+        240..=299 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    [((r + m) * 255.0) as u8, ((g + m) * 255.0) as u8, ((b + m) * 255.0) as u8]
+}
+
 pub fn apply_defaults(
     dark_mode: &mut bool, bg_color: &mut [u8; 3], text_color: &mut [u8; 3],
     window_bg: &mut [u8; 3], window_alpha: &mut u8, grid_color: &mut [u8; 3],
@@ -456,10 +482,11 @@ pub fn apply_defaults(
     wire_thickness: &mut f32, grid_style: &mut u8, wire_style: &mut u8,
 ) {
     *dark_mode = true;
-    *bg_color = [30, 30, 30]; *text_color = [220, 220, 220];
-    *accent = [80, 160, 255];
-    *window_bg = [40, 40, 40]; *window_alpha = 240;
-    *grid_color = [12, 12, 12];
+    *bg_color = [20, 20, 20]; *text_color = [220, 220, 220];
+    // Randomise accent hue — keeps saturation ~70% and lightness ~65% for readability
+    *accent = random_accent_color();
+    *window_bg = [24, 24, 24]; *window_alpha = 240;
+    *grid_color = [28, 28, 28];
     *font_size = 14.0; *rounding = 16.0; *spacing = 4.0;
     *wire_thickness = 6.0; *grid_style = 2; *wire_style = 0;
 }

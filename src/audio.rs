@@ -107,8 +107,9 @@ pub struct FilePlayerBuffer {
     pub paused: AtomicBool,
     /// UI signals decode thread to seek
     pub seek_requested: AtomicBool,
-    /// Target seek position in seconds (Mutex OK — only read by decode thread, not audio thread)
-    pub seek_target_secs: Mutex<f64>,
+    /// Target seek position in milliseconds (atomic — no mutex needed).
+    /// Stored as u64 milliseconds to avoid needing AtomicF64.
+    pub seek_target_ms: AtomicUsize,
     /// UI signals decode thread to stop
     pub stop_requested: AtomicBool,
     /// File's native sample rate (set once by decode thread on open)
@@ -135,7 +136,7 @@ impl FilePlayerBuffer {
             finished: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             seek_requested: AtomicBool::new(false),
-            seek_target_secs: Mutex::new(0.0),
+            seek_target_ms: AtomicUsize::new(0),
             stop_requested: AtomicBool::new(false),
             file_sample_rate: AtomicU32::new(44100),
             playback_position: AtomicUsize::new(0),
@@ -277,6 +278,165 @@ fn fastrand_f32() -> f32 {
     })
 }
 
+// ── Biquad Filter (2nd-order IIR) ────────────────────────────────────────────
+
+/// Standard biquad filter — the building block for parametric EQ.
+/// Coefficients from Robert Bristow-Johnson's Audio EQ Cookbook.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct BiquadFilter {
+    pub b0: f32, pub b1: f32, pub b2: f32,
+    pub a1: f32, pub a2: f32,
+    #[serde(skip)] x1: f32,
+    #[serde(skip)] x2: f32,
+    #[serde(skip)] y1: f32,
+    #[serde(skip)] y2: f32,
+}
+
+impl BiquadFilter {
+    /// Create a peaking EQ biquad filter.
+    /// freq: center frequency (Hz), gain_db: boost/cut in dB, q: bandwidth, sr: sample rate
+    pub fn peaking_eq(freq: f32, gain_db: f32, q: f32, sr: f32) -> Self {
+        let a = 10.0_f32.powf(gain_db / 40.0);
+        let w0 = std::f32::consts::TAU * freq / sr;
+        let sin_w0 = w0.sin();
+        let cos_w0 = w0.cos();
+        let alpha = sin_w0 / (2.0 * q);
+
+        let b0 = 1.0 + alpha * a;
+        let b1 = -2.0 * cos_w0;
+        let b2 = 1.0 - alpha * a;
+        let a0 = 1.0 + alpha / a;
+        let a1 = -2.0 * cos_w0;
+        let a2 = 1.0 - alpha / a;
+
+        Self {
+            b0: b0 / a0, b1: b1 / a0, b2: b2 / a0,
+            a1: a1 / a0, a2: a2 / a0,
+            x1: 0.0, x2: 0.0, y1: 0.0, y2: 0.0,
+        }
+    }
+
+    /// Create a low shelf biquad filter.
+    pub fn low_shelf(freq: f32, gain_db: f32, sr: f32) -> Self {
+        let a = 10.0_f32.powf(gain_db / 40.0);
+        let w0 = std::f32::consts::TAU * freq / sr;
+        let sin_w0 = w0.sin();
+        let cos_w0 = w0.cos();
+        let alpha = sin_w0 / 2.0 * ((a + 1.0 / a) * (1.0 / 0.7 - 1.0) + 2.0).sqrt(); // S=0.7
+        let two_sqrt_a_alpha = 2.0 * a.sqrt() * alpha;
+
+        let b0 = a * ((a + 1.0) - (a - 1.0) * cos_w0 + two_sqrt_a_alpha);
+        let b1 = 2.0 * a * ((a - 1.0) - (a + 1.0) * cos_w0);
+        let b2 = a * ((a + 1.0) - (a - 1.0) * cos_w0 - two_sqrt_a_alpha);
+        let a0 = (a + 1.0) + (a - 1.0) * cos_w0 + two_sqrt_a_alpha;
+        let a1 = -2.0 * ((a - 1.0) + (a + 1.0) * cos_w0);
+        let a2 = (a + 1.0) + (a - 1.0) * cos_w0 - two_sqrt_a_alpha;
+
+        Self {
+            b0: b0 / a0, b1: b1 / a0, b2: b2 / a0,
+            a1: a1 / a0, a2: a2 / a0,
+            x1: 0.0, x2: 0.0, y1: 0.0, y2: 0.0,
+        }
+    }
+
+    /// Create a high shelf biquad filter.
+    pub fn high_shelf(freq: f32, gain_db: f32, sr: f32) -> Self {
+        let a = 10.0_f32.powf(gain_db / 40.0);
+        let w0 = std::f32::consts::TAU * freq / sr;
+        let sin_w0 = w0.sin();
+        let cos_w0 = w0.cos();
+        let alpha = sin_w0 / 2.0 * ((a + 1.0 / a) * (1.0 / 0.7 - 1.0) + 2.0).sqrt();
+        let two_sqrt_a_alpha = 2.0 * a.sqrt() * alpha;
+
+        let b0 = a * ((a + 1.0) + (a - 1.0) * cos_w0 + two_sqrt_a_alpha);
+        let b1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cos_w0);
+        let b2 = a * ((a + 1.0) + (a - 1.0) * cos_w0 - two_sqrt_a_alpha);
+        let a0 = (a + 1.0) - (a - 1.0) * cos_w0 + two_sqrt_a_alpha;
+        let a1 = 2.0 * ((a - 1.0) - (a + 1.0) * cos_w0);
+        let a2 = (a + 1.0) - (a - 1.0) * cos_w0 - two_sqrt_a_alpha;
+
+        Self {
+            b0: b0 / a0, b1: b1 / a0, b2: b2 / a0,
+            a1: a1 / a0, a2: a2 / a0,
+            x1: 0.0, x2: 0.0, y1: 0.0, y2: 0.0,
+        }
+    }
+
+    /// Bypass filter (unity pass-through).
+    #[allow(dead_code)]
+    pub fn bypass() -> Self {
+        Self { b0: 1.0, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.0, x1: 0.0, x2: 0.0, y1: 0.0, y2: 0.0 }
+    }
+
+    /// Process a single sample through this biquad.
+    #[inline]
+    pub fn process(&mut self, x: f32) -> f32 {
+        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
+                            - self.a1 * self.y1 - self.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = y;
+        y
+    }
+}
+
+/// Build a bank of biquad filters from EQ curve points.
+/// Points are in normalized coords: x=0..1 (mapped to 20Hz..20kHz log), y=0..1 (mapped to -24..+24 dB).
+/// Samples the curve at 10 log-spaced frequency bands.
+pub fn curve_to_eq_bands(points: &[[f32; 2]], sample_rate: f32) -> Vec<BiquadFilter> {
+    // 10 frequency bands on log scale (Hz)
+    let freqs: [f32; 10] = [31.0, 62.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0];
+    let q = 1.4; // moderate bandwidth
+
+    let mut bands = Vec::new();
+    for (i, &freq) in freqs.iter().enumerate() {
+        // Convert frequency to normalized x (0-1, log scale)
+        let x = (freq.ln() - 20.0_f32.ln()) / (20000.0_f32.ln() - 20.0_f32.ln());
+        // Evaluate the curve at this x position
+        let y = evaluate_curve_at(points, x);
+        // Convert y (0-1) to gain in dB (-24 to +24)
+        let gain_db = (y - 0.5) * 48.0; // 0.5 = 0dB, 0.0 = -24dB, 1.0 = +24dB
+
+        if gain_db.abs() > 0.5 {
+            let filter = if i == 0 {
+                BiquadFilter::low_shelf(freq, gain_db, sample_rate)
+            } else if i == freqs.len() - 1 {
+                BiquadFilter::high_shelf(freq, gain_db, sample_rate)
+            } else {
+                BiquadFilter::peaking_eq(freq, gain_db, q, sample_rate)
+            };
+            bands.push(filter);
+        }
+    }
+    bands
+}
+
+/// Simple cubic Hermite interpolation of a curve defined by sorted [x,y] points.
+fn evaluate_curve_at(points: &[[f32; 2]], x: f32) -> f32 {
+    if points.is_empty() { return 0.5; } // flat (0dB)
+    if points.len() == 1 { return points[0][1]; }
+    if x <= points[0][0] { return points[0][1]; }
+    if x >= points.last().unwrap()[0] { return points.last().unwrap()[1]; }
+
+    // Find the segment
+    for i in 0..points.len() - 1 {
+        let x0 = points[i][0];
+        let x1 = points[i + 1][0];
+        if x >= x0 && x <= x1 {
+            let t = if (x1 - x0).abs() < 1e-6 { 0.0 } else { (x - x0) / (x1 - x0) };
+            let y0 = points[i][1];
+            let y1 = points[i + 1][1];
+            // Cubic Hermite smooth interpolation
+            let t2 = t * t;
+            let t3 = t2 * t;
+            let h = 2.0 * t3 - 3.0 * t2 + 1.0;
+            return y0 * h + y1 * (1.0 - h);
+        }
+    }
+    0.5
+}
+
 // ── Audio Effects ────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -286,6 +446,8 @@ pub enum AudioEffect {
     HighPass { cutoff: f32, state: f32 },
     Delay { time_ms: f32, feedback: f32, buffer: Vec<f32>, write_pos: usize },
     Distortion { drive: f32 },              // 1..20
+    /// Parametric EQ — bank of biquad filters derived from curve points.
+    ParametricEq { bands: Vec<BiquadFilter>, curve_hash: u64 },
 }
 
 impl AudioEffect {
@@ -296,6 +458,7 @@ impl AudioEffect {
             AudioEffect::HighPass { .. } => "High Pass",
             AudioEffect::Delay { .. } => "Delay",
             AudioEffect::Distortion { .. } => "Distortion",
+            AudioEffect::ParametricEq { .. } => "Parametric EQ",
         }
     }
 
@@ -320,6 +483,15 @@ impl AudioEffect {
             (AudioEffect::Distortion { drive }, AudioEffect::Distortion { drive: new_drive }) => {
                 *drive = *new_drive;
             }
+            (AudioEffect::ParametricEq { bands, curve_hash },
+             AudioEffect::ParametricEq { bands: new_bands, curve_hash: new_hash }) => {
+                if *curve_hash != *new_hash {
+                    // Curve shape changed — replace filter bank (preserving state where possible)
+                    *bands = new_bands.clone();
+                    *curve_hash = *new_hash;
+                }
+                // If hash unchanged, keep existing bands with their filter state (no clicks)
+            }
             _ => {} // Type mismatch — shouldn't happen if effects_same_types() passed
         }
     }
@@ -332,6 +504,7 @@ impl AudioEffect {
             AudioEffect::HighPass { .. } => 2,
             AudioEffect::Delay { .. } => 3,
             AudioEffect::Distortion { .. } => 4,
+            AudioEffect::ParametricEq { .. } => 5,
         }
     }
 
@@ -370,6 +543,13 @@ impl AudioEffect {
             AudioEffect::Distortion { drive } => {
                 let driven = sample * *drive;
                 driven.tanh()
+            }
+            AudioEffect::ParametricEq { bands, .. } => {
+                let mut s = sample;
+                for band in bands.iter_mut() {
+                    s = band.process(s);
+                }
+                s
             }
         }
     }
@@ -625,7 +805,7 @@ fn decode_file_thread(
             // Check seek signal
             if buffer.seek_requested.load(Ordering::Relaxed) {
                 buffer.seek_requested.store(false, Ordering::Release);
-                let target = *buffer.seek_target_secs.lock().unwrap();
+                let target = buffer.seek_target_ms.load(Ordering::Relaxed) as f64 / 1000.0;
                 let _ = reader.seek(
                     symphonia::core::formats::SeekMode::Coarse,
                     symphonia::core::formats::SeekTo::Time {
@@ -883,8 +1063,9 @@ impl AudioManager {
         let channels = config.channels() as usize;
 
         {
-            let mut s = self.state.lock().unwrap();
-            s.sample_rate = sample_rate;
+            if let Ok(mut s) = self.state.try_lock() {
+                s.sample_rate = sample_rate;
+            }
         }
 
         let state = self.state.clone();
@@ -968,7 +1149,7 @@ impl AudioManager {
         self.input_streams.remove(&node_id); // Drops the stream, stopping capture
         self.input_buffers.remove(&node_id);
         // Remove from audio sources
-        if let Ok(mut s) = self.state.lock() {
+        if let Ok(mut s) = self.state.try_lock() {
             s.sources.remove(&node_id);
         }
     }
@@ -1002,7 +1183,7 @@ impl AudioManager {
 
     /// Remove a source
     pub fn remove_source(&self, node_id: NodeId) {
-        if let Ok(mut s) = self.state.lock() {
+        if let Ok(mut s) = self.state.try_lock() {
             s.sources.remove(&node_id);
             s.effects.remove(&node_id);
         }
@@ -1082,7 +1263,7 @@ impl AudioManager {
         self.stop_file(node_id);
 
         // Get output sample rate from shared state
-        let output_sr = self.state.lock()
+        let output_sr = self.state.try_lock()
             .map(|s| s.sample_rate)
             .unwrap_or(44100.0);
 
@@ -1113,7 +1294,7 @@ impl AudioManager {
             .map_err(|e| format!("Spawn decode thread: {}", e))?;
 
         // Register as audio source so the CPAL callback can render it
-        if let Ok(mut s) = self.state.lock() {
+        if let Ok(mut s) = self.state.try_lock() {
             s.sources.insert(node_id, AudioSource::FilePlayer {
                 buffer: buffer.clone(),
                 volume: 1.0,
@@ -1138,7 +1319,7 @@ impl AudioManager {
     /// Signals the decode thread to seek — no thread restart needed.
     pub fn seek_file(&mut self, node_id: NodeId, _path: &str, position_secs: f64) -> Result<(), String> {
         if let Some(buf) = self.file_buffers.get(&node_id) {
-            *buf.seek_target_secs.lock().unwrap() = position_secs;
+            buf.seek_target_ms.store((position_secs * 1000.0) as usize, Ordering::Release);
             buf.seek_requested.store(true, Ordering::Release);
             self.file_playing.insert(node_id, true);
             Ok(())
@@ -1176,7 +1357,7 @@ impl AudioManager {
             // Use whichever is further ahead — callback_pos when Speaker is consuming,
             // decoded_pos when no Speaker is connected
             let pos = callback_pos.max(decoded_pos);
-            let sr = self.state.lock().map(|s| s.sample_rate).unwrap_or(44100.0) as f64;
+            let sr = self.state.try_lock().map(|s| s.sample_rate).unwrap_or(44100.0) as f64;
             if sr > 0.0 { pos as f64 / sr } else { 0.0 }
         } else {
             0.0
@@ -1214,7 +1395,7 @@ impl AudioManager {
         self.file_looping.remove(&node_id);
         self.file_playing.remove(&node_id);
         // Remove from audio source registry
-        if let Ok(mut s) = self.state.lock() {
+        if let Ok(mut s) = self.state.try_lock() {
             s.sources.remove(&node_id);
         }
     }

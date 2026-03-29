@@ -40,6 +40,7 @@ pub mod audio_delay;
 pub mod audio_distortion;
 pub mod audio_filter;
 pub mod audio_gain;
+pub mod audio_eq;
 pub mod speaker;
 pub mod audio_mixer;
 pub mod audio_input;
@@ -323,6 +324,8 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
             factory: || NodeType::AudioHighPass { cutoff: 200.0 } },
         NodeCatalogEntry { label: "Gain", category: "Audio",
             factory: || NodeType::AudioGain { level: 1.0 } },
+        NodeCatalogEntry { label: "EQ", category: "Audio",
+            factory: || NodeType::AudioEq { points: vec![[0.0, 0.5], [0.25, 0.5], [0.5, 0.5], [0.75, 0.5], [1.0, 0.5]] } },
         NodeCatalogEntry { label: "Speaker", category: "Audio",
             factory: || NodeType::Speaker { active: true, volume: 0.8 } },
         NodeCatalogEntry { label: "Mixer", category: "Audio",
@@ -526,6 +529,7 @@ pub fn render_content(
         NodeType::AudioLowPass { cutoff } => audio_filter::render_lpf(ui, cutoff, node_id, values, connections, port_positions, dragging_from, pending_disconnects),
         NodeType::AudioHighPass { cutoff } => audio_filter::render_hpf(ui, cutoff, node_id, values, connections, port_positions, dragging_from, pending_disconnects),
         NodeType::AudioGain { level } => audio_gain::render(ui, level, node_id, values, connections, port_positions, dragging_from, pending_disconnects),
+        NodeType::AudioEq { points } => audio_eq::render(ui, node_id, points, port_positions, dragging_from, connections, pending_disconnects),
         NodeType::Speaker { active, volume } => speaker::render(ui, active, volume, node_id, values, connections, audio_manager, port_positions, dragging_from, pending_disconnects),
         NodeType::AudioMixer { channel_count, gains } =>
             audio_mixer::render(ui, channel_count, gains, node_id, values, connections, port_positions, dragging_from, pending_disconnects, audio_manager),

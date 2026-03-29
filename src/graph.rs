@@ -3,11 +3,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 fn default_true() -> bool { true }
-fn default_bg_color() -> [u8; 3] { [30, 30, 30] }
+fn default_bg_color() -> [u8; 3] { [20, 20, 20] }
 fn default_text_color() -> [u8; 3] { [220, 220, 220] }
-fn default_window_bg() -> [u8; 3] { [40, 40, 40] }
+fn default_window_bg() -> [u8; 3] { [24, 24, 24] }
 fn default_window_alpha() -> u8 { 240 }
-fn default_grid_color() -> [u8; 3] { [25, 25, 25] }
+fn default_grid_color() -> [u8; 3] { [28, 28, 28] }
 fn default_slider_step() -> f32 { 0.01 }
 fn default_slider_color() -> [u8; 3] { [80, 160, 255] }
 fn default_grid_style() -> u8 { 2 } // Default: Dotted
@@ -685,6 +685,11 @@ pub enum NodeType {
         #[serde(default = "default_one")]
         level: f32,
     },
+    /// Parametric EQ — interactive frequency response curve with biquad filter bank.
+    AudioEq {
+        #[serde(default = "default_eq_points")]
+        points: Vec<[f32; 2]>,
+    },
     Speaker {
         #[serde(default)]
         active: bool,
@@ -968,6 +973,8 @@ fn default_draw_size() -> f32 { 200.0 }
 fn default_draw_width() -> f32 { 2.0 }
 fn default_noise_scale() -> f32 { 5.0 }
 fn default_curve_points() -> Vec<[f32; 2]> { vec![[0.0, 0.0], [1.0, 1.0]] }
+/// Flat EQ: 5 points at 0dB (y=0.5) across the frequency range
+fn default_eq_points() -> Vec<[f32; 2]> { vec![[0.0, 0.5], [0.25, 0.5], [0.5, 0.5], [0.75, 0.5], [1.0, 0.5]] }
 fn default_mixer_channels() -> usize { 2 }
 fn default_mixer_gains() -> Vec<f32> { vec![0.8, 0.8] }
 fn default_440() -> f32 { 440.0 }
@@ -1027,6 +1034,7 @@ impl NodeType {
             NodeType::AudioLowPass { .. } => "Low Pass",
             NodeType::AudioHighPass { .. } => "High Pass",
             NodeType::AudioGain { .. } => "Gain",
+            NodeType::AudioEq { .. } => "EQ",
             NodeType::Speaker { .. } => "Speaker",
             NodeType::AudioMixer { .. } => "Mixer",
             NodeType::RustPlugin { .. } => "Rust Plugin",
@@ -1134,6 +1142,7 @@ impl NodeType {
             NodeType::AudioLowPass { .. } => vec![PortDef::new("Audio", Audio), PortDef::new("Cutoff", Number)],
             NodeType::AudioHighPass { .. } => vec![PortDef::new("Audio", Audio), PortDef::new("Cutoff", Number)],
             NodeType::AudioGain { .. } => vec![PortDef::new("Audio", Audio), PortDef::new("Level", Number)],
+            NodeType::AudioEq { .. } => vec![PortDef::new("Audio", Audio)],
             NodeType::Speaker { .. } => vec![PortDef::new("Audio", Audio), PortDef::new("Volume", Normalized)],
             NodeType::AudioMixer { channel_count, .. } => {
                 // Per channel: Audio input + Gain control input
@@ -1285,6 +1294,7 @@ impl NodeType {
             NodeType::AudioLowPass { .. } => vec![PortDef::new("Audio", Audio)],
             NodeType::AudioHighPass { .. } => vec![PortDef::new("Audio", Audio)],
             NodeType::AudioGain { .. } => vec![PortDef::new("Audio", Audio)],
+            NodeType::AudioEq { .. } => vec![PortDef::new("Audio", Audio)],
             NodeType::Speaker { .. } => vec![],
             NodeType::AudioMixer { .. } => vec![PortDef::new("Mix", Audio)],
             NodeType::RustPlugin { output_names, .. } => {
@@ -1360,6 +1370,7 @@ impl NodeType {
             NodeType::AudioLowPass { .. } => [100, 160, 200],
             NodeType::AudioHighPass { .. } => [200, 160, 100],
             NodeType::AudioGain { .. } => [160, 200, 100],
+            NodeType::AudioEq { .. } => [200, 160, 255],
             NodeType::Speaker { .. } => [80, 200, 80],
             NodeType::AudioMixer { .. } => [160, 120, 220],
             NodeType::RustPlugin { .. } => [255, 120, 50],
@@ -1389,7 +1400,7 @@ impl NodeType {
     /// Whether this node renders its ports inline within the content
     /// instead of as separate lists at top/bottom.
     pub fn inline_ports(&self) -> bool {
-        matches!(self, NodeType::Theme { .. } | NodeType::MidiOut { .. } | NodeType::Synth { .. } | NodeType::WgslViewer { .. } | NodeType::Color { .. } | NodeType::ImageEffects { .. } | NodeType::Slider { .. } | NodeType::Display { .. } | NodeType::VisualOutput { .. } | NodeType::Blend { .. } | NodeType::HttpRequest { .. } | NodeType::AiRequest { .. } | NodeType::Math { .. } | NodeType::AudioDelay { .. } | NodeType::AudioDistortion { .. } | NodeType::AudioLowPass { .. } | NodeType::AudioHighPass { .. } | NodeType::AudioGain { .. } | NodeType::AudioPlayer { .. } | NodeType::Timer { .. } | NodeType::MapRange { .. } | NodeType::StringFormat { .. } | NodeType::SampleHold { .. } | NodeType::Select { .. } | NodeType::Curve { .. } | NodeType::AudioMixer { .. } | NodeType::Gate { .. } | NodeType::Speaker { .. } | NodeType::AudioInput { .. } | NodeType::Crop { .. })
+        matches!(self, NodeType::Theme { .. } | NodeType::MidiOut { .. } | NodeType::Synth { .. } | NodeType::WgslViewer { .. } | NodeType::Color { .. } | NodeType::ImageEffects { .. } | NodeType::Slider { .. } | NodeType::Display { .. } | NodeType::VisualOutput { .. } | NodeType::Blend { .. } | NodeType::HttpRequest { .. } | NodeType::AiRequest { .. } | NodeType::Math { .. } | NodeType::AudioDelay { .. } | NodeType::AudioDistortion { .. } | NodeType::AudioLowPass { .. } | NodeType::AudioHighPass { .. } | NodeType::AudioGain { .. } | NodeType::AudioEq { .. } | NodeType::AudioPlayer { .. } | NodeType::Timer { .. } | NodeType::MapRange { .. } | NodeType::StringFormat { .. } | NodeType::SampleHold { .. } | NodeType::Select { .. } | NodeType::Curve { .. } | NodeType::AudioMixer { .. } | NodeType::Gate { .. } | NodeType::Speaker { .. } | NodeType::AudioInput { .. } | NodeType::Crop { .. })
     }
 
     /// Whether this node skips the standard egui::Window and renders itself completely custom.

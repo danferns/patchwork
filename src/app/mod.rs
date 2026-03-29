@@ -421,6 +421,21 @@ impl PatchworkApp {
                                         NodeType::AudioGain { level } => {
                                             ch_effects.push(AudioEffect::Gain { level: *level });
                                         }
+                                        NodeType::AudioEq { points } => {
+                                            let sr = self.audio.state.try_lock().map(|s| s.sample_rate).unwrap_or(44100.0);
+                                            let bands = crate::audio::curve_to_eq_bands(points, sr);
+                                            let hash = {
+                                                use std::collections::hash_map::DefaultHasher;
+                                                use std::hash::{Hash, Hasher};
+                                                let mut h = DefaultHasher::new();
+                                                for p in points.iter() {
+                                                    p[0].to_bits().hash(&mut h);
+                                                    p[1].to_bits().hash(&mut h);
+                                                }
+                                                h.finish()
+                                            };
+                                            ch_effects.push(AudioEffect::ParametricEq { bands, curve_hash: hash });
+                                        }
                                         _ => {}
                                     }
                                 }
@@ -493,6 +508,21 @@ impl PatchworkApp {
                         NodeType::AudioFx { effects: fx_list } => {
                             effects.extend(fx_list.iter().cloned());
                         }
+                        NodeType::AudioEq { points } => {
+                            let sr = self.audio.state.try_lock().map(|s| s.sample_rate).unwrap_or(44100.0);
+                            let bands = crate::audio::curve_to_eq_bands(points, sr);
+                            let hash = {
+                                use std::collections::hash_map::DefaultHasher;
+                                use std::hash::{Hash, Hasher};
+                                let mut h = DefaultHasher::new();
+                                for p in points.iter() {
+                                    p[0].to_bits().hash(&mut h);
+                                    p[1].to_bits().hash(&mut h);
+                                }
+                                h.finish()
+                            };
+                            effects.push(AudioEffect::ParametricEq { bands, curve_hash: hash });
+                        }
                         _ => {}
                     }
                 }
@@ -512,7 +542,7 @@ impl PatchworkApp {
         }
 
         // ── Phase 2: Apply ALL updates in a single lock ─────────────────
-        if let Ok(mut s) = self.audio.state.lock() {
+        if let Ok(mut s) = self.audio.state.try_lock() {
             // Apply mixer source registrations
             for (mixer_id, inputs) in mixer_updates {
                 s.sources.insert(mixer_id, AudioSource::Mixer { inputs });
@@ -928,19 +958,22 @@ impl PatchworkApp {
                         .unwrap_or([80, 160, 255]);
                     painter.rect_stroke(r.response.rect.expand(2.0), 4.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(sel_accent[0], sel_accent[1], sel_accent[2])), egui::StrokeKind::Outside);
                 }
-                // Pin indicator — single accent-colored icon, no background circle
+                // Pin indicator — solid accent circle with white pin icon
                 if is_pinned {
                     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("pins")));
-                    let badge_pos = egui::pos2(r.response.rect.left() + 10.0, r.response.rect.top() - 6.0);
+                    let badge_center = egui::pos2(r.response.rect.left() + 12.0, r.response.rect.top() - 4.0);
                     let theme_accent = ctx.data_mut(|d| d.get_temp::<[u8; 3]>(egui::Id::new("theme_accent")))
                         .unwrap_or([80, 160, 255]);
                     let accent_color = egui::Color32::from_rgb(theme_accent[0], theme_accent[1], theme_accent[2]);
+                    // Solid accent background circle (24x24 = radius 12)
+                    painter.circle_filled(badge_center, 12.0, accent_color);
+                    // White pin icon on top
                     painter.text(
-                        badge_pos,
+                        badge_center,
                         egui::Align2::CENTER_CENTER,
                         crate::icons::PUSH_PIN,
-                        egui::FontId::proportional(12.0),
-                        accent_color,
+                        egui::FontId::proportional(13.0),
+                        egui::Color32::WHITE,
                     );
                 }
 
@@ -1140,8 +1173,10 @@ impl PatchworkApp {
         // Spawn nodes from Palette clicks (place at center of the current viewport)
         for (_palette_pos, nt) in palette_spawns {
             let screen_center = ctx.screen_rect().center();
-            let cx = (screen_center.x - self.canvas_offset.x) / self.canvas_zoom;
-            let cy = (screen_center.y - self.canvas_offset.y) / self.canvas_zoom;
+            // egui logical coords → canvas: canvas_pos = egui_pos - offset/zoom
+            let off_e = self.canvas_offset / self.canvas_zoom;
+            let cx = screen_center.x - off_e.x;
+            let cy = screen_center.y - off_e.y;
             self.graph.add_node(nt, [cx, cy]);
         }
         // Clear MCP trigger flags on AI Request nodes
