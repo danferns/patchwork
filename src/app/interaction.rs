@@ -540,6 +540,39 @@ impl super::PatchworkApp {
                             self.canvas_zoom = 1.0;
                             keep_open = false;
                         }
+                        ui.separator();
+                        if icon_menu_item(ui, icons::PALETTE, "Theme").clicked() {
+                            // If a Theme node exists, scroll to it; otherwise create one
+                            let existing = self.graph.nodes.iter()
+                                .find(|(_, n)| matches!(n.node_type, NodeType::Theme { .. }))
+                                .map(|(&id, _)| id);
+                            if let Some(theme_id) = existing {
+                                // Scroll canvas to center on the existing Theme node
+                                if let Some(node) = self.graph.nodes.get(&theme_id) {
+                                    let screen_center = ctx.screen_rect().center();
+                                    self.canvas_offset.x = screen_center.x - node.pos[0] * self.canvas_zoom;
+                                    self.canvas_offset.y = screen_center.y - node.pos[1] * self.canvas_zoom;
+                                }
+                                self.selected_nodes.clear();
+                                self.selected_nodes.insert(theme_id);
+                            } else {
+                                // Create new Theme node at click position
+                                let off_e = self.canvas_offset / self.canvas_zoom;
+                                let accent = crate::nodes::theme::random_accent();
+                                let new_id = self.graph.add_node(NodeType::Theme {
+                                    dark_mode: true, accent, font_size: 14.0,
+                                    bg_color: [20, 20, 20], text_color: [220, 220, 220],
+                                    window_bg: [24, 24, 24], window_alpha: 240,
+                                    grid_color: [28, 28, 28], grid_style: 2, wire_style: 0,
+                                    wiggle_gravity: 0.0, wiggle_range: 1.0, wiggle_speed: 1.0,
+                                    rounding: 16.0, spacing: 4.0, use_hsl: false,
+                                    wire_thickness: 6.0, background_path: String::new(),
+                                }, [pos.x - off_e.x, pos.y - off_e.y]);
+                                self.selected_nodes.clear();
+                                self.selected_nodes.insert(new_id);
+                            }
+                            keep_open = false;
+                        }
                     }
                 });
             });

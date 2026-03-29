@@ -328,14 +328,14 @@ pub fn render(
         ui.horizontal(|ui| {
             ui.add_space(12.0);
             ui.label(egui::RichText::new("Range").small().color(egui::Color32::GRAY));
-            ui.add(egui::Slider::new(wiggle_range, 0.1..=12.0).step_by(0.1).show_value(false));
-            ui.add(egui::DragValue::new(wiggle_range).speed(0.1).range(0.1..=12.0).max_decimals(1));
+            ui.add(egui::Slider::new(wiggle_range, 0.0..=16.0).step_by(0.1).show_value(false));
+            ui.add(egui::DragValue::new(wiggle_range).speed(0.1).range(0.0..=16.0).max_decimals(1));
         });
         ui.horizontal(|ui| {
             ui.add_space(12.0);
             ui.label(egui::RichText::new("Speed").small().color(egui::Color32::GRAY));
-            ui.add(egui::Slider::new(wiggle_speed, 0.1..=4.0).step_by(0.05).show_value(false));
-            ui.add(egui::DragValue::new(wiggle_speed).speed(0.05).range(0.1..=4.0).max_decimals(2));
+            ui.add(egui::Slider::new(wiggle_speed, 0.0..=16.0).step_by(0.05).show_value(false));
+            ui.add(egui::DragValue::new(wiggle_speed).speed(0.05).range(0.0..=16.0).max_decimals(2));
         });
     }
 
@@ -417,24 +417,75 @@ pub fn apply(
 
     let bg = egui::Color32::from_rgb(bg_color[0], bg_color[1], bg_color[2]);
     let text = egui::Color32::from_rgb(text_color[0], text_color[1], text_color[2]);
+    let text_dim = egui::Color32::from_rgba_unmultiplied(text_color[0], text_color[1], text_color[2], 140);
     let accent_color = egui::Color32::from_rgb(accent[0], accent[1], accent[2]);
     let win_bg = egui::Color32::from_rgba_unmultiplied(window_bg[0], window_bg[1], window_bg[2], window_alpha);
 
+    // Derive surface colors from BG (lighter shades for interactive elements)
+    let surface_dim = offset_color(bg, if dark_mode { 8 } else { -8 });
+    let surface = offset_color(bg, if dark_mode { 16 } else { -16 });
+    let surface_bright = offset_color(bg, if dark_mode { 28 } else { -28 });
+
+    // ── Backgrounds ──
     visuals.panel_fill = bg;
     visuals.window_fill = win_bg;
-    visuals.faint_bg_color = win_bg;
-    visuals.extreme_bg_color = bg;
-    visuals.override_text_color = Some(text);
-    visuals.selection.bg_fill = accent_color;
-    visuals.hyperlink_color = accent_color;
-    visuals.widgets.hovered.bg_fill = accent_color.gamma_multiply(0.15);
+    visuals.faint_bg_color = surface_dim;
+    visuals.extreme_bg_color = offset_color(bg, if dark_mode { -4 } else { 4 });
 
+    // ── Text ──
+    visuals.override_text_color = Some(text);
+
+    // ── Selection & hyperlinks ──
+    visuals.selection.bg_fill = accent_color.gamma_multiply(0.3);
+    visuals.selection.stroke = egui::Stroke::new(1.5, accent_color);
+    visuals.hyperlink_color = accent_color;
+
+    // ── Window chrome ──
+    visuals.window_stroke = egui::Stroke::new(0.5, surface_bright);
+    visuals.window_shadow = egui::Shadow::NONE;
+    visuals.popup_shadow = egui::Shadow::NONE;
+
+    // ── Widgets: noninteractive (labels, separators, frames) ──
+    visuals.widgets.noninteractive.bg_fill = surface_dim;
+    visuals.widgets.noninteractive.weak_bg_fill = surface_dim;
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(0.5, surface_bright);
+    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, text_dim);
+
+    // ── Widgets: inactive (buttons, sliders at rest) ──
+    visuals.widgets.inactive.bg_fill = surface;
+    visuals.widgets.inactive.weak_bg_fill = surface;
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(0.5, surface_bright);
+    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, text);
+
+    // ── Widgets: hovered ──
+    visuals.widgets.hovered.bg_fill = accent_color.gamma_multiply(0.15);
+    visuals.widgets.hovered.weak_bg_fill = accent_color.gamma_multiply(0.10);
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, accent_color.gamma_multiply(0.5));
+    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.5, text);
+
+    // ── Widgets: active (clicked/dragging) ──
+    visuals.widgets.active.bg_fill = accent_color.gamma_multiply(0.25);
+    visuals.widgets.active.weak_bg_fill = accent_color.gamma_multiply(0.20);
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.5, accent_color);
+    visuals.widgets.active.fg_stroke = egui::Stroke::new(2.0, text);
+
+    // ── Widgets: open (expanded combo boxes, menus) ──
+    visuals.widgets.open.bg_fill = surface;
+    visuals.widgets.open.weak_bg_fill = surface;
+    visuals.widgets.open.bg_stroke = egui::Stroke::new(1.0, accent_color.gamma_multiply(0.4));
+    visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0, text);
+
+    // ── Rounding ──
     let r = egui::CornerRadius::same(rounding as u8);
     visuals.window_corner_radius = r;
     visuals.widgets.noninteractive.corner_radius = r;
     visuals.widgets.inactive.corner_radius = r;
     visuals.widgets.hovered.corner_radius = r;
     visuals.widgets.active.corner_radius = r;
+    visuals.widgets.open.corner_radius = r;
+    visuals.menu_corner_radius = r;
+
+    // ── Scrollbar ──
 
     ctx.set_visuals(visuals);
 
@@ -443,7 +494,21 @@ pub fn apply(
         font_id.size = font_size;
     }
     style.spacing.item_spacing = egui::vec2(spacing, spacing);
+    style.spacing.scroll = egui::style::ScrollStyle {
+        bar_width: 6.0,
+        ..style.spacing.scroll
+    };
     ctx.set_style(style);
+}
+
+/// Offset an RGB color by a fixed amount (positive = brighter, negative = darker)
+fn offset_color(c: egui::Color32, amount: i16) -> egui::Color32 {
+    let clamp = |v: i16| v.clamp(0, 255) as u8;
+    egui::Color32::from_rgb(
+        clamp(c.r() as i16 + amount),
+        clamp(c.g() as i16 + amount),
+        clamp(c.b() as i16 + amount),
+    )
 }
 
 // ── Defaults & Presets ───────────────────────────────────────────────────

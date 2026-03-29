@@ -1,104 +1,5 @@
 {
   "nodes": {
-    "3": {
-      "id": 3,
-      "node_type": {
-        "Slider": {
-          "value": 0.44,
-          "min": 0.0,
-          "max": 5.0,
-          "step": 0.01,
-          "slider_color": [
-            255,
-            160,
-            60
-          ],
-          "label": "Speed"
-        }
-      },
-      "pos": [
-        503.63455,
-        355.73016
-      ]
-    },
-    "101": {
-      "id": 101,
-      "node_type": {
-        "ZoomControl": {
-          "zoom_value": 0.9520552
-        }
-      },
-      "pos": [
-        1575.2283,
-        -168.42609
-      ]
-    },
-    "4": {
-      "id": 4,
-      "node_type": {
-        "Slider": {
-          "value": 0.7,
-          "min": 0.0,
-          "max": 1.0,
-          "step": 0.01,
-          "slider_color": [
-            100,
-            200,
-            255
-          ],
-          "label": "Intensity"
-        }
-      },
-      "pos": [
-        -261.67795,
-        1139.7927
-      ]
-    },
-    "112": {
-      "id": 112,
-      "node_type": {
-        "WgslViewer": {
-          "wgsl_code": "",
-          "uniform_names": [],
-          "uniform_types": [],
-          "uniform_values": [],
-          "uniform_min": [],
-          "uniform_max": [],
-          "canvas_w": 400.0,
-          "canvas_h": 300.0,
-          "resolution": 120,
-          "expanded": false
-        }
-      },
-      "pos": [
-        799.9783,
-        99.94891
-      ]
-    },
-    "114": {
-      "id": 114,
-      "node_type": {
-        "AiRequest": {
-          "provider": "OpenAI",
-          "model": "gpt-4o",
-          "system_prompt": "You are a WGSL shader expert. Return ONLY the @fragment function. Use VertexOutput with uv field. Available uniforms: u.time (float), u.resolution (vec2). Add custom uniforms as u.speed, u.intensity etc. Use select() not ternary. Use & not && for booleans.",
-          "user_prompt": "Create a colorful plasma effect with swirling colors. Use u.speed to control animation speed and u.intensity to control color vibrancy.",
-          "response": "",
-          "status": "",
-          "max_tokens": 1024,
-          "temperature": 0.7,
-          "api_key": "",
-          "response_type": 0,
-          "last_trigger": 0.0,
-          "api_key_name": "",
-          "custom_url": ""
-        }
-      },
-      "pos": [
-        99.94705,
-        199.94891
-      ]
-    },
     "116": {
       "id": 116,
       "node_type": {
@@ -116,8 +17,8 @@
         }
       },
       "pos": [
-        499.94705,
-        449.9489
+        499.93457,
+        450.0866
       ]
     },
     "1": {
@@ -140,8 +41,8 @@
         }
       },
       "pos": [
-        -78.74045,
-        209.54266
+        -78.752945,
+        209.68036
       ]
     },
     "113": {
@@ -161,65 +62,8 @@
         }
       },
       "pos": [
-        99.9783,
-        99.94891
-      ]
-    },
-    "109": {
-      "id": 109,
-      "node_type": {
-        "Speaker": {
-          "active": true,
-          "volume": 0.8
-        }
-      },
-      "pos": [
-        786.572,
-        -143.36359
-      ]
-    },
-    "100": {
-      "id": 100,
-      "node_type": "FileMenu",
-      "pos": [
-        -525.8655,
-        200.19891
-      ]
-    },
-    "108": {
-      "id": 108,
-      "node_type": {
-        "AudioLowPass": {
-          "cutoff": 800.0
-        }
-      },
-      "pos": [
-        382.57205,
-        987.2614
-      ]
-    },
-    "118": {
-      "id": 118,
-      "node_type": {
-        "VisualOutput": {
-          "preview_size": 200.0
-        }
-      },
-      "pos": [
-        799.947,
-        199.94891
-      ]
-    },
-    "111": {
-      "id": 111,
-      "node_type": {
-        "TextEditor": {
-          "content": ""
-        }
-      },
-      "pos": [
-        344.32205,
-        -66.80109
+        99.965805,
+        100.08661
       ]
     },
     "106": {
@@ -232,37 +76,108 @@
         }
       },
       "pos": [
-        459.69705,
-        1415.5427
+        459.68457,
+        1415.6804
       ]
     },
-    "117": {
-      "id": 117,
+    "3": {
+      "id": 3,
       "node_type": {
         "Slider": {
-          "value": 0.8,
+          "value": 0.44,
           "min": 0.0,
-          "max": 2.0,
+          "max": 5.0,
           "step": 0.01,
           "slider_color": [
-            80,
+            255,
             160,
+            60
+          ],
+          "label": "Speed"
+        }
+      },
+      "pos": [
+        503.62207,
+        355.86786
+      ]
+    },
+    "5": {
+      "id": 5,
+      "node_type": {
+        "Comment": {
+          "text": "AI WGSL Generator with Live Controls\n\n1. Paste your OpenAI API key\n2. Edit the prompt — use u.speed, u.intensity for controls\n3. Click Send — AI writes WGSL code\n4. WGSL Viewer auto-detects uniforms from the code\n5. Sliders connect to detected uniform ports\n\nThe viewer scans for u.xxx patterns and creates input ports.\nColor uniforms (u.color_r/g/b) are auto-grouped.\n\nTry prompts like:\n• \"Fractal with u.speed for zoom, u.intensity for glow\"\n• \"Raymarched sphere, u.speed for rotation, u.intensity for specular\"\n• \"Voronoi cells, u.speed for animation, u.intensity for edge glow\"",
+          "bg_color": [
+            45,
+            45,
+            50
+          ]
+        }
+      },
+      "pos": [
+        891.1846,
+        1035.9617
+      ]
+    },
+    "111": {
+      "id": 111,
+      "node_type": {
+        "TextEditor": {
+          "content": ""
+        }
+      },
+      "pos": [
+        344.30957,
+        -66.66339
+      ]
+    },
+    "4": {
+      "id": 4,
+      "node_type": {
+        "Slider": {
+          "value": 0.7,
+          "min": 0.0,
+          "max": 1.0,
+          "step": 0.01,
+          "slider_color": [
+            100,
+            200,
             255
           ],
           "label": "Intensity"
         }
       },
       "pos": [
-        699.947,
-        449.9489
+        -261.69043,
+        1139.9304
       ]
     },
-    "103": {
-      "id": 103,
-      "node_type": "Monitor",
+    "107": {
+      "id": 107,
+      "node_type": {
+        "Synth": {
+          "waveform": "Saw",
+          "frequency": 110.0,
+          "amplitude": 0.6,
+          "active": true,
+          "fm_depth": 0.0
+        }
+      },
       "pos": [
-        641.447,
-        946.85516
+        99.965805,
+        300.0866
+      ]
+    },
+    "109": {
+      "id": 109,
+      "node_type": {
+        "Speaker": {
+          "active": true,
+          "volume": 0.8
+        }
+      },
+      "pos": [
+        786.5596,
+        -143.22589
       ]
     },
     "104": {
@@ -310,63 +225,45 @@
         }
       },
       "pos": [
-        1253.0408,
-        15.823914
+        1253.0283,
+        15.961609
       ]
     },
-    "105": {
-      "id": 105,
+    "100": {
+      "id": 100,
+      "node_type": "FileMenu",
+      "pos": [
+        -525.8779,
+        200.33661
+      ]
+    },
+    "117": {
+      "id": 117,
       "node_type": {
-        "ImageNode": {
-          "path": "/Users/allwinwilliams/Desktop/Screenshot 2026-03-28 at 9.55.11 PM.png",
-          "save_path": "",
-          "preview_size": 150.0
+        "Slider": {
+          "value": 0.8,
+          "min": 0.0,
+          "max": 2.0,
+          "step": 0.01,
+          "slider_color": [
+            80,
+            160,
+            255
+          ],
+          "label": "Intensity"
         }
       },
       "pos": [
-        25.634552,
-        1072.9177
-      ]
-    },
-    "107": {
-      "id": 107,
-      "node_type": {
-        "Synth": {
-          "waveform": "Saw",
-          "frequency": 110.0,
-          "amplitude": 0.6,
-          "active": true,
-          "fm_depth": 0.0
-        }
-      },
-      "pos": [
-        99.9783,
-        299.9489
-      ]
-    },
-    "5": {
-      "id": 5,
-      "node_type": {
-        "Comment": {
-          "text": "AI WGSL Generator with Live Controls\n\n1. Paste your OpenAI API key\n2. Edit the prompt — use u.speed, u.intensity for controls\n3. Click Send — AI writes WGSL code\n4. WGSL Viewer auto-detects uniforms from the code\n5. Sliders connect to detected uniform ports\n\nThe viewer scans for u.xxx patterns and creates input ports.\nColor uniforms (u.color_r/g/b) are auto-grouped.\n\nTry prompts like:\n• \"Fractal with u.speed for zoom, u.intensity for glow\"\n• \"Raymarched sphere, u.speed for rotation, u.intensity for specular\"\n• \"Voronoi cells, u.speed for animation, u.intensity for edge glow\"",
-          "bg_color": [
-            45,
-            45,
-            50
-          ]
-        }
-      },
-      "pos": [
-        891.197,
-        1035.824
+        699.9346,
+        450.0866
       ]
     },
     "110": {
       "id": 110,
       "node_type": "AudioAnalyzer",
       "pos": [
-        349.9783,
-        499.9489
+        349.96582,
+        500.0866
       ]
     },
     "102": {
@@ -377,8 +274,82 @@
         }
       },
       "pos": [
-        -523.4905,
-        659.41766
+        -523.5029,
+        659.55536
+      ]
+    },
+    "115": {
+      "id": 115,
+      "node_type": {
+        "WgslViewer": {
+          "wgsl_code": "",
+          "uniform_names": [],
+          "uniform_types": [],
+          "uniform_values": [],
+          "uniform_min": [],
+          "uniform_max": [],
+          "canvas_w": 400.0,
+          "canvas_h": 300.0,
+          "resolution": 120,
+          "expanded": false
+        }
+      },
+      "pos": [
+        499.93457,
+        200.08661
+      ]
+    },
+    "112": {
+      "id": 112,
+      "node_type": {
+        "WgslViewer": {
+          "wgsl_code": "",
+          "uniform_names": [],
+          "uniform_types": [],
+          "uniform_values": [],
+          "uniform_min": [],
+          "uniform_max": [],
+          "canvas_w": 400.0,
+          "canvas_h": 300.0,
+          "resolution": 120,
+          "expanded": false
+        }
+      },
+      "pos": [
+        799.9658,
+        100.08661
+      ]
+    },
+    "101": {
+      "id": 101,
+      "node_type": {
+        "ZoomControl": {
+          "zoom_value": 0.70538366
+        }
+      },
+      "pos": [
+        1575.2158,
+        -168.28839
+      ]
+    },
+    "108": {
+      "id": 108,
+      "node_type": {
+        "AudioLowPass": {
+          "cutoff": 800.0
+        }
+      },
+      "pos": [
+        382.55957,
+        987.3991
+      ]
+    },
+    "103": {
+      "id": 103,
+      "node_type": "Monitor",
+      "pos": [
+        641.4346,
+        946.99286
       ]
     },
     "2": {
@@ -416,29 +387,58 @@
         }
       },
       "pos": [
-        642.0408,
-        89.82391
+        642.0283,
+        89.96161
       ]
     },
-    "115": {
-      "id": 115,
+    "114": {
+      "id": 114,
       "node_type": {
-        "WgslViewer": {
-          "wgsl_code": "",
-          "uniform_names": [],
-          "uniform_types": [],
-          "uniform_values": [],
-          "uniform_min": [],
-          "uniform_max": [],
-          "canvas_w": 400.0,
-          "canvas_h": 300.0,
-          "resolution": 120,
-          "expanded": false
+        "AiRequest": {
+          "provider": "OpenAI",
+          "model": "gpt-4o",
+          "system_prompt": "You are a WGSL shader expert. Return ONLY the @fragment function. Use VertexOutput with uv field. Available uniforms: u.time (float), u.resolution (vec2). Add custom uniforms as u.speed, u.intensity etc. Use select() not ternary. Use & not && for booleans.",
+          "user_prompt": "Create a colorful plasma effect with swirling colors. Use u.speed to control animation speed and u.intensity to control color vibrancy.",
+          "response": "",
+          "status": "",
+          "max_tokens": 1024,
+          "temperature": 0.7,
+          "api_key": "",
+          "response_type": 0,
+          "last_trigger": 0.0,
+          "api_key_name": "",
+          "custom_url": ""
         }
       },
       "pos": [
-        499.94705,
-        199.94891
+        99.934555,
+        200.08661
+      ]
+    },
+    "118": {
+      "id": 118,
+      "node_type": {
+        "VisualOutput": {
+          "preview_size": 200.0
+        }
+      },
+      "pos": [
+        799.9346,
+        200.08661
+      ]
+    },
+    "105": {
+      "id": 105,
+      "node_type": {
+        "ImageNode": {
+          "path": "/Users/allwinwilliams/Desktop/Screenshot 2026-03-28 at 9.55.11 PM.png",
+          "save_path": "",
+          "preview_size": 150.0
+        }
+      },
+      "pos": [
+        25.622055,
+        1073.0554
       ]
     }
   },
@@ -455,13 +455,6 @@
       "from_port": 0,
       "to_node": 2,
       "to_port": 5,
-      "label": ""
-    },
-    {
-      "from_node": 2,
-      "from_port": 0,
-      "to_node": 104,
-      "to_port": 20,
       "label": ""
     },
     {
@@ -533,7 +526,14 @@
       "to_node": 115,
       "to_port": 0,
       "label": ""
+    },
+    {
+      "from_node": 2,
+      "from_port": 0,
+      "to_node": 104,
+      "to_port": 21,
+      "label": ""
     }
   ],
-  "next_id": 119
+  "next_id": 120
 }

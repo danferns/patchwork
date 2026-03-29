@@ -295,14 +295,18 @@ impl PortKind {
 }
 
 pub struct PortDef {
-    pub name: &'static str,
+    pub name: std::borrow::Cow<'static, str>,
     pub kind: PortKind,
 }
 
 impl PortDef {
-    /// Shorthand for creating a PortDef with a kind
+    /// Create a PortDef with a static name (zero-cost, no allocation)
     pub fn new(name: &'static str, kind: PortKind) -> Self {
-        Self { name, kind }
+        Self { name: std::borrow::Cow::Borrowed(name), kind }
+    }
+    /// Create a PortDef with a dynamic name (owned String, freed on drop)
+    pub fn dynamic(name: String, kind: PortKind) -> Self {
+        Self { name: std::borrow::Cow::Owned(name), kind }
     }
 }
 
@@ -685,6 +689,15 @@ pub enum NodeType {
         #[serde(default = "default_one")]
         level: f32,
     },
+    /// Schroeder reverb — room size, damping, wet/dry mix.
+    AudioReverb {
+        #[serde(default = "default_half")]
+        room_size: f32,
+        #[serde(default = "default_half")]
+        damping: f32,
+        #[serde(default = "default_reverb_mix")]
+        mix: f32,
+    },
     /// Parametric EQ — interactive frequency response curve with biquad filter bank.
     AudioEq {
         #[serde(default = "default_eq_points")]
@@ -979,6 +992,7 @@ fn default_mixer_channels() -> usize { 2 }
 fn default_mixer_gains() -> Vec<f32> { vec![0.8, 0.8] }
 fn default_440() -> f32 { 440.0 }
 fn default_half() -> f32 { 0.5 }
+fn default_reverb_mix() -> f32 { 0.3 }
 fn default_one() -> f32 { 1.0 }
 fn default_mic_gain() -> f32 { 1.0 }
 fn default_point_eight() -> f32 { 0.8 }
@@ -1031,6 +1045,7 @@ impl NodeType {
             NodeType::AudioFx { .. } => "Audio FX",
             NodeType::AudioDelay { .. } => "Delay",
             NodeType::AudioDistortion { .. } => "Distortion",
+            NodeType::AudioReverb { .. } => "Reverb",
             NodeType::AudioLowPass { .. } => "Low Pass",
             NodeType::AudioHighPass { .. } => "High Pass",
             NodeType::AudioGain { .. } => "Gain",
@@ -1071,8 +1086,7 @@ impl NodeType {
             NodeType::Multiply => vec![PortDef::new("A", Number), PortDef::new("B", Number)],
             NodeType::Math { variables, .. } => {
                 variables.iter().map(|c| {
-                    let name: &'static str = Box::leak(format!("{}", c).into_boxed_str());
-                    PortDef::new(name, Number)
+                    PortDef::dynamic(format!("{}", c), Number)
                 }).collect()
             }
             NodeType::File { .. } => vec![],
@@ -1083,11 +1097,11 @@ impl NodeType {
                 for (i, n) in uniform_names.iter().enumerate() {
                     let t = uniform_types.get(i).map(|s| s.as_str()).unwrap_or("float");
                     if t == "color" {
-                        ports.push(PortDef { name: Box::leak(format!("{} R", n).into_boxed_str()), kind: Color });
-                        ports.push(PortDef { name: Box::leak(format!("{} G", n).into_boxed_str()), kind: Color });
-                        ports.push(PortDef { name: Box::leak(format!("{} B", n).into_boxed_str()), kind: Color });
+                        ports.push(PortDef::dynamic(format!("{} R", n), Color));
+                        ports.push(PortDef::dynamic(format!("{} G", n), Color));
+                        ports.push(PortDef::dynamic(format!("{} B", n), Color));
                     } else {
-                        ports.push(PortDef { name: Box::leak(n.clone().into_boxed_str()), kind: Number });
+                        ports.push(PortDef::dynamic(n.clone(), Number));
                     }
                 }
                 ports
@@ -1118,7 +1132,7 @@ impl NodeType {
             NodeType::Console { .. } => vec![],
             NodeType::Monitor => vec![],
             NodeType::OscOut { arg_count, .. } => {
-                (0..*arg_count).map(|i| PortDef { name: Box::leak(format!("Arg {}", i).into_boxed_str()), kind: Generic }).collect()
+                (0..*arg_count).map(|i| PortDef::dynamic(format!("Arg {}", i), Generic)).collect()
             }
             NodeType::OscIn { .. } => vec![],
             NodeType::KeyInput { .. } => vec![],
@@ -1132,13 +1146,14 @@ impl NodeType {
             NodeType::ObJoystick { .. } => vec![],
             NodeType::ObEncoder { .. } => vec![],
             NodeType::Synth { .. } => vec![PortDef::new("Freq", Number), PortDef::new("Amp", Normalized), PortDef::new("Gate", Gate), PortDef::new("FM Wt", Normalized)],
-            NodeType::AudioPlayer { .. } => vec![PortDef::new("Play", Trigger), PortDef::new("Volume", Normalized)],
+            NodeType::AudioPlayer { .. } => vec![PortDef::new("Play", Trigger), PortDef::new("Volume", Normalized), PortDef::new("Seek", Normalized), PortDef::new("Speed", Number)],
             NodeType::AudioInput { .. } => vec![PortDef::new("Gain", Normalized)],
             NodeType::AudioAnalyzer => vec![PortDef::new("Audio", Audio)],
             NodeType::AudioDevice { .. } => vec![],
             NodeType::AudioFx { .. } => vec![PortDef::new("Source", Audio)],
             NodeType::AudioDelay { .. } => vec![PortDef::new("Audio", Audio), PortDef::new("Time", Number), PortDef::new("Feedback", Normalized)],
             NodeType::AudioDistortion { .. } => vec![PortDef::new("Audio", Audio), PortDef::new("Drive", Number)],
+            NodeType::AudioReverb { .. } => vec![PortDef::new("Audio", Audio), PortDef::new("Room", Normalized), PortDef::new("Damp", Normalized), PortDef::new("Mix", Normalized)],
             NodeType::AudioLowPass { .. } => vec![PortDef::new("Audio", Audio), PortDef::new("Cutoff", Number)],
             NodeType::AudioHighPass { .. } => vec![PortDef::new("Audio", Audio), PortDef::new("Cutoff", Number)],
             NodeType::AudioGain { .. } => vec![PortDef::new("Audio", Audio), PortDef::new("Level", Number)],
@@ -1148,13 +1163,13 @@ impl NodeType {
                 // Per channel: Audio input + Gain control input
                 let mut ports = Vec::new();
                 for i in 0..*channel_count {
-                    ports.push(PortDef::new(Box::leak(format!("Ch{}", i + 1).into_boxed_str()), Audio));
-                    ports.push(PortDef::new(Box::leak(format!("Gain{}", i + 1).into_boxed_str()), Normalized));
+                    ports.push(PortDef::dynamic(format!("Ch{}", i + 1), Audio));
+                    ports.push(PortDef::dynamic(format!("Gain{}", i + 1), Normalized));
                 }
                 ports
             }
             NodeType::RustPlugin { input_names, .. } => {
-                input_names.iter().map(|n| PortDef { name: Box::leak(n.clone().into_boxed_str()), kind: Generic }).collect()
+                input_names.iter().map(|n| PortDef::dynamic(n.clone(), Generic)).collect()
             }
             NodeType::McpServer => vec![],
             NodeType::Profiler => vec![],
@@ -1189,7 +1204,7 @@ impl NodeType {
             NodeType::StringFormat { arg_count, .. } => {
                 let mut ports = vec![PortDef::new("Template", Text)];
                 for i in 0..*arg_count {
-                    ports.push(PortDef { name: Box::leak(format!("Arg {}", i).into_boxed_str()), kind: Generic });
+                    ports.push(PortDef::dynamic(format!("Arg {}", i), Generic));
                 }
                 ports
             }
@@ -1200,7 +1215,7 @@ impl NodeType {
                 if !continuous { ports.push(PortDef::new("Exec", Trigger)); }
                 ports.push(PortDef::new("Code", Text));
                 for n in input_names {
-                    ports.push(PortDef { name: Box::leak(n.clone().into_boxed_str()), kind: Generic });
+                    ports.push(PortDef::dynamic(n.clone(), Generic));
                 }
                 ports
             }
@@ -1236,14 +1251,14 @@ impl NodeType {
             NodeType::Monitor => vec![PortDef::new("FPS", Number), PortDef::new("Frame ms", Number), PortDef::new("Nodes", Number)],
             NodeType::OscOut { .. } => vec![],
             NodeType::OscIn { arg_count, .. } => {
-                let mut ports: Vec<PortDef> = (0..*arg_count).map(|i| PortDef { name: Box::leak(format!("Arg {}", i).into_boxed_str()), kind: Generic }).collect();
+                let mut ports: Vec<PortDef> = (0..*arg_count).map(|i| PortDef::dynamic(format!("Arg {}", i), Generic)).collect();
                 ports.push(PortDef::new("Raw", Text));
                 ports.push(PortDef::new("Address", Text));
                 ports
             }
             NodeType::KeyInput { .. } => vec![PortDef::new("Trigger", Trigger), PortDef::new("Held", Gate), PortDef::new("Toggle", Gate)],
             NodeType::Script { output_names, .. } => {
-                output_names.iter().map(|n| PortDef { name: Box::leak(n.clone().into_boxed_str()), kind: Generic }).collect()
+                output_names.iter().map(|n| PortDef::dynamic(n.clone(), Generic)).collect()
             }
             NodeType::Palette { .. } => vec![],
             NodeType::HttpRequest { .. } => vec![PortDef::new("Response", Text), PortDef::new("Status", Text)],
@@ -1258,17 +1273,17 @@ impl NodeType {
                 for (dtype, id) in &sorted {
                     match dtype.as_str() {
                         "joystick" => {
-                            ports.push(PortDef { name: Box::leak(format!("j{}_x", id).into_boxed_str()), kind: Normalized });
-                            ports.push(PortDef { name: Box::leak(format!("j{}_y", id).into_boxed_str()), kind: Normalized });
-                            ports.push(PortDef { name: Box::leak(format!("j{}_btn", id).into_boxed_str()), kind: Gate });
+                            ports.push(PortDef::dynamic(format!("j{}_x", id), Normalized));
+                            ports.push(PortDef::dynamic(format!("j{}_y", id), Normalized));
+                            ports.push(PortDef::dynamic(format!("j{}_btn", id), Gate));
                         }
                         "encoder" => {
-                            ports.push(PortDef { name: Box::leak(format!("e{}_turn", id).into_boxed_str()), kind: Number });
-                            ports.push(PortDef { name: Box::leak(format!("e{}_click", id).into_boxed_str()), kind: Gate });
-                            ports.push(PortDef { name: Box::leak(format!("e{}_pos", id).into_boxed_str()), kind: Number });
+                            ports.push(PortDef::dynamic(format!("e{}_turn", id), Number));
+                            ports.push(PortDef::dynamic(format!("e{}_click", id), Gate));
+                            ports.push(PortDef::dynamic(format!("e{}_pos", id), Number));
                         }
                         other => {
-                            ports.push(PortDef { name: Box::leak(format!("{}{}_{}", &other[..1], id, "val").into_boxed_str()), kind: Number });
+                            ports.push(PortDef::dynamic(format!("{}{}_{}", &other[..1], id, "val"), Number));
                         }
                     }
                 }
@@ -1280,7 +1295,7 @@ impl NodeType {
             NodeType::ObJoystick { .. } => vec![PortDef::new("X", Normalized), PortDef::new("Y", Normalized), PortDef::new("Button", Gate)],
             NodeType::ObEncoder { .. } => vec![PortDef::new("Turn", Number), PortDef::new("Click", Gate), PortDef::new("Position", Number)],
             NodeType::Synth { .. } => vec![PortDef::new("Audio", Audio)],
-            NodeType::AudioPlayer { .. } => vec![PortDef::new("Audio", Audio)],
+            NodeType::AudioPlayer { .. } => vec![PortDef::new("Audio", Audio), PortDef::new("Progress", Normalized)],
             NodeType::AudioInput { .. } => vec![PortDef::new("Audio", Audio)],
             NodeType::AudioAnalyzer => vec![
                 PortDef::new("Amp", Normalized), PortDef::new("Peak", Normalized),
@@ -1291,6 +1306,7 @@ impl NodeType {
             NodeType::AudioFx { .. } => vec![PortDef::new("Audio", Audio)],
             NodeType::AudioDelay { .. } => vec![PortDef::new("Audio", Audio)],
             NodeType::AudioDistortion { .. } => vec![PortDef::new("Audio", Audio)],
+            NodeType::AudioReverb { .. } => vec![PortDef::new("Audio", Audio)],
             NodeType::AudioLowPass { .. } => vec![PortDef::new("Audio", Audio)],
             NodeType::AudioHighPass { .. } => vec![PortDef::new("Audio", Audio)],
             NodeType::AudioGain { .. } => vec![PortDef::new("Audio", Audio)],
@@ -1298,7 +1314,7 @@ impl NodeType {
             NodeType::Speaker { .. } => vec![],
             NodeType::AudioMixer { .. } => vec![PortDef::new("Mix", Audio)],
             NodeType::RustPlugin { output_names, .. } => {
-                output_names.iter().map(|n| PortDef { name: Box::leak(n.clone().into_boxed_str()), kind: Generic }).collect()
+                output_names.iter().map(|n| PortDef::dynamic(n.clone(), Generic)).collect()
             }
             NodeType::McpServer => vec![],
             NodeType::HtmlViewer => vec![PortDef::new("URL", Text)],
@@ -1367,6 +1383,7 @@ impl NodeType {
             NodeType::AudioFx { .. } => [200, 100, 160],
             NodeType::AudioDelay { .. } => [180, 120, 200],
             NodeType::AudioDistortion { .. } => [220, 80, 80],
+            NodeType::AudioReverb { .. } => [120, 140, 220],
             NodeType::AudioLowPass { .. } => [100, 160, 200],
             NodeType::AudioHighPass { .. } => [200, 160, 100],
             NodeType::AudioGain { .. } => [160, 200, 100],
@@ -1400,7 +1417,7 @@ impl NodeType {
     /// Whether this node renders its ports inline within the content
     /// instead of as separate lists at top/bottom.
     pub fn inline_ports(&self) -> bool {
-        matches!(self, NodeType::Theme { .. } | NodeType::MidiOut { .. } | NodeType::Synth { .. } | NodeType::WgslViewer { .. } | NodeType::Color { .. } | NodeType::ImageEffects { .. } | NodeType::Slider { .. } | NodeType::Display { .. } | NodeType::VisualOutput { .. } | NodeType::Blend { .. } | NodeType::HttpRequest { .. } | NodeType::AiRequest { .. } | NodeType::Math { .. } | NodeType::AudioDelay { .. } | NodeType::AudioDistortion { .. } | NodeType::AudioLowPass { .. } | NodeType::AudioHighPass { .. } | NodeType::AudioGain { .. } | NodeType::AudioEq { .. } | NodeType::AudioPlayer { .. } | NodeType::Timer { .. } | NodeType::MapRange { .. } | NodeType::StringFormat { .. } | NodeType::SampleHold { .. } | NodeType::Select { .. } | NodeType::Curve { .. } | NodeType::AudioMixer { .. } | NodeType::Gate { .. } | NodeType::Speaker { .. } | NodeType::AudioInput { .. } | NodeType::Crop { .. })
+        matches!(self, NodeType::Theme { .. } | NodeType::MidiOut { .. } | NodeType::Synth { .. } | NodeType::WgslViewer { .. } | NodeType::Color { .. } | NodeType::ImageEffects { .. } | NodeType::Slider { .. } | NodeType::Display { .. } | NodeType::VisualOutput { .. } | NodeType::Blend { .. } | NodeType::HttpRequest { .. } | NodeType::AiRequest { .. } | NodeType::Math { .. } | NodeType::AudioDelay { .. } | NodeType::AudioDistortion { .. } | NodeType::AudioLowPass { .. } | NodeType::AudioHighPass { .. } | NodeType::AudioGain { .. } | NodeType::AudioReverb { .. } | NodeType::AudioEq { .. } | NodeType::AudioPlayer { .. } | NodeType::Timer { .. } | NodeType::MapRange { .. } | NodeType::StringFormat { .. } | NodeType::SampleHold { .. } | NodeType::Select { .. } | NodeType::Curve { .. } | NodeType::AudioMixer { .. } | NodeType::Gate { .. } | NodeType::Speaker { .. } | NodeType::AudioInput { .. } | NodeType::Crop { .. })
     }
 
     /// Whether this node skips the standard egui::Window and renders itself completely custom.

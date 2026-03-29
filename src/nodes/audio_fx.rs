@@ -29,21 +29,21 @@ pub fn render(
     ui.horizontal(|ui| {
         ui.label("Add:");
         if ui.small_button("Gain").clicked() {
-            effects.push(AudioEffect::Gain { level: 1.0 });
+            effects.push(AudioEffect::Gain { level: crate::audio::SmoothedParam::new(1.0, 5.0) });
         }
         if ui.small_button("LPF").clicked() {
-            effects.push(AudioEffect::LowPass { cutoff: 1000.0, state: 0.0 });
+            effects.push(AudioEffect::LowPass { cutoff: crate::audio::SmoothedParam::new(1000.0, 10.0), state: 0.0 });
         }
         if ui.small_button("HPF").clicked() {
-            effects.push(AudioEffect::HighPass { cutoff: 200.0, state: 0.0 });
+            effects.push(AudioEffect::HighPass { cutoff: crate::audio::SmoothedParam::new(200.0, 10.0), state: 0.0 });
         }
     });
     ui.horizontal(|ui| {
         if ui.small_button("Delay").clicked() {
-            effects.push(AudioEffect::Delay { time_ms: 250.0, feedback: 0.4, buffer: Vec::new(), write_pos: 0 });
+            effects.push(AudioEffect::Delay { time_ms: 250.0, feedback: crate::audio::SmoothedParam::new(0.4, 10.0), buffer: Vec::new(), write_pos: 0 });
         }
         if ui.small_button("Dist").clicked() {
-            effects.push(AudioEffect::Distortion { drive: 2.0 });
+            effects.push(AudioEffect::Distortion { drive: crate::audio::SmoothedParam::new(2.0, 10.0) });
         }
     });
 
@@ -83,19 +83,19 @@ pub fn render(
             AudioEffect::Gain { level } => {
                 ui.horizontal(|ui| {
                     ui.label("Level:");
-                    ui.add(egui::Slider::new(level, 0.0..=2.0));
+                    ui.add(egui::Slider::new(&mut level.target, 0.0..=2.0));
                 });
             }
             AudioEffect::LowPass { cutoff, .. } => {
                 ui.horizontal(|ui| {
                     ui.label("Cutoff:");
-                    ui.add(egui::Slider::new(cutoff, 20.0..=20000.0).logarithmic(true).suffix(" Hz"));
+                    ui.add(egui::Slider::new(&mut cutoff.target, 20.0..=20000.0).logarithmic(true).suffix(" Hz"));
                 });
             }
             AudioEffect::HighPass { cutoff, .. } => {
                 ui.horizontal(|ui| {
                     ui.label("Cutoff:");
-                    ui.add(egui::Slider::new(cutoff, 20.0..=20000.0).logarithmic(true).suffix(" Hz"));
+                    ui.add(egui::Slider::new(&mut cutoff.target, 20.0..=20000.0).logarithmic(true).suffix(" Hz"));
                 });
             }
             AudioEffect::Delay { time_ms, feedback, .. } => {
@@ -105,13 +105,27 @@ pub fn render(
                 });
                 ui.horizontal(|ui| {
                     ui.label("Feedback:");
-                    ui.add(egui::Slider::new(feedback, 0.0..=0.95));
+                    ui.add(egui::Slider::new(&mut feedback.target, 0.0..=0.95));
                 });
             }
             AudioEffect::Distortion { drive } => {
                 ui.horizontal(|ui| {
                     ui.label("Drive:");
-                    ui.add(egui::Slider::new(drive, 1.0..=20.0));
+                    ui.add(egui::Slider::new(&mut drive.target, 1.0..=20.0));
+                });
+            }
+            AudioEffect::Reverb { room_size, damping, mix, .. } => {
+                ui.horizontal(|ui| {
+                    ui.label("Room:");
+                    ui.add(egui::Slider::new(&mut room_size.target, 0.0..=1.0));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Damp:");
+                    ui.add(egui::Slider::new(&mut damping.target, 0.0..=1.0));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Mix:");
+                    ui.add(egui::Slider::new(&mut mix.target, 0.0..=1.0));
                 });
             }
             AudioEffect::ParametricEq { bands, .. } => {

@@ -284,7 +284,7 @@ impl PatchworkApp {
                 rx
             },
             wgpu_render_state,
-            undo_history: UndoHistory::new(100),
+            undo_history: UndoHistory::new(50),
             drag_undo_pushed: false,
             property_undo_pushed: false,
             click_wiring: false,
@@ -307,8 +307,8 @@ impl PatchworkApp {
 
     /// Build audio chains from Speaker nodes backward through effects to sources.
     /// Only sources routed through an active Speaker will produce sound.
-    fn build_audio_chains(&mut self) {
-        use crate::audio::{AudioEffect, AudioSource};
+    fn build_audio_chains(&mut self, values: &std::collections::HashMap<(NodeId, usize), PortValue>) {
+        use crate::audio::{AudioEffect, AudioSource, SmoothedParam};
 
         // ── Phase 1: Collect all chain info without locking audio state ──
         let mut active_sources: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
@@ -330,7 +330,7 @@ impl PatchworkApp {
             };
             if !is_active { continue; }
 
-            let chain = crate::nodes::speaker::trace_audio_chain(speaker_id, &self.graph);
+            let chain = crate::nodes::speaker::trace_audio_chain(speaker_id, &self.graph, values);
             if chain.is_empty() { continue; }
 
             let source_id = chain[0];
@@ -380,7 +380,14 @@ impl PatchworkApp {
                                 matches!(n.node_type, NodeType::Synth { .. } | NodeType::AudioPlayer { .. } | NodeType::AudioMixer { .. } | NodeType::AudioInput { .. })
                             }).unwrap_or(false);
                             if is_source { break; }
-                            match self.graph.connections.iter().find(|c| c.to_node == current && c.to_port == 0) {
+                            // For Select nodes, follow the active input
+                            let follow_port = if let Some(n) = self.graph.nodes.get(&current) {
+                                if matches!(n.node_type, NodeType::Select { .. }) {
+                                    let sel = Graph::static_input_value(&self.graph.connections, values, current, 2).as_float();
+                                    if sel > 0.5 { 1 } else { 0 }
+                                } else { 0 }
+                            } else { 0 };
+                            match self.graph.connections.iter().find(|c| c.to_node == current && c.to_port == follow_port) {
                                 Some(c) => { current = c.from_node; }
                                 None => break,
                             }
@@ -407,19 +414,26 @@ impl PatchworkApp {
                                 if let Some(n) = self.graph.nodes.get(&nid) {
                                     match &n.node_type {
                                         NodeType::AudioDelay { time_ms, feedback } => {
-                                            ch_effects.push(AudioEffect::Delay { time_ms: *time_ms, feedback: *feedback, buffer: Vec::new(), write_pos: 0 });
+                                            ch_effects.push(AudioEffect::Delay { time_ms: *time_ms, feedback: SmoothedParam::new(*feedback, 10.0), buffer: Vec::new(), write_pos: 0 });
                                         }
                                         NodeType::AudioDistortion { drive } => {
-                                            ch_effects.push(AudioEffect::Distortion { drive: *drive });
+                                            ch_effects.push(AudioEffect::Distortion { drive: SmoothedParam::new(*drive, 10.0) });
+                                        }
+                                        NodeType::AudioReverb { room_size, damping, mix } => {
+                                            ch_effects.push(AudioEffect::Reverb {
+                                                room_size: SmoothedParam::new(*room_size, 20.0), damping: SmoothedParam::new(*damping, 20.0), mix: SmoothedParam::new(*mix, 10.0),
+                                                comb_buffers: [vec![], vec![], vec![], vec![]], comb_pos: [0; 4], comb_filter_state: [0.0; 4],
+                                                allpass_buffers: [vec![], vec![]], allpass_pos: [0; 2], initialized: false,
+                                            });
                                         }
                                         NodeType::AudioLowPass { cutoff } => {
-                                            ch_effects.push(AudioEffect::LowPass { cutoff: *cutoff, state: 0.0 });
+                                            ch_effects.push(AudioEffect::LowPass { cutoff: SmoothedParam::new(*cutoff, 10.0), state: 0.0 });
                                         }
                                         NodeType::AudioHighPass { cutoff } => {
-                                            ch_effects.push(AudioEffect::HighPass { cutoff: *cutoff, state: 0.0 });
+                                            ch_effects.push(AudioEffect::HighPass { cutoff: SmoothedParam::new(*cutoff, 10.0), state: 0.0 });
                                         }
                                         NodeType::AudioGain { level } => {
-                                            ch_effects.push(AudioEffect::Gain { level: *level });
+                                            ch_effects.push(AudioEffect::Gain { level: SmoothedParam::new(*level, 5.0) });
                                         }
                                         NodeType::AudioEq { points } => {
                                             let sr = self.audio.state.try_lock().map(|s| s.sample_rate).unwrap_or(44100.0);
@@ -489,21 +503,28 @@ impl PatchworkApp {
                     match &n.node_type {
                         NodeType::AudioDelay { time_ms, feedback } => {
                             effects.push(AudioEffect::Delay {
-                                time_ms: *time_ms, feedback: *feedback,
+                                time_ms: *time_ms, feedback: SmoothedParam::new(*feedback, 10.0),
                                 buffer: Vec::new(), write_pos: 0,
                             });
                         }
                         NodeType::AudioDistortion { drive } => {
-                            effects.push(AudioEffect::Distortion { drive: *drive });
+                            effects.push(AudioEffect::Distortion { drive: SmoothedParam::new(*drive, 10.0) });
+                        }
+                        NodeType::AudioReverb { room_size, damping, mix } => {
+                            effects.push(AudioEffect::Reverb {
+                                room_size: SmoothedParam::new(*room_size, 20.0), damping: SmoothedParam::new(*damping, 20.0), mix: SmoothedParam::new(*mix, 10.0),
+                                comb_buffers: [vec![], vec![], vec![], vec![]], comb_pos: [0; 4], comb_filter_state: [0.0; 4],
+                                allpass_buffers: [vec![], vec![]], allpass_pos: [0; 2], initialized: false,
+                            });
                         }
                         NodeType::AudioLowPass { cutoff } => {
-                            effects.push(AudioEffect::LowPass { cutoff: *cutoff, state: 0.0 });
+                            effects.push(AudioEffect::LowPass { cutoff: SmoothedParam::new(*cutoff, 10.0), state: 0.0 });
                         }
                         NodeType::AudioHighPass { cutoff } => {
-                            effects.push(AudioEffect::HighPass { cutoff: *cutoff, state: 0.0 });
+                            effects.push(AudioEffect::HighPass { cutoff: SmoothedParam::new(*cutoff, 10.0), state: 0.0 });
                         }
                         NodeType::AudioGain { level } => {
-                            effects.push(AudioEffect::Gain { level: *level });
+                            effects.push(AudioEffect::Gain { level: SmoothedParam::new(*level, 5.0) });
                         }
                         NodeType::AudioFx { effects: fx_list } => {
                             effects.extend(fx_list.iter().cloned());
@@ -533,7 +554,7 @@ impl PatchworkApp {
             // rather than a global master_volume that affects all audio.
             if let Some(spk) = self.graph.nodes.get(&speaker_id) {
                 if let NodeType::Speaker { volume, .. } = &spk.node_type {
-                    effects.push(AudioEffect::Gain { level: *volume });
+                    effects.push(AudioEffect::Gain { level: SmoothedParam::new(*volume, 5.0) });
                 }
             }
 
@@ -581,7 +602,40 @@ impl PatchworkApp {
             // Update render_only set
             s.render_only = render_only_sources;
 
-            // Remove stale source chains
+            // Keep actively-playing FilePlayer sources in active_chains even if
+            // they aren't routed through a Speaker.  This ensures the audio callback
+            // keeps consuming from their ring buffer (preventing backpressure stalls)
+            // and the playhead keeps advancing.  Without this, the stale-chain cleanup
+            // removes FilePlayers every frame they're not traced from a Speaker, causing
+            // "plays, stops, plays, stops" stuttering.
+            // Keep actively-playing FilePlayer sources in active_chains even if
+            // they aren't routed through a Speaker — but mark them as render_only
+            // so the audio callback consumes samples (keeping the playhead moving)
+            // without mixing them to the output.  Sound only comes through when
+            // routed: AudioPlayer → [effects] → Speaker.
+            let playing_files: Vec<NodeId> = s.sources.iter()
+                .filter_map(|(&nid, src)| {
+                    if let AudioSource::FilePlayer { buffer, .. } = src {
+                        if !buffer.finished.load(std::sync::atomic::Ordering::Relaxed)
+                            && !buffer.paused.load(std::sync::atomic::Ordering::Relaxed)
+                            && !active_sources.contains(&nid)
+                        {
+                            return Some(nid);
+                        }
+                    }
+                    None
+                })
+                .collect();
+            for nid in playing_files {
+                active_sources.insert(nid);
+                // render_only = consume buffer but don't output sound
+                s.render_only.insert(nid);
+                if !s.active_chains.contains_key(&nid) {
+                    s.active_chains.insert(nid, Vec::new());
+                }
+            }
+
+            // Remove stale source chains (but not actively-playing file players)
             let stale: Vec<NodeId> = s.active_chains.keys()
                 .filter(|id| !active_sources.contains(id))
                 .copied()
@@ -1159,8 +1213,8 @@ impl PatchworkApp {
             self.property_undo_pushed = false;
         }
 
-        // ── Build audio chains from Speaker nodes ────────────────────────
-        self.build_audio_chains();
+        // Audio chains are built after graph evaluation (below) so Select
+        // nodes can be resolved using the current frame's port values.
 
         // Push undo snapshot if any graph mutations are pending
         if !nodes_to_delete.is_empty() || !pending_disconnects.is_empty()
@@ -1259,6 +1313,9 @@ impl eframe::App for PatchworkApp {
 
         let now_secs = self.app_start_instant.elapsed().as_secs_f64();
         let mut values = self.graph.evaluate(now_secs);
+
+        // Build audio chains using evaluated values (Select nodes need Selector value)
+        self.build_audio_chains(&values);
 
         // Inject OB hardware values into the graph (before they're used by downstream nodes)
         // These need a second evaluation pass to propagate through Add/Multiply/etc.
@@ -1593,6 +1650,15 @@ impl eframe::App for PatchworkApp {
                 values.insert((id, 2), PortValue::Float(bass));
                 values.insert((id, 3), PortValue::Float(mid));
                 values.insert((id, 4), PortValue::Float(treble));
+            }
+        }
+
+        // Inject AudioPlayer progress output values
+        for (&id, node) in &self.graph.nodes {
+            if matches!(node.node_type, NodeType::AudioPlayer { .. }) {
+                if let Some(progress) = ctx.data_mut(|d| d.get_temp::<f32>(egui::Id::new(("audio_player_progress", id)))) {
+                    values.insert((id, 1), PortValue::Float(progress));
+                }
             }
         }
 

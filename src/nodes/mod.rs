@@ -45,6 +45,7 @@ pub mod speaker;
 pub mod audio_mixer;
 pub mod audio_input;
 pub mod audio_analyzer;
+pub mod audio_reverb;
 pub mod crop;
 pub mod folder_browser;
 pub mod image_node;
@@ -318,6 +319,8 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
             factory: || NodeType::AudioDelay { time_ms: 250.0, feedback: 0.5 } },
         NodeCatalogEntry { label: "Distortion", category: "Audio",
             factory: || NodeType::AudioDistortion { drive: 4.0 } },
+        NodeCatalogEntry { label: "Reverb", category: "Audio",
+            factory: || NodeType::AudioReverb { room_size: 0.5, damping: 0.5, mix: 0.3 } },
         NodeCatalogEntry { label: "Low Pass", category: "Audio",
             factory: || NodeType::AudioLowPass { cutoff: 1000.0 } },
         NodeCatalogEntry { label: "High Pass", category: "Audio",
@@ -395,14 +398,17 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
         NodeCatalogEntry { label: "Comment", category: "Utility",
             factory: || NodeType::Comment { text: String::new(), bg_color: [45, 45, 50] } },
         NodeCatalogEntry { label: "Theme", category: "Utility",
-            factory: || NodeType::Theme {
-                dark_mode: true, accent: [80, 160, 255], font_size: 14.0,
-                bg_color: [30, 30, 30], text_color: [220, 220, 220],
-                window_bg: [40, 40, 40], window_alpha: 240,
-                grid_color: [12, 12, 12], grid_style: 2, wire_style: 0,
-                wiggle_gravity: 0.0, wiggle_range: 1.0, wiggle_speed: 1.0,
-                rounding: 16.0, spacing: 4.0, use_hsl: false,
-                wire_thickness: 6.0, background_path: String::new(),
+            factory: || {
+                let accent = crate::nodes::theme::random_accent();
+                NodeType::Theme {
+                    dark_mode: true, accent, font_size: 14.0,
+                    bg_color: [20, 20, 20], text_color: [220, 220, 220],
+                    window_bg: [24, 24, 24], window_alpha: 240,
+                    grid_color: [28, 28, 28], grid_style: 2, wire_style: 0,
+                    wiggle_gravity: 0.0, wiggle_range: 1.0, wiggle_speed: 1.0,
+                    rounding: 16.0, spacing: 4.0, use_hsl: false,
+                    wire_thickness: 6.0, background_path: String::new(),
+                }
             } },
         NodeCatalogEntry { label: "Console", category: "Utility",
             factory: || NodeType::Console { messages: Vec::new() } },
@@ -526,6 +532,7 @@ pub fn render_content(
         NodeType::AudioFx { .. } => audio_fx::render(ui, node_id, node_type, values, connections, audio_manager),
         NodeType::AudioDelay { time_ms, feedback } => audio_delay::render(ui, time_ms, feedback, node_id, values, connections, port_positions, dragging_from, pending_disconnects),
         NodeType::AudioDistortion { drive } => audio_distortion::render(ui, drive, node_id, values, connections, port_positions, dragging_from, pending_disconnects),
+        NodeType::AudioReverb { room_size, damping, mix } => audio_reverb::render(ui, node_id, room_size, damping, mix, values, connections, port_positions, dragging_from, pending_disconnects),
         NodeType::AudioLowPass { cutoff } => audio_filter::render_lpf(ui, cutoff, node_id, values, connections, port_positions, dragging_from, pending_disconnects),
         NodeType::AudioHighPass { cutoff } => audio_filter::render_hpf(ui, cutoff, node_id, values, connections, port_positions, dragging_from, pending_disconnects),
         NodeType::AudioGain { level } => audio_gain::render(ui, level, node_id, values, connections, port_positions, dragging_from, pending_disconnects),

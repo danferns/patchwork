@@ -93,17 +93,33 @@ pub fn render(
 /// Returns: Vec of NodeId from source → effects (NOT including Speaker itself).
 /// Stops at audio source nodes (Synth, AudioPlayer, AudioMixer) — does NOT walk through their
 /// parameter inputs (Freq, Amp, etc.), only through Audio pass-through ports.
+/// `values` is used to resolve Select nodes (which input is active).
 pub fn trace_audio_chain(
     speaker_id: NodeId,
     graph: &Graph,
+    values: &std::collections::HashMap<(NodeId, usize), PortValue>,
 ) -> Vec<NodeId> {
     let mut chain = Vec::new();
     let mut current = speaker_id;
 
     // Walk backward through "Audio" input ports (port 0 for all audio nodes)
     loop {
-        // Find what's connected to current node's port 0 (Audio input)
-        let source = graph.connections.iter().find(|c| c.to_node == current && c.to_port == 0);
+        // Determine which input port to follow backward from this node.
+        // For Select nodes, follow the active input (A=port 0 or B=port 1)
+        // based on the Selector value. For all other nodes, follow port 0.
+        let follow_port = if let Some(n) = graph.nodes.get(&current) {
+            if let NodeType::Select { .. } = &n.node_type {
+                // Read Selector (input port 2) — if > 0.5, use B (port 1), else A (port 0)
+                let selector = Graph::static_input_value(&graph.connections, values, current, 2).as_float();
+                if selector > 0.5 { 1 } else { 0 }
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        let source = graph.connections.iter().find(|c| c.to_node == current && c.to_port == follow_port);
         match source {
             Some(conn) => {
                 let from_id = conn.from_node;

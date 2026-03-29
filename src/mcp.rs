@@ -316,8 +316,8 @@ pub fn execute_command(
                 json!({
                     "name": e.label,
                     "category": e.category,
-                    "inputs": nt.inputs().iter().map(|p| p.name).collect::<Vec<_>>(),
-                    "outputs": nt.outputs().iter().map(|p| p.name).collect::<Vec<_>>(),
+                    "inputs": nt.inputs().iter().map(|p| p.name.as_ref()).collect::<Vec<_>>(),
+                    "outputs": nt.outputs().iter().map(|p| p.name.as_ref()).collect::<Vec<_>>(),
                     "properties": properties,
                 })
             }).collect();
@@ -353,8 +353,8 @@ pub fn execute_command(
                     "id": id,
                     "type": node.node_type.title(),
                     "position": node.pos,
-                    "inputs": node.node_type.inputs().iter().map(|p| p.name).collect::<Vec<_>>(),
-                    "outputs": node.node_type.outputs().iter().map(|p| p.name).collect::<Vec<_>>(),
+                    "inputs": node.node_type.inputs().iter().map(|p| p.name.as_ref()).collect::<Vec<_>>(),
+                    "outputs": node.node_type.outputs().iter().map(|p| p.name.as_ref()).collect::<Vec<_>>(),
                 })
             }).collect();
             McpResult::Json(json!(nodes))
@@ -368,8 +368,8 @@ pub fn execute_command(
                     "type": node.node_type.title(),
                     "position": node.pos,
                     "state": node_json,
-                    "inputs": node.node_type.inputs().iter().map(|p| p.name).collect::<Vec<_>>(),
-                    "outputs": node.node_type.outputs().iter().map(|p| p.name).collect::<Vec<_>>(),
+                    "inputs": node.node_type.inputs().iter().map(|p| p.name.as_ref()).collect::<Vec<_>>(),
+                    "outputs": node.node_type.outputs().iter().map(|p| p.name.as_ref()).collect::<Vec<_>>(),
                 }))
             } else {
                 McpResult::Error { error: format!("Node {} not found", node_id) }
@@ -409,11 +409,11 @@ pub fn execute_command(
         McpCommand::ListConnections => {
             let conns: Vec<Value> = graph.connections.iter().map(|c| {
                 let from_name = graph.nodes.get(&c.from_node)
-                    .map(|n| n.node_type.outputs().get(c.from_port).map(|p| p.name).unwrap_or("?"))
-                    .unwrap_or("?");
+                    .and_then(|n| n.node_type.outputs().get(c.from_port).map(|p| p.name.to_string()))
+                    .unwrap_or_else(|| "?".to_string());
                 let to_name = graph.nodes.get(&c.to_node)
-                    .map(|n| n.node_type.inputs().get(c.to_port).map(|p| p.name).unwrap_or("?"))
-                    .unwrap_or("?");
+                    .and_then(|n| n.node_type.inputs().get(c.to_port).map(|p| p.name.to_string()))
+                    .unwrap_or_else(|| "?".to_string());
                 json!({
                     "from_node": c.from_node, "from_port": c.from_port, "from_port_name": from_name,
                     "to_node": c.to_node, "to_port": c.to_port, "to_port_name": to_name,

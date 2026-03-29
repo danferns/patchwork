@@ -101,12 +101,35 @@ pub fn render(
         *volume = Graph::static_input_value(connections, values, node_id, 1).as_float().clamp(0.0, 1.0);
         audio.set_file_volume(node_id, *volume);
     }
+    // Port 2: Seek (0–1 normalized position)
+    // Only seeks when the input value differs significantly from the CURRENT playback
+    // position. This prevents seek from fighting with normal playback advancement.
+    let seek_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 2);
+    if seek_wired && duration > 0.0 && (is_playing || is_paused) {
+        let seek_val = Graph::static_input_value(connections, values, node_id, 2).as_float().clamp(0.0, 1.0);
+        let current_progress = (playback_pos / duration).clamp(0.0, 1.0) as f32;
+        // Only seek if the input differs from current position by more than 2%
+        // This threshold is large enough to ignore natural playback drift but
+        // small enough to respond to intentional slider/curve changes.
+        if (seek_val - current_progress).abs() > 0.02 {
+            let new_pos = seek_val as f64 * duration;
+            let _ = audio.seek_file(node_id, file_path, new_pos);
+        }
+    }
+
+    // Port 3: Speed (turntable — affects tempo + pitch)
+    let speed_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 3);
+    let mut speed = ui.ctx().data_mut(|d| d.get_temp::<f32>(egui::Id::new(("audio_speed", node_id))).unwrap_or(1.0));
+    if speed_wired {
+        speed = Graph::static_input_value(connections, values, node_id, 3).as_float().clamp(0.1, 4.0);
+    }
+    audio.set_file_speed(node_id, speed);
 
     // ── Input ports ──────────────────────────────────────────────
     ui.horizontal(|ui| {
         crate::nodes::inline_port_circle(ui, node_id, 0, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Trigger);
         ui.label(egui::RichText::new("Play").small());
-        ui.add_space(8.0);
+        ui.add_space(4.0);
         crate::nodes::inline_port_circle(ui, node_id, 1, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Normalized);
         ui.label(egui::RichText::new("Vol").small());
     });
@@ -284,6 +307,24 @@ pub fn render(
                 }
                 ui.label(egui::RichText::new(format!("{:.0}%", *volume * 100.0)).small().color(egui::Color32::GRAY));
             });
+            // Speed (turntable style)
+            ui.horizontal(|ui| {
+                crate::nodes::inline_port_circle(ui, node_id, 3, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Number);
+                if !speed_wired {
+                    if ui.add(egui::Slider::new(&mut speed, 0.1..=4.0).show_value(false).logarithmic(true)).changed() {
+                        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("audio_speed", node_id)), speed));
+                        audio.set_file_speed(node_id, speed);
+                    }
+                }
+                let speed_pct = format!("{:.2}x", speed);
+                let sc = if (speed - 1.0).abs() < 0.01 { egui::Color32::GRAY } else { egui::Color32::from_rgb(255, 180, 60) };
+                ui.label(egui::RichText::new(speed_pct).small().monospace().color(sc));
+            });
+            // Seek input
+            ui.horizontal(|ui| {
+                crate::nodes::inline_port_circle(ui, node_id, 2, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Normalized);
+                ui.label(egui::RichText::new("Seek 0–1").small().color(egui::Color32::GRAY));
+            });
         });
     });
 
@@ -292,11 +333,13 @@ pub fn render(
 
     // Output: progress (for downstream nodes that want normalized position)
     // Port 1 output = progress 0..1
+    let progress = if duration > 0.0 { (playback_pos / duration).clamp(0.0, 1.0) as f32 } else { 0.0 };
     ui.horizontal(|ui| {
-        let progress = if duration > 0.0 { (playback_pos / duration).clamp(0.0, 1.0) as f32 } else { 0.0 };
         ui.label(egui::RichText::new(format!("Progress: {:.1}%", progress * 100.0)).small().color(egui::Color32::GRAY));
         crate::nodes::inline_port_circle(ui, node_id, 1, false, connections, port_positions, dragging_from, pending_disconnects, PortKind::Normalized);
     });
+    // Store progress in temp data for graph eval to pick up
+    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("audio_player_progress", node_id)), progress));
 
     if is_playing { ui.ctx().request_repaint(); }
 }

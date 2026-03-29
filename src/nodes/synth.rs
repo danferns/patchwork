@@ -184,6 +184,7 @@ pub fn render(
         waveform: *waveform,
         frequency: *frequency,
         amplitude: *amplitude,
+        amp_smooth: crate::audio::SmoothedParam::new(*amplitude, 5.0),
         phase: 0.0,
         active: *active,
         fm_source: if is_fm { fm_source_node } else { None },
