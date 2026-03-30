@@ -1,4 +1,5 @@
 use crate::graph::*;
+use crate::node_trait::NodeBehavior;
 use crate::http::{HttpAction, HttpManager};
 use crate::midi::{MidiAction, MidiManager};
 use crate::serial::{SerialAction, SerialManager};
@@ -310,6 +311,23 @@ impl PatchworkApp {
     fn build_audio_chains(&mut self, values: &std::collections::HashMap<(NodeId, usize), PortValue>) {
         use crate::audio::{AudioEffect, AudioSource, SmoothedParam};
 
+        // ── Gate: require an enabled AudioDevice node for any audio to flow ──
+        let dsp_enabled = self.graph.nodes.values().any(|n| {
+            matches!(n.node_type, NodeType::AudioDevice { enabled: true, .. })
+        });
+        if !dsp_enabled {
+            // No enabled AudioDevice — stop audio if running, clear chains
+            if self.audio.is_running() {
+                self.audio.stop_output();
+            }
+            if let Ok(mut s) = self.audio.state.try_lock() {
+                s.active_chains.clear();
+                s.channel_chains.clear();
+                s.render_only.clear();
+            }
+            return;
+        }
+
         // ── Phase 1: Collect all chain info without locking audio state ──
         let mut active_sources: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
         let mut render_only_sources: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
@@ -414,7 +432,7 @@ impl PatchworkApp {
                                 if let Some(n) = self.graph.nodes.get(&nid) {
                                     match &n.node_type {
                                         NodeType::AudioDelay { time_ms, feedback } => {
-                                            ch_effects.push(AudioEffect::Delay { time_ms: *time_ms, feedback: SmoothedParam::new(*feedback, 10.0), buffer: Vec::new(), write_pos: 0 });
+                                            ch_effects.push(AudioEffect::Delay { time_ms: *time_ms, feedback: SmoothedParam::new(*feedback, 10.0), buffer: Vec::new(), write_pos: 0, max_delay_samples: 0 });
                                         }
                                         NodeType::AudioDistortion { drive } => {
                                             ch_effects.push(AudioEffect::Distortion { drive: SmoothedParam::new(*drive, 10.0) });
@@ -504,7 +522,7 @@ impl PatchworkApp {
                         NodeType::AudioDelay { time_ms, feedback } => {
                             effects.push(AudioEffect::Delay {
                                 time_ms: *time_ms, feedback: SmoothedParam::new(*feedback, 10.0),
-                                buffer: Vec::new(), write_pos: 0,
+                                buffer: Vec::new(), write_pos: 0, max_delay_samples: 0,
                             });
                         }
                         NodeType::AudioDistortion { drive } => {
@@ -654,16 +672,17 @@ impl PatchworkApp {
             }
         }
 
-        // Auto-start audio output if we have active sources but no running stream
+        // Start audio output if DSP is enabled but stream isn't running yet
+        // (e.g., user just toggled DSP on in the AudioDevice node)
         if !active_sources.is_empty() && !self.audio.is_running() {
             let device_name: Option<String> = self.graph.nodes.values()
                 .find_map(|n| {
-                    if let NodeType::AudioDevice { selected_output, .. } = &n.node_type {
+                    if let NodeType::AudioDevice { selected_output, enabled: true, .. } = &n.node_type {
                         if selected_output.is_empty() { None } else { Some(selected_output.clone()) }
                     } else { None }
                 });
             if let Err(e) = self.audio.start_output(device_name.as_deref()) {
-                eprintln!("Auto-start audio failed: {}", e);
+                eprintln!("Audio start failed: {}", e);
             }
         }
     }
@@ -749,21 +768,23 @@ impl PatchworkApp {
             // Pinned: inverse zoom on sizes so they appear at native screen size.
             // Zoom-bucketed ID resets egui's cached window size on zoom changes.
             let inv = 1.0 / zoom;
-            let node_width = match &node.node_type {
-                NodeType::Slider { .. } => 50.0,
-                NodeType::Display { .. } => 160.0,
-                NodeType::Comment { .. } => 160.0,
-                _ if node.node_type.custom_render() => 50.0,
-                _ if is_pinned => 180.0 * inv,
-                _ => 180.0,
+            // Use trait method for min_width if available, else defaults
+            let node_width = if let Some(w) = node.node_type.min_width() {
+                w
+            } else {
+                match &node.node_type {
+                    NodeType::Slider { .. } => 50.0,
+                    _ if node.node_type.custom_render() => 50.0,
+                    _ if is_pinned => 180.0 * inv,
+                    _ => 180.0,
+                }
             };
-            let is_comment = matches!(node.node_type, NodeType::Comment { .. });
-            let is_display = matches!(node.node_type, NodeType::Display { .. });
-            let is_monitor = matches!(node.node_type, NodeType::Monitor);
+            let is_display = node.node_type.title() == "Display";
+            let is_monitor = node.node_type.title() == "Monitor";
             let is_audio_player = matches!(node.node_type, NodeType::AudioPlayer { .. });
             let is_math = matches!(node.node_type, NodeType::Math { .. });
             let is_speaker = matches!(node.node_type, NodeType::Speaker { .. });
-            let no_title = is_comment || is_display || is_monitor || is_audio_player || is_speaker;
+            let no_title = node.node_type.no_title() || is_display || is_monitor || is_audio_player || is_speaker;
             let port_sz = if is_pinned { PORT_INTERACT * inv } else { PORT_INTERACT };
             let port_r = if is_pinned { PORT_RADIUS * inv } else { PORT_RADIUS };
             let title_size = if is_pinned { 14.0 * inv } else { 14.0 };
@@ -785,17 +806,15 @@ impl PatchworkApp {
                 ctx.set_style(std::sync::Arc::new(style));
             }
             let is_custom_render = node.node_type.custom_render();
-            // Custom frame for Comment nodes (use their bg_color)
-            let custom_frame = match &node.node_type {
-                NodeType::Comment { bg_color, .. } => {
-                    let bg = egui::Color32::from_rgb(bg_color[0], bg_color[1], bg_color[2]);
-                    Some(egui::Frame::NONE.fill(bg).corner_radius(8.0).inner_margin(12.0))
-                }
-                NodeType::Display { .. } => {
-                    Some(egui::Frame::NONE.fill(egui::Color32::from_rgb(15, 15, 20)).corner_radius(8.0).inner_margin(6.0))
-                }
-                _ => None,
+            // Custom frame — render_background for trait nodes, legacy match for enum nodes
+            let bg_painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new(("node_bg", node_id))));
+            let approx_rect = egui::Rect::from_min_size(egui::pos2(egui_x, egui_y), egui::vec2(node_width, 100.0));
+            let custom_frame = if let Some(frame) = node.node_type.render_background(&bg_painter, approx_rect) {
+                Some(frame)
+            } else {
+                None
             };
+            let is_comment = node.node_type.title() == "Comment";
             let mut win = egui::Window::new(title_rt)
                 .id(egui::Id::new(("node", node_id, zoom_bucket)))
                 .current_pos(egui::pos2(egui_x, egui_y))
@@ -1384,8 +1403,8 @@ impl eframe::App for PatchworkApp {
         }
 
         // Profiler output values
-        for (&id, node) in &self.graph.nodes {
-            if matches!(node.node_type, NodeType::Profiler) {
+        for (&id, _node) in &self.graph.nodes {
+            if false { // Profiler removed — Monitor is now trait-based
                 let profiler_id = egui::Id::new(("profiler_state", id));
                 let state = ctx.data_mut(|d| {
                     d.get_temp_mut_or_insert_with::<std::sync::Arc<std::sync::Mutex<crate::nodes::profiler::ProfilerState>>>(
@@ -1460,24 +1479,7 @@ impl eframe::App for PatchworkApp {
                             values.insert((id, 0), PortValue::Image(result));
                         }
                     }
-                    NodeType::Crop { top, left, bottom, right } => {
-                        if let Some(img) = inputs.first().and_then(|v| v.as_image()) {
-                            let cache_key = (std::sync::Arc::as_ptr(img) as u64)
-                                ^ ((*top * 1000.0) as u64) ^ ((*left * 1000.0) as u64) << 10
-                                ^ ((*bottom * 1000.0) as u64) << 20 ^ ((*right * 1000.0) as u64) << 30;
-                            let cache_id = egui::Id::new(("crop_cache", id));
-                            let cached: Option<(u64, std::sync::Arc<ImageData>)> = ctx.data_mut(|d| d.get_temp(cache_id));
-                            if let Some((prev_key, prev_result)) = cached {
-                                if prev_key == cache_key {
-                                    values.insert((id, 0), PortValue::Image(prev_result));
-                                    continue;
-                                }
-                            }
-                            let result = nodes::crop::process(img, *top, *left, *bottom, *right);
-                            ctx.data_mut(|d| d.insert_temp(cache_id, (cache_key, result.clone())));
-                            values.insert((id, 0), PortValue::Image(result));
-                        }
-                    }
+                    // Crop migrated to trait-based CropNode (evaluated in graph.evaluate)
                     NodeType::Blend { mode, mix } => {
                         let a = inputs.first().and_then(|v| v.as_image());
                         let b = inputs.get(1).and_then(|v| v.as_image());
@@ -1522,46 +1524,8 @@ impl eframe::App for PatchworkApp {
                             values.insert((id, 3), PortValue::Image(img));
                         }
                     }
-                    NodeType::Draw { strokes, canvas_size, .. } => {
-                        // Only regenerate if strokes changed
-                        let stroke_hash = strokes.len() as u64 ^ (*canvas_size as u64);
-                        let cache_id = egui::Id::new(("draw_cache", id));
-                        let cached: Option<(u64, std::sync::Arc<ImageData>)> = ctx.data_mut(|d| d.get_temp(cache_id));
-                        if let Some((prev_hash, prev_img)) = cached {
-                            if prev_hash == stroke_hash {
-                                values.insert((id, 0), PortValue::Image(prev_img));
-                            } else {
-                                let img = nodes::draw::render_to_image(strokes, *canvas_size as u32);
-                                ctx.data_mut(|d| d.insert_temp(cache_id, (stroke_hash, img.clone())));
-                                values.insert((id, 0), PortValue::Image(img));
-                            }
-                        } else {
-                            let img = nodes::draw::render_to_image(strokes, *canvas_size as u32);
-                            ctx.data_mut(|d| d.insert_temp(cache_id, (stroke_hash, img.clone())));
-                            values.insert((id, 0), PortValue::Image(img));
-                        }
-                        let pts_json = serde_json::to_string(strokes).unwrap_or_default();
-                        values.insert((id, 1), PortValue::Text(pts_json));
-                    }
-                    NodeType::Noise { noise_type, mode, scale, seed } => {
-                        let x = inputs.get(2).map(|v| v.as_float()).unwrap_or(0.0);
-                        let val = nodes::noise::perlin_1d(x * *scale, *seed);
-                        values.insert((id, 0), PortValue::Float(val));
-                        if *mode == 1 {
-                            let cache_key = (*seed as u64) ^ ((*scale * 100.0) as u64) << 16 ^ (*noise_type as u64) << 32;
-                            let cache_id = egui::Id::new(("noise_cache", id));
-                            let cached: Option<(u64, std::sync::Arc<ImageData>)> = ctx.data_mut(|d| d.get_temp(cache_id));
-                            if let Some((prev_key, prev_img)) = cached {
-                                if prev_key == cache_key {
-                                    values.insert((id, 1), PortValue::Image(prev_img));
-                                    continue;
-                                }
-                            }
-                            let img = nodes::noise::generate_2d(*scale, *seed, *noise_type, 128);
-                            ctx.data_mut(|d| d.insert_temp(cache_id, (cache_key, img.clone())));
-                            values.insert((id, 1), PortValue::Image(img));
-                        }
-                    }
+                    // Draw migrated to trait-based DrawNode
+                    // Noise migrated to trait-based NoiseNode (evaluated in graph.evaluate)
                     NodeType::ColorCurves { master, red, green, blue, .. } => {
                         if let Some(PortValue::Image(img)) = inputs.first() {
                             let img_ptr = std::sync::Arc::as_ptr(img) as u64;
@@ -1662,6 +1626,15 @@ impl eframe::App for PatchworkApp {
             }
         }
 
+        // Inject WGSL Viewer Image output (from GPU readback stored in egui temp data)
+        for (&id, node) in &self.graph.nodes {
+            if matches!(node.node_type, NodeType::WgslViewer { .. }) {
+                if let Some(img) = ctx.data_mut(|d| d.get_temp::<std::sync::Arc<ImageData>>(egui::Id::new(("wgsl_image_output", id)))) {
+                    values.insert((id, 0), PortValue::Image(img));
+                }
+            }
+        }
+
         // Sync OB Hub detected_devices from ObManager + auto-connect saved ports
         {
             let hub_nodes: Vec<(NodeId, String)> = self.graph.nodes.iter()
@@ -1695,11 +1668,6 @@ impl eframe::App for PatchworkApp {
         // Inject Monitor + Audio node values
         for (&id, node) in &self.graph.nodes {
             match &node.node_type {
-                NodeType::Monitor => {
-                    values.insert((id, 0), PortValue::Float(self.monitor.fps));
-                    values.insert((id, 1), PortValue::Float(self.monitor.frame_ms));
-                    values.insert((id, 2), PortValue::Float(self.monitor.node_count as f32));
-                }
                 // Synth and AudioPlayer output their NodeId so FX nodes can reference them
                 NodeType::Synth { .. } | NodeType::AudioPlayer { .. } => {
                     values.insert((id, 0), PortValue::Float(id as f32));

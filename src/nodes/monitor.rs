@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use eframe::egui;
 use std::collections::VecDeque;
 

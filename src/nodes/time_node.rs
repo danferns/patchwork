@@ -1,0 +1,135 @@
+//! TimeNode — drift-free elapsed time source.
+//!
+//! Uses std::time::Instant for accurate wall-clock timing.
+//! No cumulative float error — elapsed is computed from (now - start),
+//! not accumulated dt.
+//!
+//! Outputs:
+//!   Seconds — total elapsed (scaled by speed)
+//!   Frac    — fractional part of seconds (0.0-1.0)
+//!   Minutes — total elapsed in minutes
+
+use crate::graph::{PortDef, PortKind, PortValue};
+use crate::node_trait::NodeBehavior;
+use serde::{Serialize, Deserialize};
+use eframe::egui;
+use std::time::Instant;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeNode {
+    #[serde(default = "default_speed")]
+    pub speed: f32,
+    #[serde(default = "default_true")]
+    pub running: bool,
+    /// Accumulated elapsed time in seconds (scaled by speed).
+    /// Computed from wall-clock deltas, not frame dt accumulation.
+    #[serde(default)]
+    pub elapsed: f64,
+    /// Wall-clock instant of last tick (not serialized — reset on load)
+    #[serde(skip, default = "Instant::now")]
+    last_instant: Instant,
+}
+
+fn default_speed() -> f32 { 1.0 }
+fn default_true() -> bool { true }
+
+impl Default for TimeNode {
+    fn default() -> Self {
+        Self {
+            speed: 1.0,
+            running: true,
+            elapsed: 0.0,
+            last_instant: Instant::now(),
+        }
+    }
+}
+
+impl NodeBehavior for TimeNode {
+    fn title(&self) -> &str { "Time" }
+    fn inputs(&self) -> Vec<PortDef> { vec![] }
+
+    fn outputs(&self) -> Vec<PortDef> {
+        vec![
+            PortDef::new("Seconds", PortKind::Number),
+            PortDef::new("Frac", PortKind::Normalized),
+            PortDef::new("Minutes", PortKind::Number),
+        ]
+    }
+
+    fn color_hint(&self) -> [u8; 3] { [180, 220, 100] }
+
+    fn evaluate(&mut self, _inputs: &[PortValue]) -> Vec<(usize, PortValue)> {
+        let now = Instant::now();
+        if self.running {
+            let wall_dt = now.duration_since(self.last_instant).as_secs_f64();
+            // Clamp to avoid jumps after sleep/wake or debugger pause
+            let clamped_dt = wall_dt.min(0.25);
+            self.elapsed += clamped_dt * self.speed as f64;
+        }
+        self.last_instant = now;
+
+        let secs = self.elapsed as f32;
+        let frac = (self.elapsed % 1.0) as f32;
+        let mins = (self.elapsed / 60.0) as f32;
+
+        vec![
+            (0, PortValue::Float(secs)),
+            (1, PortValue::Float(frac)),
+            (2, PortValue::Float(mins)),
+        ]
+    }
+
+    fn type_tag(&self) -> &str { "time" }
+
+    fn save_state(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or_default()
+    }
+
+    fn load_state(&mut self, state: &serde_json::Value) {
+        if let Ok(l) = serde_json::from_value::<TimeNode>(state.clone()) {
+            self.speed = l.speed;
+            self.running = l.running;
+            self.elapsed = l.elapsed;
+            self.last_instant = Instant::now(); // reset clock reference on load
+        }
+    }
+
+    fn render_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui.button(if self.running { "⏸" } else { "▶" }).clicked() {
+                self.running = !self.running;
+                self.last_instant = Instant::now(); // prevent jump on resume
+            }
+            if ui.button("Reset").clicked() {
+                self.elapsed = 0.0;
+                self.last_instant = Instant::now();
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Speed").small());
+            ui.add(egui::Slider::new(&mut self.speed, 0.0..=10.0).step_by(0.1));
+        });
+
+        // Display
+        let secs = self.elapsed;
+        let mins = (secs / 60.0) as u32;
+        let s = secs % 60.0;
+        let dim = ui.visuals().widgets.noninteractive.fg_stroke.color;
+
+        ui.label(egui::RichText::new(format!("{:02}:{:05.2}", mins, s)).monospace().strong());
+        ui.label(egui::RichText::new(format!("{:.4}s", secs)).small().color(dim));
+
+        if self.running {
+            ui.ctx().request_repaint();
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub fn register(registry: &mut crate::node_trait::NodeRegistryInner) {
+    registry.register("time", |state| {
+        if let Ok(n) = serde_json::from_value::<TimeNode>(state.clone()) { Box::new(n) }
+        else { Box::new(TimeNode::default()) }
+    });
+}

@@ -110,8 +110,10 @@ impl super::PatchworkApp {
                     status: "Loaded".into(),
                 }, [canvas_x, canvas_y]);
             } else {
-                let content = std::fs::read_to_string(&path).unwrap_or_default();
-                self.graph.add_node(NodeType::File { path: path.display().to_string(), content }, [canvas_x, canvas_y]);
+                let mut file_node = crate::nodes::file_node::FileNode::default();
+                file_node.path = path.display().to_string();
+                file_node.load_file();
+                self.graph.add_node(NodeType::Dynamic { inner: crate::graph::DynNode { node: Box::new(file_node) } }, [canvas_x, canvas_y]);
             }
         }
     }
@@ -393,36 +395,11 @@ impl super::PatchworkApp {
         }
     }
 
-    pub(super) fn update_mouse_trackers(&mut self, ctx: &egui::Context) {
-        if let Some(pos) = ctx.pointer_latest_pos() {
-            for node in self.graph.nodes.values_mut() {
-                if let NodeType::MouseTracker { x, y } = &mut node.node_type { *x = pos.x; *y = pos.y; }
-            }
-        }
+    pub(super) fn update_mouse_trackers(&mut self, _ctx: &egui::Context) {
+        // MouseTracker is now trait-based — reads pointer position in render_ui()
     }
 
-    pub(super) fn update_key_inputs(&mut self, ctx: &egui::Context) {
-        // Don't capture keys when a text field is focused
-        if ctx.wants_keyboard_input() { return; }
-
-        for node in self.graph.nodes.values_mut() {
-            if let NodeType::KeyInput { key_name, pressed, toggle_mode, toggled_on } = &mut node.node_type {
-                if let Some(key) = nodes::key_input::parse_key(key_name) {
-                    let is_down = ctx.input(|i| i.key_down(key));
-                    let just_pressed = ctx.input(|i| i.key_pressed(key));
-
-                    if *toggle_mode {
-                        if just_pressed {
-                            *toggled_on = !*toggled_on;
-                        }
-                        *pressed = just_pressed;
-                    } else {
-                        *pressed = is_down;
-                    }
-                } else {
-                    *pressed = false;
-                }
-            }
-        }
+    pub(super) fn update_key_inputs(&mut self, _ctx: &egui::Context) {
+        // KeyInput is now trait-based — reads key state in render_ui()
     }
 }

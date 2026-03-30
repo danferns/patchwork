@@ -486,6 +486,16 @@ pub fn apply(
     visuals.menu_corner_radius = r;
 
     // ── Scrollbar ──
+    visuals.handle_shape = egui::style::HandleShape::Rect { aspect_ratio: 1.0 };
+    visuals.striped = false;
+    visuals.slider_trailing_fill = true;
+    visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
+
+    // ── Separators ──
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(0.5, surface);
+
+    // ── Text cursor ──
+    visuals.text_cursor.stroke = egui::Stroke::new(2.0, accent_color);
 
     ctx.set_visuals(visuals);
 

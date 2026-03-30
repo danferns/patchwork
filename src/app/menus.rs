@@ -180,20 +180,34 @@ impl super::PatchworkApp {
         let has = |nodes: &std::collections::HashMap<NodeId, crate::graph::Node>, check: &dyn Fn(&NodeType) -> bool| -> bool {
             nodes.values().any(|n| check(&n.node_type))
         };
-        if !has(&self.graph.nodes, &|t| matches!(t, NodeType::FileMenu)) {
-            let id = self.graph.add_node(NodeType::FileMenu, [10.0, 10.0]);
+        if !has(&self.graph.nodes, &|t| t.title() == "File" && matches!(t, NodeType::Dynamic { .. } | NodeType::FileMenu)) {
+            let id = self.graph.add_node(
+                NodeType::Dynamic { inner: crate::graph::DynNode { node: Box::new(crate::nodes::file_menu_node::FileMenuNode) } },
+                [10.0, 10.0]);
             self.pinned_nodes.insert(id);
         }
-        if !has(&self.graph.nodes, &|t| matches!(t, NodeType::ZoomControl { .. })) {
-            let id = self.graph.add_node(NodeType::ZoomControl { zoom_value: 1.0 }, [1100.0, 10.0]);
+        if !has(&self.graph.nodes, &|t| t.title() == "Zoom") {
+            let id = self.graph.add_node(
+                NodeType::Dynamic { inner: crate::graph::DynNode { node: Box::new(crate::nodes::zoom_control_node::ZoomControlNode::default()) } },
+                [1100.0, 10.0]);
             self.pinned_nodes.insert(id);
         }
         if !has(&self.graph.nodes, &|t| matches!(t, NodeType::Palette { .. })) {
             let id = self.graph.add_node(NodeType::Palette { search: String::new() }, [10.0, 200.0]);
             self.pinned_nodes.insert(id);
         }
-        if !has(&self.graph.nodes, &|t| matches!(t, NodeType::Monitor)) {
-            let id = self.graph.add_node(NodeType::Monitor, [1100.0, 500.0]);
+        if !has(&self.graph.nodes, &|t| matches!(t, NodeType::Dynamic { .. }) && t.title() == "Monitor") {
+            let id = self.graph.add_node(
+                NodeType::Dynamic { inner: crate::graph::DynNode { node: Box::new(crate::nodes::monitor_node::MonitorNode::default()) } },
+                [1100.0, 500.0],
+            );
+            self.pinned_nodes.insert(id);
+        }
+        if !has(&self.graph.nodes, &|t| matches!(t, NodeType::AudioDevice { .. })) {
+            let id = self.graph.add_node(NodeType::AudioDevice {
+                selected_output: String::new(), selected_input: String::new(),
+                master_volume: 0.8, enabled: false,
+            }, [1100.0, 350.0]);
             self.pinned_nodes.insert(id);
         }
         if !has(&self.graph.nodes, &|t| matches!(t, NodeType::Theme { .. })) {

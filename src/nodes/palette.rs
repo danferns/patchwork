@@ -1,5 +1,6 @@
 use eframe::egui;
 use crate::graph::{NodeId, NodeType};
+use crate::node_trait::NodeBehavior;
 use crate::icons;
 use super::catalog;
 
@@ -56,9 +57,10 @@ pub fn render(
                     ui.add_space(4.0);
                 }
                 let cat_icon = icons::category_icon(entry.category);
+                let dim = ui.visuals().widgets.noninteractive.fg_stroke.color;
                 ui.horizontal(|ui| {
-                    ui.label(icons::icon_colored(cat_icon, 12.0, egui::Color32::GRAY));
-                    ui.label(egui::RichText::new(entry.category).small().strong().color(egui::Color32::GRAY));
+                    ui.label(icons::icon_colored(cat_icon, 12.0, dim));
+                    ui.label(egui::RichText::new(entry.category).small().strong().color(dim));
                 });
                 ui.add_space(2.0);
                 last_cat = entry.category;
@@ -89,7 +91,8 @@ pub fn render(
 
         if !any_shown {
             ui.add_space(8.0);
-            ui.label(egui::RichText::new("No matches").color(egui::Color32::GRAY).italics());
+            let dim = ui.visuals().widgets.noninteractive.fg_stroke.color;
+            ui.label(egui::RichText::new("No matches").color(dim).italics());
         }
     }); // end ScrollArea
 }
@@ -115,13 +118,19 @@ fn render_node_card(
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
 
-        // Card background
-        let bg = if response.hovered() {
-            egui::Color32::from_rgb(55, 55, 65)
+        // Read theme colors from visuals (set by Theme node)
+        let vis = ui.visuals();
+        let card_bg = if response.hovered() {
+            vis.widgets.hovered.bg_fill
         } else {
-            egui::Color32::from_rgb(38, 38, 45)
+            vis.widgets.inactive.bg_fill
         };
-        painter.rect_filled(rect, 4.0, bg);
+        let text_color = vis.text_color();
+        let port_input_color = vis.widgets.noninteractive.fg_stroke.color;
+        let port_output_color = vis.hyperlink_color; // accent-derived
+
+        // Card background
+        painter.rect_filled(rect, 4.0, card_bg);
 
         // Accent bar on left
         let accent_rect = egui::Rect::from_min_size(
@@ -138,7 +147,7 @@ fn render_node_card(
                 painter.circle_filled(
                     egui::pos2(rect.left() + port_margin, y),
                     port_r,
-                    egui::Color32::from_rgb(140, 140, 140),
+                    port_input_color,
                 );
             }
         }
@@ -151,7 +160,7 @@ fn render_node_card(
                 painter.circle_filled(
                     egui::pos2(rect.right() - port_margin, y),
                     port_r,
-                    egui::Color32::from_rgb(80, 150, 255),
+                    port_output_color,
                 );
             }
         }
@@ -175,7 +184,7 @@ fn render_node_card(
             egui::Align2::LEFT_CENTER,
             label,
             egui::FontId::proportional(12.0),
-            egui::Color32::from_rgb(200, 200, 200),
+            text_color,
         );
     }
 

@@ -40,7 +40,7 @@ pub fn render(
     });
     ui.horizontal(|ui| {
         if ui.small_button("Delay").clicked() {
-            effects.push(AudioEffect::Delay { time_ms: 250.0, feedback: crate::audio::SmoothedParam::new(0.4, 10.0), buffer: Vec::new(), write_pos: 0 });
+            effects.push(AudioEffect::Delay { time_ms: 250.0, feedback: crate::audio::SmoothedParam::new(0.4, 10.0), buffer: Vec::new(), write_pos: 0, max_delay_samples: 0 });
         }
         if ui.small_button("Dist").clicked() {
             effects.push(AudioEffect::Distortion { drive: crate::audio::SmoothedParam::new(2.0, 10.0) });

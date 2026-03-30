@@ -461,7 +461,7 @@ pub fn render_camera(
 }
 
 /// Fast nearest-neighbor downsample for preview display
-fn fast_downsample(img: &ImageData, target_w: u32, target_h: u32) -> Vec<u8> {
+pub fn fast_downsample(img: &ImageData, target_w: u32, target_h: u32) -> Vec<u8> {
     if target_w == 0 || target_h == 0 { return vec![]; }
     if target_w >= img.width && target_h >= img.height {
         return img.pixels.clone();

@@ -510,6 +510,23 @@ pub fn render(
     // Image output port (right-aligned)
     super::audio_port_row(ui, "Image", node_id, 0, false, port_positions, dragging_from, connections, pending_disconnects, PortKind::Image);
 
+    // GPU readback: render to offscreen texture and produce PortValue::Image
+    // Only when the Image output port is connected (avoids cost otherwise)
+    let output_connected = connections.iter().any(|c| c.from_node == node_id && c.from_port == 0);
+    if output_connected && !final_code.is_empty() {
+        if let Some(render_state) = wgpu_render_state {
+            let readback_w = (*canvas_w as u32).max(1).min(800);
+            let readback_h = (*canvas_h as u32).max(1).min(600);
+            let time: f32 = ui.ctx().data_mut(|d| d.get_temp(egui::Id::new("wgsl_time")).unwrap_or(0.0));
+            let packed = pack_uniforms(time, readback_w as f32, readback_h as f32, 0.0, 0.0, &user_values);
+            if let Some(img) = render_offscreen(render_state, &final_code, node_id, packed, readback_w, readback_h) {
+                ui.ctx().data_mut(|d| {
+                    d.insert_temp(egui::Id::new(("wgsl_image_output", node_id)), img);
+                });
+            }
+        }
+    }
+
     // Show code preview (collapsible)
     ui.collapsing("Shader Code", |ui| {
         let preview = if final_code.len() > 600 {
@@ -520,6 +537,182 @@ pub fn render(
         let mut p = preview;
         ui.code_editor(&mut p);
     });
+}
+
+/// Render the shader to an offscreen RGBA8 texture and read back to CPU.
+/// Returns None if the shader fails to compile or render.
+fn render_offscreen(
+    render_state: &egui_wgpu::RenderState,
+    shader_code: &str,
+    node_id: NodeId,
+    packed_uniforms: Vec<f32>,
+    width: u32,
+    height: u32,
+) -> Option<std::sync::Arc<ImageData>> {
+    let device = &render_state.device;
+    let queue = &render_state.queue;
+    let readback_format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+    // Cache key for the offscreen pipeline (separate from screen pipeline)
+    let shader_hash = {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        shader_code.hash(&mut h);
+        "offscreen".hash(&mut h);
+        h.finish()
+    };
+
+    // Check cache for existing offscreen pipeline
+    let has_pipeline = {
+        let renderer = render_state.renderer.read();
+        renderer.callback_resources.get::<WgslOffscreenStore>()
+            .and_then(|s| s.nodes.get(&node_id))
+            .map(|g| g.shader_hash == shader_hash)
+            .unwrap_or(false)
+    };
+
+    if !has_pipeline {
+        // Create offscreen pipeline with Rgba8UnormSrgb target
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("wgsl_offscreen_shader"),
+            source: wgpu::ShaderSource::Wgsl(shader_code.into()),
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("wgsl_offscreen_bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("wgsl_offscreen_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(readback_format.into())],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let error = pollster::block_on(device.pop_error_scope());
+        if error.is_some() { return None; }
+
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("wgsl_offscreen_ub"),
+            size: UNIFORM_BUF_SIZE,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        let node_gpu = WgslOffscreenGpu {
+            pipeline, bind_group, uniform_buffer, shader_hash,
+        };
+
+        let mut renderer = render_state.renderer.write();
+        if let Some(store) = renderer.callback_resources.get_mut::<WgslOffscreenStore>() {
+            store.nodes.insert(node_id, node_gpu);
+        } else {
+            let mut nodes = HashMap::new();
+            nodes.insert(node_id, node_gpu);
+            renderer.callback_resources.insert(WgslOffscreenStore { nodes });
+        }
+    }
+
+    // Create offscreen texture
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("wgsl_offscreen_tex"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: readback_format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+
+    // Upload uniforms and render
+    let renderer = render_state.renderer.read();
+    let store = renderer.callback_resources.get::<WgslOffscreenStore>()?;
+    let gpu = store.nodes.get(&node_id)?;
+
+    let mut padded = packed_uniforms;
+    padded.resize(MAX_UNIFORM_FLOATS, 0.0);
+    queue.write_buffer(&gpu.uniform_buffer, 0, bytemuck::cast_slice(&padded));
+
+    let mut encoder = device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("wgsl_offscreen_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            ..Default::default()
+        });
+        pass.set_pipeline(&gpu.pipeline);
+        pass.set_bind_group(0, &gpu.bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+    queue.submit(Some(encoder.finish()));
+    drop(renderer); // Release the read lock before readback
+
+    // Readback pixels to CPU
+    Some(crate::gpu_image::readback_texture(device, queue, &texture, width, height))
+}
+
+struct WgslOffscreenGpu {
+    pipeline: wgpu::RenderPipeline,
+    bind_group: wgpu::BindGroup,
+    uniform_buffer: wgpu::Buffer,
+    shader_hash: u64,
+}
+
+struct WgslOffscreenStore {
+    nodes: HashMap<NodeId, WgslOffscreenGpu>,
 }
 
 fn render_with_wgpu(
@@ -698,6 +891,7 @@ fn render_popout_window(
     let viewport_id = egui::ViewportId::from_hash_of(("wgsl_popout", node_id));
     let render_state = render_state.clone();
     let uniforms = packed_uniforms;
+    let popout_id = egui::Id::new(("wgsl_popout", node_id));
 
     ctx.show_viewport_immediate(
         viewport_id,
@@ -705,6 +899,12 @@ fn render_popout_window(
             .with_title(format!("Shader #{}", node_id))
             .with_inner_size([800.0, 600.0]),
         move |ctx, _class| {
+            // Detect native window close (red ❌ button) and set popout flag to false
+            if ctx.input(|i| i.viewport().close_requested()) {
+                ctx.data_mut(|d| d.insert_temp(popout_id, false));
+                return;
+            }
+
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE.fill(egui::Color32::BLACK))
                 .show(ctx, |ui| {

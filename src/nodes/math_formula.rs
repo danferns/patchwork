@@ -8,7 +8,6 @@ fn detect_variables(formula: &str) -> Vec<char> {
     let chars: Vec<char> = formula.chars().collect();
     for (i, &ch) in chars.iter().enumerate() {
         if ch.is_ascii_uppercase() {
-            // Check it's not part of a function name (preceded/followed by lowercase)
             let prev_alpha = i > 0 && chars[i - 1].is_ascii_alphabetic();
             let next_alpha = i + 1 < chars.len() && chars[i + 1].is_ascii_alphabetic();
             if !prev_alpha && !next_alpha {
@@ -22,8 +21,8 @@ fn detect_variables(formula: &str) -> Vec<char> {
 /// Evaluate formula using Rhai with variable substitution
 fn evaluate_formula(formula: &str, var_values: &HashMap<char, f64>) -> Result<f64, String> {
     let mut engine = rhai::Engine::new();
+    engine.set_max_operations(10000);
 
-    // Add helper functions
     engine.register_fn("map", |val: f64, in_min: f64, in_max: f64, out_min: f64, out_max: f64| -> f64 {
         let t = (val - in_min) / (in_max - in_min);
         out_min + t * (out_max - out_min)
@@ -33,52 +32,49 @@ fn evaluate_formula(formula: &str, var_values: &HashMap<char, f64>) -> Result<f6
     engine.register_fn("sign", |val: f64| -> f64 { if val > 0.0 { 1.0 } else if val < 0.0 { -1.0 } else { 0.0 } });
     engine.register_fn("deg", |rad: f64| -> f64 { rad * 180.0 / std::f64::consts::PI });
     engine.register_fn("rad", |deg: f64| -> f64 { deg * std::f64::consts::PI / 180.0 });
+    engine.register_fn("quantize", |val: f64, step: f64| -> f64 {
+        if step.abs() < 1e-10 { val } else { (val / step).round() * step }
+    });
+    engine.register_fn("wrap", |val: f64, min: f64, max: f64| -> f64 {
+        let range = max - min;
+        if range.abs() < 1e-10 { min } else { min + ((val - min) % range + range) % range }
+    });
+    engine.register_fn("pow", |base: f64, exp: f64| -> f64 { base.powf(exp) });
+    engine.register_fn("sqrt", |val: f64| -> f64 { val.sqrt() });
+    engine.register_fn("abs_val", |val: f64| -> f64 { val.abs() });
+    engine.register_fn("ln", |val: f64| -> f64 { val.ln() });
+    engine.register_fn("log2", |val: f64| -> f64 { val.log2() });
+    engine.register_fn("log10", |val: f64| -> f64 { val.log10() });
 
-    // Build Rhai expression: replace A → a_val, B → b_val, etc.
     let mut expr = formula.to_string();
-    // Replace variable names with Rhai-safe identifiers (must be done carefully)
-    // Sort by length desc to avoid partial replacements
     let mut var_names: Vec<char> = var_values.keys().copied().collect();
     var_names.sort();
 
     for &ch in var_names.iter().rev() {
-        // Only replace standalone letters (not inside function names)
-        let _from = ch.to_string();
         let to = format!("_var_{}_", ch.to_ascii_lowercase());
-        // Simple replacement — assumes single uppercase letters are variables
         let mut result = String::new();
         let chars_vec: Vec<char> = expr.chars().collect();
-        let mut i = 0;
-        while i < chars_vec.len() {
-            if chars_vec[i] == ch {
+        for (i, &c) in chars_vec.iter().enumerate() {
+            if c == ch {
                 let prev_alpha = i > 0 && chars_vec[i - 1].is_ascii_alphabetic();
                 let next_alpha = i + 1 < chars_vec.len() && chars_vec[i + 1].is_ascii_alphabetic();
                 if !prev_alpha && !next_alpha {
                     result.push_str(&to);
-                } else {
-                    result.push(chars_vec[i]);
-                }
-            } else {
-                result.push(chars_vec[i]);
-            }
-            i += 1;
+                } else { result.push(c); }
+            } else { result.push(c); }
         }
         expr = result;
     }
 
-    // Replace × and ÷ with * and /
     expr = expr.replace('×', "*").replace('÷', "/");
 
-    // Add PI, TAU, E constants
     let mut scope = rhai::Scope::new();
     scope.push_constant("PI", std::f64::consts::PI);
     scope.push_constant("TAU", std::f64::consts::TAU);
     scope.push_constant("E", std::f64::consts::E);
 
-    // Add variable values
     for (&ch, &val) in var_values {
-        let name = format!("_var_{}_", ch.to_ascii_lowercase());
-        scope.push(&name, val);
+        scope.push(&format!("_var_{}_", ch.to_ascii_lowercase()), val);
     }
 
     match engine.eval_expression_with_scope::<rhai::Dynamic>(&mut scope, &expr) {
@@ -91,26 +87,34 @@ fn evaluate_formula(formula: &str, var_values: &HashMap<char, f64>) -> Result<f6
     }
 }
 
-const PRESETS: &[(&str, &str)] = &[
-    ("+", "A + B"),
-    ("−", "A - B"),
-    ("×", "A * B"),
-    ("÷", "A / B"),
-    ("%", "A % B"),
-    ("sin", "sin(A)"),
-    ("cos", "cos(A)"),
-    ("tan", "tan(A)"),
-    ("pow", "A.pow(B)"),
-    ("sqrt", "A.sqrt()"),
-    ("abs", "A.abs()"),
-    ("min", "if A < B { A } else { B }"),
-    ("max", "if A > B { A } else { B }"),
-    ("clamp", "clamp(A, 0.0, 1.0)"),
-    ("map", "map(A, 0.0, 1.0, 0.0, 100.0)"),
-    ("lerp", "lerp(A, B, C)"),
-    ("round", "A.round()"),
-    ("floor", "A.floor()"),
-    ("ceil", "A.ceiling()"),
+// ── Presets organized by category ──────────────────────────────────────────
+
+struct PresetGroup {
+    name: &'static str,
+    presets: &'static [(&'static str, &'static str)],
+}
+
+const PRESET_GROUPS: &[PresetGroup] = &[
+    PresetGroup { name: "Basic", presets: &[
+        ("+", "A + B"), ("−", "A - B"), ("×", "A * B"), ("÷", "A / B"), ("%", "A % B"),
+    ]},
+    PresetGroup { name: "Shape", presets: &[
+        ("abs", "abs_val(A)"), ("sign", "sign(A)"), ("round", "A.round()"),
+        ("floor", "A.floor()"), ("ceil", "A.ceiling()"),
+    ]},
+    PresetGroup { name: "Range", presets: &[
+        ("clamp", "clamp(A, 0.0, 1.0)"), ("wrap", "wrap(A, 0.0, 1.0)"),
+        ("map", "map(A, 0.0, 1.0, 0.0, 100.0)"), ("lerp", "lerp(A, B, C)"),
+        ("quant", "quantize(A, 0.25)"),
+    ]},
+    PresetGroup { name: "Trig", presets: &[
+        ("sin", "sin(A)"), ("cos", "cos(A)"), ("tan", "tan(A)"),
+        ("deg", "deg(A)"), ("rad", "rad(A)"),
+    ]},
+    PresetGroup { name: "Power", presets: &[
+        ("pow", "pow(A, B)"), ("sqrt", "sqrt(A)"), ("log", "ln(A)"),
+        ("min", "if A < B { A } else { B }"), ("max", "if A > B { A } else { B }"),
+    ]},
 ];
 
 pub fn render(
@@ -126,7 +130,54 @@ pub fn render(
     dragging_from: &mut Option<(NodeId, usize, bool)>,
     pending_disconnects: &mut Vec<(NodeId, usize)>,
 ) {
-    // ── Input ports (one per detected variable) ─────────────
+    let accent = ui.visuals().hyperlink_color;
+    let dim = ui.visuals().widgets.noninteractive.fg_stroke.color;
+
+    // ── Preset buttons (always visible, grouped) ───────────
+    for group in PRESET_GROUPS {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new(format!("{}:", group.name)).small().color(dim));
+            for (label, preset_formula) in group.presets.iter() {
+                let is_current = formula.trim() == *preset_formula;
+                let text = if is_current {
+                    egui::RichText::new(*label).small().strong().color(accent)
+                } else {
+                    egui::RichText::new(*label).small().strong()
+                };
+                let btn = ui.add(egui::Button::new(text).small().frame(true)
+                    .fill(if is_current { accent.gamma_multiply(0.2) } else { ui.visuals().widgets.inactive.bg_fill }));
+                if btn.clicked() {
+                    *formula = preset_formula.to_string();
+                    *variables = detect_variables(formula);
+                }
+                if btn.hovered() {
+                    btn.on_hover_text(*preset_formula);
+                }
+            }
+        });
+    }
+
+    ui.separator();
+
+    // ── Formula editor ─────────────────────────────────────
+    let old_formula = formula.clone();
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("f =").strong());
+        ui.add(
+            egui::TextEdit::singleline(formula)
+                .desired_width(ui.available_width() - 4.0)
+                .font(egui::FontId::monospace(13.0))
+                .hint_text("A + B"),
+        );
+    });
+
+    if *formula != old_formula {
+        *variables = detect_variables(formula);
+    }
+
+    ui.separator();
+
+    // ── Input ports (one per detected variable) ────────────
     let mut var_values: HashMap<char, f64> = HashMap::new();
     for (i, &ch) in variables.iter().enumerate() {
         let is_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == i);
@@ -139,66 +190,28 @@ pub fn render(
 
         ui.horizontal(|ui| {
             super::inline_port_circle(ui, node_id, i, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Number);
-
             ui.label(egui::RichText::new(format!("{}", ch)).strong());
-            ui.label(egui::RichText::new(format!("{:.3}", val)).monospace().small().color(egui::Color32::GRAY));
+            if is_wired {
+                ui.label(egui::RichText::new(format!("{:.3}", val)).monospace().small().color(accent));
+            } else {
+                ui.label(egui::RichText::new("0").monospace().small().color(dim));
+            }
         });
     }
 
-    if !variables.is_empty() { ui.separator(); }
-
-    // ── Formula display/edit ────────────────────────────────
-    let old_formula = formula.clone();
-    ui.horizontal(|ui| {
-        ui.label("ƒ");
-        ui.add(
-            egui::TextEdit::singleline(formula)
-                .desired_width(ui.available_width() - 4.0)
-                .font(egui::FontId::monospace(13.0))
-                .hint_text("A + B"),
-        );
-    });
-
-    // Update variables if formula changed
-    if *formula != old_formula {
-        *variables = detect_variables(formula);
-    }
-
-    // ── Evaluate ────────────────────────────────────────────
+    // ── Evaluate ───────────────────────────────────────────
     if !formula.is_empty() {
         match evaluate_formula(formula, &var_values) {
-            Ok(val) => {
-                *result = val;
-                error.clear();
-            }
-            Err(e) => {
-                *error = e;
-            }
+            Ok(val) => { *result = val; error.clear(); }
+            Err(e) => { *error = e; }
         }
     }
 
-    // ── Result display ──────────────────────────────────────
+    // ── Result ─────────────────────────────────────────────
     if error.is_empty() {
         super::output_port_row(ui, "=", &format!("{:.4}", result), node_id, 0, port_positions, dragging_from, connections, pending_disconnects, PortKind::Number);
     } else {
         ui.colored_label(egui::Color32::from_rgb(255, 100, 100),
             egui::RichText::new(&*error).small());
     }
-
-    // ── Quick presets (collapsible) ─────────────────────────
-    ui.collapsing("Quick Formula", |ui| {
-        let cols = 5;
-        egui::Grid::new(egui::Id::new(("math_presets", node_id)))
-            .num_columns(cols)
-            .spacing([4.0, 4.0])
-            .show(ui, |ui| {
-                for (i, (label, preset_formula)) in PRESETS.iter().enumerate() {
-                    if ui.small_button(*label).on_hover_text(*preset_formula).clicked() {
-                        *formula = preset_formula.to_string();
-                        *variables = detect_variables(formula);
-                    }
-                    if (i + 1) % cols == 0 { ui.end_row(); }
-                }
-            });
-    });
 }

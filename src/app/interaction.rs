@@ -413,7 +413,8 @@ impl super::PatchworkApp {
                                 let accent = egui::Color32::from_rgb(cr, cg, cb);
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new(node.node_type.title()).strong().color(accent));
-                                    ui.label(egui::RichText::new(format!("#{}", id)).small().color(egui::Color32::from_rgb(100, 100, 120)));
+                                    let dim = ui.visuals().widgets.noninteractive.fg_stroke.color;
+                                    ui.label(egui::RichText::new(format!("#{}", id)).small().color(dim));
                                 });
                                 ui.separator();
                             }

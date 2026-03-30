@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use eframe::egui;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -28,6 +29,8 @@ pub struct ProfilerState {
     pub last_frame: Instant,
     pub frame_times: VecDeque<f32>,
     max_history: usize,
+    pub node_count: usize,
+    pub connection_count: usize,
     _thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -92,6 +95,8 @@ impl ProfilerState {
             last_frame: Instant::now(),
             frame_times: VecDeque::with_capacity(120),
             max_history: 120,
+            node_count: 0,
+            connection_count: 0,
             _thread: Some(thread),
         }
     }
@@ -225,6 +230,21 @@ pub fn render(ui: &mut egui::Ui, state: &ProfilerState) {
         ui.label(egui::RichText::new(format!("CPU: {:.1}%", m.process_cpu)).small());
     });
     draw_sparkline(ui, &state.process_mem_history, egui::Color32::from_rgb(255, 180, 80), 0.0, (m.process_mem_mb * 2.0).max(100.0));
+
+    ui.separator();
+
+    // Graph stats
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(format!("Nodes: {}  Wires: {}", state.node_count, state.connection_count))
+            .small().color(egui::Color32::GRAY));
+    });
+}
+
+impl ProfilerState {
+    pub fn set_graph_stats(&mut self, nodes: usize, connections: usize) {
+        self.node_count = nodes;
+        self.connection_count = connections;
+    }
 }
 
 fn draw_sparkline(ui: &mut egui::Ui, data: &VecDeque<f32>, color: egui::Color32, min: f32, max: f32) {

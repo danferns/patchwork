@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::node_trait::NodeBehavior;
+
 fn default_true() -> bool { true }
 fn default_bg_color() -> [u8; 3] { [20, 20, 20] }
 fn default_text_color() -> [u8; 3] { [220, 220, 220] }
@@ -14,13 +16,6 @@ fn default_grid_style() -> u8 { 2 } // Default: Dotted
 fn default_rounding() -> f32 { 16.0 }
 fn default_spacing() -> f32 { 4.0 }
 fn default_wire_thickness() -> f32 { 6.0 }
-fn default_display_color() -> [u8; 3] { [80, 200, 120] }
-fn default_comment_color() -> [u8; 3] { [45, 45, 50] }
-fn default_scope_history() -> Vec<f32> { Vec::new() }
-fn default_scope_length() -> usize { 200 }
-fn default_scope_min() -> f32 { 0.0 }
-fn default_scope_max() -> f32 { 1.0 }
-fn default_scope_height() -> f32 { 80.0 }
 fn default_canvas_w() -> f32 { 400.0 }
 fn default_canvas_h() -> f32 { 300.0 }
 fn default_wiggle_range() -> f32 { 1.0 }
@@ -330,32 +325,6 @@ pub enum NodeType {
         #[serde(default)]
         label: String,
     },
-    Display {
-        #[serde(default = "default_scope_history")]
-        history: Vec<f32>,
-        #[serde(default = "default_scope_length")]
-        history_max: usize,
-        #[serde(default = "default_scope_min")]
-        scope_min: f32,
-        #[serde(default = "default_scope_max")]
-        scope_max: f32,
-        #[serde(default = "default_scope_height")]
-        scope_height: f32,
-        #[serde(default)]
-        paused: bool,
-        #[serde(default = "default_display_color")]
-        display_color: [u8; 3],
-        #[serde(default)]
-        label: String,
-        #[serde(default)]
-        auto_fit: bool,
-    },
-    VisualOutput {
-        #[serde(default = "default_preview_size")]
-        preview_size: f32,
-    },
-    Add,
-    Multiply,
     /// Formula-based math node with auto-detected variable ports (A-Z)
     Math {
         formula: String,
@@ -369,7 +338,6 @@ pub enum NodeType {
         #[serde(default)]
         error: String,
     },
-    File { path: String, content: String },
     /// Folder browser: lists files in a directory, click to open
     FolderBrowser {
         #[serde(default)]
@@ -379,7 +347,6 @@ pub enum NodeType {
         #[serde(default)]
         search: String,
     },
-    TextEditor { content: String },
     WgslViewer {
         #[serde(default)]
         wgsl_code: String,
@@ -401,18 +368,6 @@ pub enum NodeType {
         resolution: u32,
         #[serde(default)]
         expanded: bool,
-    },
-    MouseTracker { x: f32, y: f32 },
-    Time {
-        #[serde(default)]
-        elapsed: f32,
-        #[serde(default)]
-        speed: f32,
-        #[serde(default)]
-        running: bool,
-    },
-    Color {
-        r: u8, g: u8, b: u8,
     },
     MidiOut {
         port_name: String,
@@ -483,11 +438,6 @@ pub enum NodeType {
         #[serde(default)]
         send_buf: String,
     },
-    Comment {
-        text: String,
-        #[serde(default = "default_comment_color")]
-        bg_color: [u8; 3],
-    },
     Script {
         name: String,
         input_names: Vec<String>,
@@ -506,7 +456,6 @@ pub enum NodeType {
         #[serde(default)]
         messages: Vec<String>,
     },
-    Monitor,
     OscOut {
         host: String,
         port: u16,
@@ -530,15 +479,6 @@ pub enum NodeType {
         /// Auto-discovered addresses: (address, arg_count, last_preview)
         #[serde(default)]
         discovered: Vec<(String, usize, String)>,
-    },
-    KeyInput {
-        key_name: String,
-        #[serde(default)]
-        pressed: bool,
-        #[serde(default)]
-        toggle_mode: bool,
-        #[serde(default)]
-        toggled_on: bool,
     },
     Palette {
         #[serde(default)]
@@ -588,10 +528,6 @@ pub enum NodeType {
         api_key_name: String,
         #[serde(default)]
         custom_url: String,
-    },
-    JsonExtract {
-        #[serde(default)]
-        path: String,
     },
     FileMenu,
     ZoomControl {
@@ -661,6 +597,9 @@ pub enum NodeType {
         selected_input: String,
         #[serde(default = "default_point_eight")]
         master_volume: f32,
+        /// Central DSP enable switch — audio only flows when this is true.
+        #[serde(default)]
+        enabled: bool,
     },
     AudioFx {
         #[serde(default)]
@@ -732,7 +671,6 @@ pub enum NodeType {
         error: String,
     },
     McpServer,
-    Profiler,
     HtmlViewer,
     // ── Image & Signal nodes ────────────────────────────────
     ImageNode {
@@ -761,17 +699,6 @@ pub enum NodeType {
         exposure: f32,
         #[serde(default = "default_one")]
         gamma: f32,
-    },
-    Crop {
-        /// Crop margins as fractions 0.0–1.0 of the image dimension
-        #[serde(default)]
-        top: f32,
-        #[serde(default)]
-        left: f32,
-        #[serde(default)]
-        bottom: f32,
-        #[serde(default)]
-        right: f32,
     },
     Blend {
         #[serde(default)]
@@ -810,16 +737,6 @@ pub enum NodeType {
         color: [u8; 3],
         #[serde(default = "default_draw_width")]
         line_width: f32,
-    },
-    Noise {
-        #[serde(default)]
-        noise_type: u8,
-        #[serde(default)]
-        mode: u8,
-        #[serde(default = "default_noise_scale")]
-        scale: f32,
-        #[serde(default)]
-        seed: u32,
     },
     ColorCurves {
         #[serde(default = "default_curve_points")]
@@ -888,16 +805,6 @@ pub enum NodeType {
         last_input_hash: u64,
     },
     /// Gate: Compare + pass/block in one node.
-    /// When condition (Value <mode> Threshold) is true → output = Value. Else → output = else_value.
-    Gate {
-        /// 0: >, 1: <, 2: >=, 3: <=, 4: ==, 5: !=
-        #[serde(default)]
-        mode: u8,
-        #[serde(default)]
-        threshold: f32,
-        #[serde(default)]
-        else_value: f32,
-    },
     /// Timer/Interval: periodic pulse every N seconds.
     /// Uses wall-clock reference time for drift-free tempo sync.
     Timer {
@@ -922,26 +829,6 @@ pub enum NodeType {
         #[serde(skip)]
         time_initialized: bool,
     },
-    /// Map/Range: linear mapping from one range to another
-    MapRange {
-        #[serde(default)]
-        in_min: f32,
-        #[serde(default = "default_one")]
-        in_max: f32,
-        #[serde(default)]
-        out_min: f32,
-        #[serde(default = "default_one")]
-        out_max: f32,
-        #[serde(default)]
-        clamp: bool,
-    },
-    /// String Format: template with {0}, {1} placeholders
-    StringFormat {
-        #[serde(default)]
-        template: String,
-        #[serde(default = "default_string_format_args")]
-        arg_count: usize,
-    },
     /// Sample & Hold: capture value on trigger rising edge, hold until next
     SampleHold {
         #[serde(default)]
@@ -964,10 +851,65 @@ pub enum NodeType {
         #[serde(default)]
         mode: u8,
     },
+    /// Trait-based node — standalone struct implementing NodeBehavior.
+    /// This is the plugin pathway: external nodes use this variant.
+    #[serde(skip)]
+    Dynamic {
+        inner: DynNode,
+    },
+}
+
+/// Wrapper around Box<dyn NodeBehavior> that implements Clone + Debug.
+/// Serde is handled via the NodeRegistry (type_tag + save_state/load_state).
+pub struct DynNode {
+    pub node: Box<dyn NodeBehavior>,
+}
+
+impl Clone for DynNode {
+    fn clone(&self) -> Self {
+        // Reconstruct from serialized state via the registry
+        let tag = self.node.type_tag();
+        let state = self.node.save_state();
+        if let Some(cloned) = crate::node_trait::NODE_REGISTRY.lock().unwrap().create(tag, &state) {
+            DynNode { node: cloned }
+        } else {
+            // Fallback: create a placeholder
+            DynNode { node: Box::new(crate::nodes::add_node::AddNode::default()) }
+        }
+    }
+}
+
+impl std::fmt::Debug for DynNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DynNode({})", self.node.title())
+    }
+}
+
+impl serde::Serialize for DynNode {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = s.serialize_map(Some(2))?;
+        map.serialize_entry("type_tag", self.node.type_tag())?;
+        map.serialize_entry("state", &self.node.save_state())?;
+        map.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for DynNode {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = serde_json::Value::deserialize(d)?;
+        let tag = v.get("type_tag").and_then(|t| t.as_str()).unwrap_or("add");
+        let state = v.get("state").cloned().unwrap_or(serde_json::Value::Null);
+        let registry = crate::node_trait::NODE_REGISTRY.lock().unwrap();
+        if let Some(node) = registry.create(tag, &state) {
+            Ok(DynNode { node })
+        } else {
+            Ok(DynNode { node: Box::new(crate::nodes::add_node::AddNode::default()) })
+        }
+    }
 }
 
 fn default_pulse_width() -> f32 { 0.1 }
-fn default_string_format_args() -> usize { 2 }
 fn default_confidence() -> f32 { 0.05 }
 fn default_video_w() -> u32 { 640 }
 fn default_video_h() -> u32 { 480 }
@@ -984,7 +926,6 @@ fn default_device_id() -> u8 { 1 }
 fn default_preview_size() -> f32 { 150.0 }
 fn default_draw_size() -> f32 { 200.0 }
 fn default_draw_width() -> f32 { 2.0 }
-fn default_noise_scale() -> f32 { 5.0 }
 fn default_curve_points() -> Vec<[f32; 2]> { vec![[0.0, 0.0], [1.0, 1.0]] }
 /// Flat EQ: 5 points at 0dB (y=0.5) across the frequency range
 fn default_eq_points() -> Vec<[f32; 2]> { vec![[0.0, 0.5], [0.25, 0.5], [0.5, 0.5], [0.75, 0.5], [1.0, 0.5]] }
@@ -1001,37 +942,24 @@ fn default_distortion_drive() -> f32 { 4.0 }
 fn default_lpf_cutoff() -> f32 { 1000.0 }
 fn default_hpf_cutoff() -> f32 { 200.0 }
 
-impl NodeType {
-    pub fn title(&self) -> &str {
+impl NodeBehavior for NodeType {
+    fn title(&self) -> &str {
         match self {
             NodeType::Slider { .. } => "Slider",
-            NodeType::Display { .. } => "Display",
-            NodeType::VisualOutput { .. } => "Visual Output",
-            NodeType::Add => "Add",
-            NodeType::Multiply => "Multiply",
             NodeType::Math { .. } => "Math",
-            NodeType::File { .. } => "File",
             NodeType::FolderBrowser { .. } => "Folder",
-            NodeType::TextEditor { .. } => "Text Editor",
             NodeType::WgslViewer { .. } => "WGSL Viewer",
-            NodeType::Time { .. } => "Time",
-            NodeType::Color { .. } => "Color",
-            NodeType::MouseTracker { .. } => "Mouse Tracker",
             NodeType::MidiOut { .. } => "MIDI Out",
             NodeType::MidiIn { .. } => "MIDI In",
             NodeType::Theme { .. } => "Theme",
             NodeType::Serial { .. } => "Serial",
-            NodeType::Comment { .. } => "Comment",
             NodeType::Script { .. } => "Script",
             NodeType::Console { .. } => "Console",
-            NodeType::Monitor => "Monitor",
             NodeType::OscOut { .. } => "OSC Out",
             NodeType::OscIn { .. } => "OSC In",
-            NodeType::KeyInput { .. } => "Keyboard Input",
             NodeType::Palette { .. } => "Node Palette",
             NodeType::HttpRequest { .. } => "HTTP Request",
             NodeType::AiRequest { .. } => "AI Request",
-            NodeType::JsonExtract { .. } => "JSON Extract",
             NodeType::FileMenu => "File",
             NodeType::ZoomControl { .. } => "Zoom",
             NodeType::ObHub { .. } => "OB Hub",
@@ -1041,7 +969,7 @@ impl NodeType {
             NodeType::AudioPlayer { .. } => "Audio Player",
             NodeType::AudioInput { .. } => "Audio Input",
             NodeType::AudioAnalyzer => "Audio Analyzer",
-            NodeType::AudioDevice { .. } => "Audio Device",
+            NodeType::AudioDevice { .. } => "Audio Manager",
             NodeType::AudioFx { .. } => "Audio FX",
             NodeType::AudioDelay { .. } => "Delay",
             NodeType::AudioDistortion { .. } => "Distortion",
@@ -1054,44 +982,33 @@ impl NodeType {
             NodeType::AudioMixer { .. } => "Mixer",
             NodeType::RustPlugin { .. } => "Rust Plugin",
             NodeType::McpServer => "MCP Server",
-            NodeType::Profiler => "System Profiler",
             NodeType::HtmlViewer => "HTML Viewer",
             NodeType::ImageNode { .. } => "Image",
-            NodeType::Crop { .. } => "Crop",
             NodeType::ImageEffects { .. } => "Image Effects",
             NodeType::Blend { .. } => "Blend",
             NodeType::Curve { .. } => "Curve",
             NodeType::Draw { .. } => "Draw",
-            NodeType::Noise { .. } => "Noise",
             NodeType::ColorCurves { .. } => "Color Curves",
             NodeType::VideoPlayer { .. } => "Video Player",
             NodeType::Camera { .. } => "Camera",
             NodeType::MlModel { .. } => "ML Model",
-            NodeType::Gate { .. } => "Gate",
             NodeType::Timer { .. } => "Timer",
-            NodeType::MapRange { .. } => "Map/Range",
-            NodeType::StringFormat { .. } => "String Format",
             NodeType::SampleHold { .. } => "Sample & Hold",
             NodeType::Select { .. } => "Select",
+            NodeType::Dynamic { inner } => inner.node.title(),
         }
     }
 
-    pub fn inputs(&self) -> Vec<PortDef> {
+    fn inputs(&self) -> Vec<PortDef> {
         use PortKind::*;
         match self {
             NodeType::Slider { .. } => vec![PortDef::new("In", Number), PortDef::new("Min", Number), PortDef::new("Max", Number)],
-            NodeType::Display { .. } => vec![PortDef::new("Value", Generic)],
-            NodeType::VisualOutput { .. } => vec![PortDef::new("Image", Image)],
-            NodeType::Add => vec![PortDef::new("A", Number), PortDef::new("B", Number)],
-            NodeType::Multiply => vec![PortDef::new("A", Number), PortDef::new("B", Number)],
             NodeType::Math { variables, .. } => {
                 variables.iter().map(|c| {
                     PortDef::dynamic(format!("{}", c), Number)
                 }).collect()
             }
-            NodeType::File { .. } => vec![],
             NodeType::FolderBrowser { .. } => vec![],
-            NodeType::TextEditor { .. } => vec![PortDef::new("Text In", Text)],
             NodeType::WgslViewer { uniform_names, uniform_types, .. } => {
                 let mut ports = vec![PortDef::new("WGSL", Text)];
                 for (i, n) in uniform_names.iter().enumerate() {
@@ -1106,9 +1023,6 @@ impl NodeType {
                 }
                 ports
             }
-            NodeType::Time { .. } => vec![],
-            NodeType::Color { .. } => vec![PortDef::new("R", Color), PortDef::new("G", Color), PortDef::new("B", Color)],
-            NodeType::MouseTracker { .. } => vec![],
             NodeType::MidiOut { mode, .. } => match mode {
                 MidiMode::Note => vec![PortDef::new("Channel", Number), PortDef::new("Note", Number), PortDef::new("Velocity", Number)],
                 MidiMode::CC => vec![PortDef::new("Channel", Number), PortDef::new("CC#", Number), PortDef::new("Value", Number)],
@@ -1128,18 +1042,14 @@ impl NodeType {
                 PortDef::new("BG Image", Image),
             ],
             NodeType::Serial { .. } => vec![PortDef::new("Send", Text)],
-            NodeType::Comment { .. } => vec![],
-            NodeType::Console { .. } => vec![],
-            NodeType::Monitor => vec![],
+            NodeType::Console { .. } => vec![PortDef::new("Log", Generic)],
             NodeType::OscOut { arg_count, .. } => {
                 (0..*arg_count).map(|i| PortDef::dynamic(format!("Arg {}", i), Generic)).collect()
             }
             NodeType::OscIn { .. } => vec![],
-            NodeType::KeyInput { .. } => vec![],
             NodeType::Palette { .. } => vec![],
             NodeType::HttpRequest { .. } => vec![PortDef::new("URL", Text), PortDef::new("Body", Text), PortDef::new("Headers", Text)],
             NodeType::AiRequest { .. } => vec![PortDef::new("System", Text), PortDef::new("Prompt", Text), PortDef::new("Send", Trigger)],
-            NodeType::JsonExtract { .. } => vec![PortDef::new("JSON", Text)],
             NodeType::FileMenu => vec![],
             NodeType::ZoomControl { .. } => vec![PortDef::new("Zoom", Number)],
             NodeType::ObHub { .. } => vec![PortDef::new("Command", Text)],
@@ -1172,14 +1082,8 @@ impl NodeType {
                 input_names.iter().map(|n| PortDef::dynamic(n.clone(), Generic)).collect()
             }
             NodeType::McpServer => vec![],
-            NodeType::Profiler => vec![],
             NodeType::HtmlViewer => vec![PortDef::new("HTML", Text)],
             NodeType::ImageNode { .. } => vec![PortDef::new("Image In", Image)],
-            NodeType::Crop { .. } => vec![
-                PortDef::new("Image", Image),
-                PortDef::new("Top", Normalized), PortDef::new("Left", Normalized),
-                PortDef::new("Bottom", Normalized), PortDef::new("Right", Normalized),
-            ],
             NodeType::ImageEffects { .. } => vec![
                 PortDef::new("Image", Image), PortDef::new("Brightness", Normalized), PortDef::new("Contrast", Normalized),
                 PortDef::new("Saturation", Normalized), PortDef::new("Hue", Number), PortDef::new("Exposure", Number), PortDef::new("Gamma", Number),
@@ -1190,24 +1094,11 @@ impl NodeType {
                 PortDef::new("Speed", Number), PortDef::new("Gate", Gate),
             ],
             NodeType::Draw { .. } => vec![],
-            NodeType::Noise { .. } => vec![PortDef::new("Seed", Number), PortDef::new("Scale", Number), PortDef::new("X", Number), PortDef::new("Y", Number)],
             NodeType::ColorCurves { .. } => vec![PortDef::new("Image", Image)],
             NodeType::VideoPlayer { .. } => vec![],
             NodeType::Camera { .. } => vec![],
             NodeType::MlModel { .. } => vec![PortDef::new("Image", Image)],
-            NodeType::Gate { .. } => vec![PortDef::new("Value", Number), PortDef::new("Threshold", Number)],
             NodeType::Timer { .. } => vec![PortDef::new("Interval", Number), PortDef::new("BPM", Number)],
-            NodeType::MapRange { .. } => vec![
-                PortDef::new("Value", Number), PortDef::new("In Min", Number), PortDef::new("In Max", Number),
-                PortDef::new("Out Min", Number), PortDef::new("Out Max", Number),
-            ],
-            NodeType::StringFormat { arg_count, .. } => {
-                let mut ports = vec![PortDef::new("Template", Text)];
-                for i in 0..*arg_count {
-                    ports.push(PortDef::dynamic(format!("Arg {}", i), Generic));
-                }
-                ports
-            }
             NodeType::SampleHold { .. } => vec![PortDef::new("Value", Generic), PortDef::new("Trigger", Trigger)],
             NodeType::Select { .. } => vec![PortDef::new("A", Generic), PortDef::new("B", Generic), PortDef::new("Selector", Normalized)],
             NodeType::Script { input_names, continuous, .. } => {
@@ -1219,25 +1110,17 @@ impl NodeType {
                 }
                 ports
             }
+            NodeType::Dynamic { inner } => inner.node.inputs(),
         }
     }
 
-    pub fn outputs(&self) -> Vec<PortDef> {
+    fn outputs(&self) -> Vec<PortDef> {
         use PortKind::*;
         match self {
             NodeType::Slider { .. } => vec![PortDef::new("Value", Number)],
-            NodeType::Display { .. } => vec![],
-            NodeType::VisualOutput { .. } => vec![],
-            NodeType::Add => vec![PortDef::new("Result", Number)],
-            NodeType::Multiply => vec![PortDef::new("Result", Number)],
             NodeType::Math { .. } => vec![PortDef::new("Result", Number)],
-            NodeType::File { .. } => vec![PortDef::new("Content", Text)],
             NodeType::FolderBrowser { .. } => vec![PortDef::new("Path", Text), PortDef::new("Name", Text), PortDef::new("Content", Text)],
-            NodeType::TextEditor { .. } => vec![PortDef::new("Text Out", Text)],
             NodeType::WgslViewer { .. } => vec![PortDef::new("Image", Image)],
-            NodeType::Time { .. } => vec![PortDef::new("Seconds", Number), PortDef::new("Beat", Normalized)],
-            NodeType::Color { .. } => vec![PortDef::new("R", Color), PortDef::new("G", Color), PortDef::new("B", Color)],
-            NodeType::MouseTracker { .. } => vec![PortDef::new("X", Number), PortDef::new("Y", Number)],
             NodeType::MidiOut { .. } => vec![],
             NodeType::MidiIn { .. } => vec![PortDef::new("Channel", Number), PortDef::new("Note", Number), PortDef::new("Velocity", Number)],
             NodeType::Theme { .. } => vec![
@@ -1246,9 +1129,7 @@ impl NodeType {
                 PortDef::new("Accent R", Color), PortDef::new("Accent G", Color), PortDef::new("Accent B", Color),
             ],
             NodeType::Serial { .. } => vec![PortDef::new("Send", Text)],
-            NodeType::Comment { .. } => vec![],
             NodeType::Console { .. } => vec![],
-            NodeType::Monitor => vec![PortDef::new("FPS", Number), PortDef::new("Frame ms", Number), PortDef::new("Nodes", Number)],
             NodeType::OscOut { .. } => vec![],
             NodeType::OscIn { arg_count, .. } => {
                 let mut ports: Vec<PortDef> = (0..*arg_count).map(|i| PortDef::dynamic(format!("Arg {}", i), Generic)).collect();
@@ -1256,14 +1137,12 @@ impl NodeType {
                 ports.push(PortDef::new("Address", Text));
                 ports
             }
-            NodeType::KeyInput { .. } => vec![PortDef::new("Trigger", Trigger), PortDef::new("Held", Gate), PortDef::new("Toggle", Gate)],
             NodeType::Script { output_names, .. } => {
                 output_names.iter().map(|n| PortDef::dynamic(n.clone(), Generic)).collect()
             }
             NodeType::Palette { .. } => vec![],
             NodeType::HttpRequest { .. } => vec![PortDef::new("Response", Text), PortDef::new("Status", Text)],
             NodeType::AiRequest { .. } => vec![PortDef::new("Response", Text), PortDef::new("Status", Text)],
-            NodeType::JsonExtract { .. } => vec![PortDef::new("Value", Generic)],
             NodeType::FileMenu => vec![],
             NodeType::ZoomControl { .. } => vec![PortDef::new("Zoom", Number)],
             NodeType::ObHub { detected_devices, .. } => {
@@ -1318,9 +1197,7 @@ impl NodeType {
             }
             NodeType::McpServer => vec![],
             NodeType::HtmlViewer => vec![PortDef::new("URL", Text)],
-            NodeType::Profiler => vec![PortDef::new("FPS", Number), PortDef::new("CPU %", Number), PortDef::new("RAM %", Number), PortDef::new("Proc MB", Number)],
             NodeType::ImageNode { .. } => vec![PortDef::new("Image", Image)],
-            NodeType::Crop { .. } => vec![PortDef::new("Cropped", Image)],
             NodeType::ImageEffects { .. } => vec![PortDef::new("Image", Image)],
             NodeType::Blend { .. } => vec![PortDef::new("Image", Image)],
             NodeType::Curve { .. } => vec![
@@ -1328,48 +1205,34 @@ impl NodeType {
                 PortDef::new("End", Trigger), PortDef::new("Image", Image),
             ],
             NodeType::Draw { .. } => vec![PortDef::new("Image", Image), PortDef::new("Points", Text)],
-            NodeType::Noise { .. } => vec![PortDef::new("Value", Number), PortDef::new("Image", Image)],
             NodeType::ColorCurves { .. } => vec![PortDef::new("Image", Image)],
             NodeType::VideoPlayer { .. } => vec![PortDef::new("Frame", Image), PortDef::new("Progress", Normalized)],
             NodeType::Camera { .. } => vec![PortDef::new("Frame", Image)],
             NodeType::MlModel { .. } => vec![PortDef::new("Annotated", Image), PortDef::new("Result", Text), PortDef::new("JSON", Text)],
-            NodeType::Gate { .. } => vec![PortDef::new("Out", Number), PortDef::new("Pass", Gate)],
             NodeType::Timer { .. } => vec![PortDef::new("Trigger", Trigger), PortDef::new("Phase", Normalized), PortDef::new("BPM", Number)],
-            NodeType::MapRange { .. } => vec![PortDef::new("Value", Number)],
-            NodeType::StringFormat { .. } => vec![PortDef::new("Text", Text)],
             NodeType::SampleHold { .. } => vec![PortDef::new("Out", Generic), PortDef::new("Trigger", Trigger)],
             NodeType::Select { .. } => vec![PortDef::new("Out", Generic), PortDef::new("Active", Gate)],
+            NodeType::Dynamic { inner } => inner.node.outputs(),
         }
     }
 
-    pub fn color_hint(&self) -> [u8; 3] {
+    fn color_hint(&self) -> [u8; 3] {
         match self {
             NodeType::Slider { .. } => [80, 160, 255],
-            NodeType::Display { .. } => [100, 200, 100],
-            NodeType::VisualOutput { .. } => [200, 100, 255],
-            NodeType::Add | NodeType::Multiply | NodeType::Math { .. } => [200, 160, 80],
-            NodeType::File { .. } => [180, 120, 200],
+            NodeType::Math { .. } => [200, 160, 80],
             NodeType::FolderBrowser { .. } => [140, 160, 200],
-            NodeType::TextEditor { .. } => [160, 140, 220],
             NodeType::WgslViewer { .. } => [220, 140, 60],
-            NodeType::Time { .. } => [180, 220, 100],
-            NodeType::Color { .. } => [255, 120, 180],
-            NodeType::MouseTracker { .. } => [200, 100, 100],
             NodeType::MidiOut { .. } => [60, 180, 180],
             NodeType::MidiIn { .. } => [80, 200, 160],
             NodeType::Theme { .. } => [255, 180, 80],
             NodeType::Serial { .. } => [200, 180, 60],
-            NodeType::Comment { .. } => [140, 140, 140],
             NodeType::Script { .. } => [150, 100, 200],
             NodeType::Console { .. } => [100, 150, 100],
-            NodeType::Monitor => [80, 200, 200],
             NodeType::OscOut { .. } => [220, 120, 60],
             NodeType::OscIn { .. } => [60, 160, 220],
-            NodeType::KeyInput { .. } => [220, 180, 60],
             NodeType::Palette { .. } => [120, 120, 180],
             NodeType::HttpRequest { .. } => [60, 180, 120],
             NodeType::AiRequest { .. } => [180, 100, 255],
-            NodeType::JsonExtract { .. } => [200, 160, 60],
             NodeType::FileMenu => [200, 200, 200],
             NodeType::ZoomControl { .. } => [160, 160, 160],
             NodeType::ObHub { .. } => [40, 180, 120],
@@ -1392,37 +1255,65 @@ impl NodeType {
             NodeType::AudioMixer { .. } => [160, 120, 220],
             NodeType::RustPlugin { .. } => [255, 120, 50],
             NodeType::McpServer => [120, 200, 255],
-            NodeType::Profiler => [255, 160, 60],
             NodeType::HtmlViewer => [60, 180, 220],
             NodeType::ImageNode { .. } => [200, 140, 220],
-            NodeType::Crop { .. } => [160, 140, 200],
             NodeType::ImageEffects { .. } => [180, 120, 200],
             NodeType::Blend { .. } => [160, 100, 180],
             NodeType::Curve { .. } => [100, 200, 160],
             NodeType::Draw { .. } => [200, 180, 100],
-            NodeType::Noise { .. } => [140, 180, 140],
             NodeType::ColorCurves { .. } => [220, 140, 160],
             NodeType::VideoPlayer { .. } => [220, 80, 140],
             NodeType::Camera { .. } => [80, 200, 140],
             NodeType::MlModel { .. } => [200, 80, 255],
-            NodeType::Gate { .. } => [220, 180, 60],
             NodeType::Timer { .. } => [100, 200, 180],
-            NodeType::MapRange { .. } => [180, 140, 220],
-            NodeType::StringFormat { .. } => [220, 160, 100],
             NodeType::SampleHold { .. } => [120, 200, 160],
             NodeType::Select { .. } => [200, 160, 120],
+            NodeType::Dynamic { inner } => inner.node.color_hint(),
         }
     }
 
     /// Whether this node renders its ports inline within the content
     /// instead of as separate lists at top/bottom.
-    pub fn inline_ports(&self) -> bool {
-        matches!(self, NodeType::Theme { .. } | NodeType::MidiOut { .. } | NodeType::Synth { .. } | NodeType::WgslViewer { .. } | NodeType::Color { .. } | NodeType::ImageEffects { .. } | NodeType::Slider { .. } | NodeType::Display { .. } | NodeType::VisualOutput { .. } | NodeType::Blend { .. } | NodeType::HttpRequest { .. } | NodeType::AiRequest { .. } | NodeType::Math { .. } | NodeType::AudioDelay { .. } | NodeType::AudioDistortion { .. } | NodeType::AudioLowPass { .. } | NodeType::AudioHighPass { .. } | NodeType::AudioGain { .. } | NodeType::AudioReverb { .. } | NodeType::AudioEq { .. } | NodeType::AudioPlayer { .. } | NodeType::Timer { .. } | NodeType::MapRange { .. } | NodeType::StringFormat { .. } | NodeType::SampleHold { .. } | NodeType::Select { .. } | NodeType::Curve { .. } | NodeType::AudioMixer { .. } | NodeType::Gate { .. } | NodeType::Speaker { .. } | NodeType::AudioInput { .. } | NodeType::Crop { .. })
+    fn inline_ports(&self) -> bool {
+        match self {
+            NodeType::Dynamic { inner } => inner.node.inline_ports(),
+            _ => matches!(self, NodeType::Theme { .. } | NodeType::MidiOut { .. } | NodeType::Synth { .. } | NodeType::WgslViewer { .. } | NodeType::ImageEffects { .. } | NodeType::Slider { .. } | NodeType::Blend { .. } | NodeType::HttpRequest { .. } | NodeType::AiRequest { .. } | NodeType::Math { .. } | NodeType::AudioDelay { .. } | NodeType::AudioDistortion { .. } | NodeType::AudioLowPass { .. } | NodeType::AudioHighPass { .. } | NodeType::AudioGain { .. } | NodeType::AudioReverb { .. } | NodeType::AudioEq { .. } | NodeType::AudioPlayer { .. } | NodeType::Timer { .. } | NodeType::SampleHold { .. } | NodeType::Select { .. } | NodeType::Curve { .. } | NodeType::AudioMixer { .. } | NodeType::Speaker { .. } | NodeType::AudioInput { .. } | NodeType::Console { .. }),
+        }
     }
 
     /// Whether this node skips the standard egui::Window and renders itself completely custom.
-    pub fn custom_render(&self) -> bool {
-        matches!(self, NodeType::Slider { .. } | NodeType::Comment { .. } | NodeType::Display { .. })
+    fn custom_render(&self) -> bool {
+        match self {
+            NodeType::Dynamic { inner } => inner.node.custom_render(),
+            _ => matches!(self, NodeType::Slider { .. }),
+        }
+    }
+
+    fn no_title(&self) -> bool {
+        match self {
+            NodeType::Dynamic { inner } => inner.node.no_title(),
+            _ => false,
+        }
+    }
+
+    fn min_width(&self) -> Option<f32> {
+        match self {
+            NodeType::Dynamic { inner } => inner.node.min_width(),
+            _ => None,
+        }
+    }
+
+    fn render_background(&self, painter: &eframe::egui::Painter, rect: eframe::egui::Rect) -> Option<eframe::egui::Frame> {
+        match self {
+            NodeType::Dynamic { inner } => inner.node.render_background(painter, rect),
+            _ => None,
+        }
+    }
+
+    fn type_tag(&self) -> &str {
+        // Legacy enum nodes use "builtin:{title}" as their type tag.
+        // Migrated standalone structs use their own stable tag.
+        "builtin"
     }
 }
 
@@ -1589,23 +1480,8 @@ impl Graph {
                         if let Some(PortValue::Float(v)) = inputs.first() { *value = *v; }
                         values.insert((id, 0), PortValue::Float(*value));
                     }
-                    NodeType::Add => {
-                        let a = inputs.first().map(|v| v.as_float()).unwrap_or(0.0);
-                        let b = inputs.get(1).map(|v| v.as_float()).unwrap_or(0.0);
-                        values.insert((id, 0), PortValue::Float(a + b));
-                    }
-                    NodeType::Multiply => {
-                        let a = inputs.first().map(|v| v.as_float()).unwrap_or(0.0);
-                        let b = inputs.get(1).map(|v| v.as_float()).unwrap_or(0.0);
-                        values.insert((id, 0), PortValue::Float(a * b));
-                    }
                     NodeType::Math { result, .. } => {
                         values.insert((id, 0), PortValue::Float(*result as f32));
-                    }
-                    NodeType::Display { .. } => {
-                        if let Some(v) = inputs.first() {
-                            values.insert((id, 0), v.clone());
-                        }
                     }
                     _ => {}
                 }
@@ -1635,38 +1511,10 @@ impl Graph {
                         }
                         values.insert((id, 0), PortValue::Float(*value));
                     }
-                    NodeType::Add => {
-                        let a = inputs.get(0).map(|v| v.as_float()).unwrap_or(0.0);
-                        let b = inputs.get(1).map(|v| v.as_float()).unwrap_or(0.0);
-                        values.insert((id, 0), PortValue::Float(a + b));
-                    }
-                    NodeType::Multiply => {
-                        let a = inputs.get(0).map(|v| v.as_float()).unwrap_or(0.0);
-                        let b = inputs.get(1).map(|v| v.as_float()).unwrap_or(0.0);
-                        values.insert((id, 0), PortValue::Float(a * b));
-                    }
                     NodeType::Math { result, .. } => {
                         // Result is computed in render (uses Rhai for formula eval).
                         // Just propagate the stored result.
                         values.insert((id, 0), PortValue::Float(*result as f32));
-                    }
-                    NodeType::Gate { mode, threshold, else_value } => {
-                        let val = inputs.get(0).map(|v| v.as_float()).unwrap_or(0.0);
-                        let thresh = inputs.get(1).map(|v| v.as_float()).unwrap_or(*threshold);
-                        // Also update threshold from input so UI stays in sync
-                        if inputs.get(1).is_some() { *threshold = thresh; }
-                        let pass = match mode {
-                            0 => val > thresh,
-                            1 => val < thresh,
-                            2 => val >= thresh,
-                            3 => val <= thresh,
-                            4 => (val - thresh).abs() < f32::EPSILON,
-                            5 => (val - thresh).abs() >= f32::EPSILON,
-                            _ => val > thresh,
-                        };
-                        let out = if pass { val } else { *else_value };
-                        values.insert((id, 0), PortValue::Float(out));
-                        values.insert((id, 1), PortValue::Float(if pass { 1.0 } else { 0.0 }));
                     }
                     NodeType::Timer { interval, elapsed, running, pulse_width,
                                        ref_time, paused_elapsed, time_initialized } => {
@@ -1706,41 +1554,6 @@ impl Graph {
                         values.insert((id, 0), PortValue::Float(trigger));
                         values.insert((id, 1), PortValue::Float(phase));
                         values.insert((id, 2), PortValue::Float(bpm));
-                    }
-                    NodeType::MapRange { in_min, in_max, out_min, out_max, clamp } => {
-                        let val = inputs.get(0).map(|v| v.as_float()).unwrap_or(0.0);
-                        // Override ranges from inputs
-                        if let Some(v) = inputs.get(1) { *in_min = v.as_float(); }
-                        if let Some(v) = inputs.get(2) { *in_max = v.as_float(); }
-                        if let Some(v) = inputs.get(3) { *out_min = v.as_float(); }
-                        if let Some(v) = inputs.get(4) { *out_max = v.as_float(); }
-
-                        let t = (val - *in_min) / (*in_max - *in_min).max(0.001);
-                        let t_final = if *clamp { t.clamp(0.0, 1.0) } else { t };
-                        let mapped = *out_min + t_final * (*out_max - *out_min);
-                        values.insert((id, 0), PortValue::Float(mapped));
-                    }
-                    NodeType::StringFormat { template, arg_count } => {
-                        // Port 0 = template text (optional), ports 1..=arg_count = args
-                        let effective_template = match inputs.first() {
-                            Some(PortValue::Text(s)) if !s.is_empty() => s.clone(),
-                            _ => template.clone(),
-                        };
-                        let mut result = effective_template;
-                        for i in 0..*arg_count {
-                            let port = i + 1;
-                            let replacement = match inputs.get(port) {
-                                Some(PortValue::Float(f)) => {
-                                    let s = format!("{:.6}", f);
-                                    s.trim_end_matches('0').trim_end_matches('.').to_string()
-                                }
-                                Some(PortValue::Text(s)) => s.clone(),
-                                _ => String::new(),
-                            };
-                            let placeholder = format!("{{{}}}", i);
-                            result = result.replace(&placeholder, &replacement);
-                        }
-                        values.insert((id, 0), PortValue::Text(result));
                     }
                     NodeType::SampleHold { held_float, held_text, is_text, last_trigger, history } => {
                         // Input 0 = Value, Input 1 = Trigger
@@ -1847,25 +1660,6 @@ impl Graph {
                         values.insert((id, 2), PortValue::Float(if at_end { 1.0 } else { 0.0 }));
                         // Image (port 3) handled in app.rs image pass
                     }
-                    NodeType::MouseTracker { x, y } => {
-                        values.insert((id, 0), PortValue::Float(*x));
-                        values.insert((id, 1), PortValue::Float(*y));
-                    }
-                    NodeType::Time { elapsed, speed, running } => {
-                        if *running {
-                            *elapsed += real_dt * *speed;
-                        }
-                        values.insert((id, 0), PortValue::Float(*elapsed));
-                        values.insert((id, 1), PortValue::Float(*elapsed % 1.0));
-                    }
-                    NodeType::Color { r, g, b } => {
-                        values.insert((id, 0), PortValue::Float(*r as f32));
-                        values.insert((id, 1), PortValue::Float(*g as f32));
-                        values.insert((id, 2), PortValue::Float(*b as f32));
-                    }
-                    NodeType::File { content, .. } => {
-                        values.insert((id, 0), PortValue::Text(content.clone()));
-                    }
                     NodeType::FolderBrowser { selected_file, .. } => {
                         // Output the selected file path and name
                         values.insert((id, 0), PortValue::Text(selected_file.clone()));
@@ -1878,13 +1672,6 @@ impl Graph {
                         if !selected_file.is_empty() {
                             let content = std::fs::read_to_string(selected_file).unwrap_or_default();
                             values.insert((id, 2), PortValue::Text(content));
-                        }
-                    }
-                    NodeType::TextEditor { content } => {
-                        if matches!(inputs.first(), Some(PortValue::Text(_))) {
-                            values.insert((id, 0), inputs[0].clone());
-                        } else {
-                            values.insert((id, 0), PortValue::Text(content.clone()));
                         }
                     }
                     NodeType::MidiIn { channel, note, velocity, .. } => {
@@ -1995,20 +1782,30 @@ impl Graph {
                             else { 0.0 };
                         values.insert((id, 1), PortValue::Float(code));
                     }
-                    NodeType::JsonExtract { path, .. } => {
-                        let json_text = match inputs.first() {
-                            Some(PortValue::Text(s)) => s.clone(),
-                            _ => String::new(),
-                        };
-                        let extracted = if !json_text.is_empty() && !path.is_empty() {
-                            extract_json_path(&json_text, path)
-                        } else {
-                            String::new()
-                        };
-                        values.insert((id, 0), PortValue::Text(extracted));
+                    NodeType::Console { messages } => {
+                        // Log input value as a timestamped message
+                        if let Some(val) = inputs.first() {
+                            let text = format!("{}", val);
+                            if !text.is_empty() && text != "—" {
+                                // Only log if value changed (avoid flooding)
+                                let is_new = messages.last().map(|last| {
+                                    // Strip timestamp prefix for comparison
+                                    let last_msg = last.splitn(2, "] ").nth(1).unwrap_or(last);
+                                    last_msg != text
+                                }).unwrap_or(true);
+                                if is_new {
+                                    let secs = now_secs as u32;
+                                    let mins = secs / 60;
+                                    let s = secs % 60;
+                                    messages.push(format!("[{:02}:{:02}] {}", mins, s, text));
+                                    // Cap at 200 messages
+                                    if messages.len() > 200 {
+                                        messages.drain(..messages.len() - 200);
+                                    }
+                                }
+                            }
+                        }
                     }
-                    NodeType::Console { .. } => {}
-                    NodeType::Monitor => {}
                     NodeType::OscOut { .. } => {}
                     NodeType::OscIn { last_args, last_args_text, arg_count, address_filter, .. } => {
                         for i in 0..*arg_count {
@@ -2021,10 +1818,11 @@ impl Graph {
                         // Address output
                         values.insert((id, *arg_count + 1), PortValue::Text(address_filter.clone()));
                     }
-                    NodeType::KeyInput { pressed, toggled_on, .. } => {
-                        values.insert((id, 0), PortValue::Float(if *pressed { 1.0 } else { 0.0 }));
-                        values.insert((id, 1), PortValue::Float(if *pressed { 1.0 } else { 0.0 }));
-                        values.insert((id, 2), PortValue::Float(if *toggled_on { 1.0 } else { 0.0 }));
+                    NodeType::Dynamic { inner } => {
+                        let results = inner.node.evaluate(inputs);
+                        for (port, value) in results {
+                            values.insert((id, port), value);
+                        }
                     }
                     _ => {}
                 }
@@ -2102,6 +1900,9 @@ impl Graph {
 }
 
 /// Walk a JSON value using dot-separated path (e.g., "choices.0.message.content")
+pub fn extract_json_path_pub(json_str: &str, path: &str) -> String {
+    extract_json_path(json_str, path)
+}
 fn extract_json_path(json_str: &str, path: &str) -> String {
     let Ok(mut val) = serde_json::from_str::<serde_json::Value>(json_str) else {
         return format!("(parse error)");

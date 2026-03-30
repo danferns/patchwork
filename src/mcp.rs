@@ -4,6 +4,7 @@
 // Protocol: JSON-RPC over stdin/stdout.
 
 use crate::graph::*;
+use crate::node_trait::NodeBehavior;
 use crate::nodes;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

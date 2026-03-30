@@ -571,7 +571,16 @@ pub enum AudioEffect {
     Gain { level: SmoothedParam },                         // 0..2, 1.0 = unity
     LowPass { cutoff: SmoothedParam, state: f32 },         // Simple 1-pole
     HighPass { cutoff: SmoothedParam, state: f32 },
-    Delay { time_ms: f32, feedback: SmoothedParam, buffer: Vec<f32>, write_pos: usize },
+    Delay {
+        time_ms: f32,
+        feedback: SmoothedParam,
+        buffer: Vec<f32>,
+        write_pos: usize,
+        /// Max buffer capacity in samples. Once allocated, never resized — only
+        /// the read offset changes when delay time is adjusted. This avoids
+        /// allocation on the audio thread and the click from buffer zeroing.
+        max_delay_samples: usize,
+    },
     Distortion { drive: SmoothedParam },                   // 1..20
     /// Schroeder reverb — 4 comb filters + 2 allpass filters.
     Reverb {
@@ -617,8 +626,9 @@ impl AudioEffect {
                 cutoff.set(new_cutoff.target);
             }
             (AudioEffect::Delay { time_ms, feedback, .. }, AudioEffect::Delay { time_ms: new_time, feedback: new_fb, .. }) => {
-                *time_ms = *new_time; // delay time not smoothed (buffer resize needed)
+                *time_ms = *new_time; // time changes read offset, no buffer resize
                 feedback.set(new_fb.target);
+                // buffer, write_pos, max_delay_samples all preserved
             }
             (AudioEffect::Distortion { drive }, AudioEffect::Distortion { drive: new_drive }) => {
                 drive.set(new_drive.target);
@@ -678,18 +688,35 @@ impl AudioEffect {
                 *state = sample;
                 out
             }
-            AudioEffect::Delay { time_ms, feedback, buffer, write_pos } => {
-                let delay_samples = (*time_ms * sample_rate / 1000.0) as usize;
-                if buffer.len() != delay_samples.max(1) {
-                    *buffer = vec![0.0; delay_samples.max(1)];
+            AudioEffect::Delay { time_ms, feedback, buffer, write_pos, max_delay_samples } => {
+                // Pre-allocate buffer to max size on first use (2 seconds max).
+                // Never resize — only the read offset changes when delay time is tweaked.
+                let max_samples = if *max_delay_samples == 0 {
+                    let ms = (2000.0 * sample_rate / 1000.0) as usize; // 2 second max
+                    *max_delay_samples = ms;
+                    ms
+                } else {
+                    *max_delay_samples
+                };
+                if buffer.len() != max_samples {
+                    buffer.resize(max_samples, 0.0);
                     *write_pos = 0;
                 }
-                let read_pos = *write_pos;
+
+                // Read from a variable offset behind write_pos (no buffer resize needed)
+                let delay_samples = ((*time_ms * sample_rate / 1000.0) as usize)
+                    .clamp(1, max_samples - 1);
+                let read_pos = if *write_pos >= delay_samples {
+                    *write_pos - delay_samples
+                } else {
+                    max_samples - (delay_samples - *write_pos)
+                };
+
                 let delayed = buffer[read_pos];
                 let fb = feedback.tick();
                 let output = sample + delayed * fb;
                 buffer[*write_pos] = output;
-                *write_pos = (*write_pos + 1) % buffer.len();
+                *write_pos = (*write_pos + 1) % max_samples;
                 output
             }
             AudioEffect::Distortion { drive } => {
@@ -833,6 +860,9 @@ pub struct SharedAudioState {
     /// Which source NodeIds to compute per-source analysis for.
     /// Set by AudioAnalyzer nodes that are connected to specific audio sources.
     pub analyze_sources: std::collections::HashSet<NodeId>,
+    /// Audio callback performance metrics
+    pub callback_duration_us: f32,   // last callback duration in microseconds
+    pub callback_budget_us: f32,     // budget per callback (buffer_size / sample_rate * 1e6)
 }
 
 /// Real-time audio analysis — computed from the output mix each audio callback.
@@ -943,6 +973,8 @@ impl Default for SharedAudioState {
             analysis: AudioAnalysis::default(),
             source_analysis: HashMap::new(),
             analyze_sources: std::collections::HashSet::new(),
+            callback_duration_us: 0.0,
+            callback_budget_us: 0.0,
         }
     }
 }
@@ -1193,6 +1225,9 @@ pub struct AudioManager {
     // Cached device lists (refreshed periodically, not every frame)
     pub cached_output_devices: Vec<String>,
     pub cached_input_devices: Vec<String>,
+    /// Dropout counter — lives outside the Mutex so the audio callback can
+    /// increment it even when try_lock fails (which is the whole point).
+    pub dropout_count: Arc<AtomicU32>,
 }
 
 impl AudioManager {
@@ -1213,6 +1248,7 @@ impl AudioManager {
             input_buffers: HashMap::new(),
             cached_output_devices: Vec::new(),
             cached_input_devices: Vec::new(),
+            dropout_count: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -1232,6 +1268,7 @@ impl AudioManager {
             input_buffers: HashMap::new(),
             cached_output_devices: Vec::new(),
             cached_input_devices: Vec::new(),
+            dropout_count: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -1283,11 +1320,12 @@ impl AudioManager {
         }
 
         let state = self.state.clone();
+        let dropouts = self.dropout_count.clone();
 
         let stream = device.build_output_stream(
             &config.into(),
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                audio_callback(data, channels, &state);
+                audio_callback(data, channels, &state, &dropouts);
             },
             |err| {
                 eprintln!("Audio error: {}", err);
@@ -1695,6 +1733,7 @@ fn audio_callback(
     data: &mut [f32],
     channels: usize,
     state: &Arc<Mutex<SharedAudioState>>,
+    dropout_counter: &AtomicU32,
 ) {
     // Zero the buffer
     for sample in data.iter_mut() {
@@ -1704,9 +1743,14 @@ fn audio_callback(
     // Use try_lock to avoid blocking the audio thread — if UI holds the lock, skip this buffer
     let mut s = match state.try_lock() {
         Ok(s) => s,
-        Err(_) => return,
+        Err(_) => {
+            // Atomic increment — works even when the mutex is held (that's the whole point)
+            dropout_counter.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
     };
 
+    let callback_start = std::time::Instant::now();
     let sample_rate = s.sample_rate;
     let master_vol = s.master_volume;
     let num_frames = data.len() / channels;
@@ -1912,4 +1956,9 @@ fn audio_callback(
     // Restore channel_chains (with updated internal state: filter coefficients,
     // delay buffer write positions) back into shared state for next callback.
     s.channel_chains = channel_chains;
+
+    // Record callback performance metrics
+    let elapsed = callback_start.elapsed();
+    s.callback_duration_us = elapsed.as_micros() as f32;
+    s.callback_budget_us = num_frames as f32 / sample_rate * 1_000_000.0;
 }
