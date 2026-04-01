@@ -19,7 +19,7 @@ pub fn render(
         _ => return,
     };
 
-    // ── Waveform selector (top) ───────────────────────────────────────
+    // ── Waveform selector ────────────────────────────────────────────
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Wave:").small());
         egui::ComboBox::from_id_salt(egui::Id::new(("synth_wave", node_id)))
@@ -34,31 +34,39 @@ pub fn render(
             });
     });
 
-    // Read inputs early for visualization
+    // Read control inputs
     let freq_in = Graph::static_input_value(connections, values, node_id, 0);
     let amp_in = Graph::static_input_value(connections, values, node_id, 1);
     let gate_in = Graph::static_input_value(connections, values, node_id, 2);
 
-    let display_freq = if let PortValue::Float(f) = freq_in { if f > 0.0 { f } else { *frequency } } else { *frequency };
-    let display_amp = if let PortValue::Float(a) = amp_in { a.clamp(0.0, 1.0) } else { *amplitude };
-    let display_active = if let PortValue::Float(g) = gate_in { g > 0.5 } else { *active };
+    let freq_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 0);
+    let amp_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 1);
+    let gate_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 2);
 
-    // ── Waveform visualization (frequency-responsive) ─────────────────
+    // Apply control inputs (numbers set frequency directly)
+    if freq_wired {
+        let v = freq_in.as_float();
+        if v > 0.0 { *frequency = v; }
+    }
+    if let PortValue::Float(a) = amp_in { *amplitude = a.clamp(0.0, 1.0); }
+    if let PortValue::Float(g) = gate_in { *active = g > 0.5; }
+
+    let display_freq = *frequency;
+    let display_amp = *amplitude;
+    let display_active = *active;
+
+    // ── Waveform visualization ───────────────────────────────────────
     let viz_w = ui.available_width().min(200.0);
     let viz_h = 40.0;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(viz_w, viz_h), egui::Sense::hover());
     let painter = ui.painter();
     painter.rect_filled(rect, 3.0, egui::Color32::from_rgb(15, 15, 25));
     painter.rect_stroke(rect, 3.0, egui::Stroke::new(0.5, egui::Color32::from_rgb(40, 40, 55)), egui::StrokeKind::Outside);
-
-    // Zero line
     painter.line_segment(
         [egui::pos2(rect.left(), rect.center().y), egui::pos2(rect.right(), rect.center().y)],
         egui::Stroke::new(0.5, egui::Color32::from_rgb(40, 40, 55)),
     );
 
-    // Number of visible cycles scales with frequency:
-    // 100 Hz → ~2 cycles, 440 Hz → ~4, 2000 Hz → ~8, 10000 Hz → ~12
     let cycles = (display_freq / 100.0).clamp(1.0, 16.0).round().max(1.0);
     let n = 120;
     let points: Vec<egui::Pos2> = (0..=n).map(|i| {
@@ -76,8 +84,6 @@ pub fn render(
     for w in points.windows(2) {
         painter.line_segment([w[0], w[1]], egui::Stroke::new(1.5, wave_col));
     }
-
-    // Frequency label overlay (top-right of viz)
     painter.text(
         egui::pos2(rect.right() - 3.0, rect.top() + 2.0),
         egui::Align2::RIGHT_TOP,
@@ -88,62 +94,34 @@ pub fn render(
 
     ui.separator();
 
-    // ── Auto-detect FM: Freq input connected to another Synth's Audio output ──
-    let fm_source_node: Option<NodeId> = connections.iter()
-        .find(|c| c.to_node == node_id && c.to_port == 0 && c.from_port == 0)
-        .and_then(|c| values.get(&(c.from_node, 0)).map(|_| c.from_node));
-    let is_fm = fm_source_node.is_some();
-
-    // FM Weight from port 3 (0–1, defaults to 1.0)
-    let fm_wt_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 3);
-    let mut fm_weight = if fm_wt_wired {
-        Graph::static_input_value(connections, values, node_id, 3).as_float().clamp(0.0, 1.0)
-    } else {
-        *fm_depth // reuse fm_depth field as weight when not wired (store 0–1)
-    };
-    // Clamp stored fm_depth to valid weight range if used as weight
-    if !fm_wt_wired && !is_fm {
-        fm_weight = 1.0; // default weight when no FM
-    }
-
-    // ── Inline input ports ────────────────────────────────────────────
-    // Port 0: Freq / FM Depth (dual-purpose)
-    let freq_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 0);
+    // ── Port 0: Freq (number = direct frequency, audio = FM carrier) ─
     ui.horizontal(|ui| {
         crate::nodes::inline_port_circle(ui, node_id, 0, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Number);
-        if is_fm {
-            ui.label(egui::RichText::new("⚡ Depth").small().color(egui::Color32::from_rgb(255, 200, 80)));
-            ui.add(egui::DragValue::new(frequency).speed(1.0).range(0.0..=10000.0).suffix(" Hz"));
-        } else if freq_wired {
-            let v = freq_in.as_float();
-            ui.label(egui::RichText::new("Freq").small());
-            ui.label(egui::RichText::new(format!("{:.0} Hz", v)).strong().monospace());
+        ui.label(egui::RichText::new("Freq").small());
+        if freq_wired {
+            ui.label(egui::RichText::new(format!("{:.2} Hz", display_freq)).strong().monospace());
         } else {
-            ui.label(egui::RichText::new("Freq").small());
-            ui.add(egui::DragValue::new(frequency).speed(1.0).range(20.0..=20000.0).suffix(" Hz"));
+            ui.add(egui::DragValue::new(frequency).speed(0.1).range(20.0..=20000.0).suffix(" Hz").max_decimals(2));
         }
     });
 
-    // Port 1: Amp
-    let amp_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 1);
+    // ── Port 1: Amp ──────────────────────────────────────────────────
     ui.horizontal(|ui| {
         crate::nodes::inline_port_circle(ui, node_id, 1, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Normalized);
         ui.label(egui::RichText::new("Amp").small());
         if amp_wired {
-            ui.label(egui::RichText::new(format!("{:.2}", amp_in.as_float())).strong().monospace());
+            ui.label(egui::RichText::new(format!("{:.2}", display_amp)).strong().monospace());
         } else {
             ui.add(egui::Slider::new(amplitude, 0.0..=1.0).show_value(true));
         }
     });
 
-    // Port 2: Gate
-    let gate_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 2);
+    // ── Port 2: Gate ─────────────────────────────────────────────────
     ui.horizontal(|ui| {
         crate::nodes::inline_port_circle(ui, node_id, 2, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Gate);
         ui.label(egui::RichText::new("Gate").small());
         if gate_wired {
-            let v = gate_in.as_float();
-            ui.label(egui::RichText::new(if v > 0.5 { "ON" } else { "off" }).strong().monospace());
+            ui.label(egui::RichText::new(if display_active { "ON" } else { "off" }).strong().monospace());
         } else {
             let mut on = *active;
             ui.checkbox(&mut on, "");
@@ -151,39 +129,29 @@ pub fn render(
         }
     });
 
-    // Port 3: FM Weight (only shown when FM is active)
-    if is_fm {
-        ui.horizontal(|ui| {
-            crate::nodes::inline_port_circle(ui, node_id, 3, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Normalized);
-            ui.label(egui::RichText::new("FM Wt").small().color(egui::Color32::from_rgb(255, 200, 80)));
-            if fm_wt_wired {
-                ui.label(egui::RichText::new(format!("{:.2}", fm_weight)).small().color(egui::Color32::from_rgb(80, 170, 255)));
-            } else {
-                ui.add(egui::Slider::new(fm_depth, 0.0..=1.0).show_value(true));
-                fm_weight = *fm_depth;
-            }
-        });
-    } else {
-        // Still register port position even when hidden so connections don't break
-        // (but don't render it)
-    }
+    // ── Port 3: FM Depth (always visible) ────────────────────────────
+    // Controls how much audio input modulates frequency.
+    // 0 = no modulation, 100 = ±100Hz modulation, etc.
+    let fm_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 3);
+    ui.horizontal(|ui| {
+        crate::nodes::inline_port_circle(ui, node_id, 3, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Number);
+        ui.label(egui::RichText::new("FM").small().color(egui::Color32::from_rgb(255, 200, 80)));
+        if fm_wired {
+            *fm_depth = Graph::static_input_value(connections, values, node_id, 3).as_float().max(0.0);
+            ui.label(egui::RichText::new(format!("{:.0} Hz", *fm_depth)).small().monospace());
+        } else {
+            ui.add(egui::DragValue::new(fm_depth).speed(1.0).range(0.0..=10000.0).suffix(" Hz"));
+        }
+    });
 
-    // Override from wired inputs (skip Freq override when FM is active)
-    if !is_fm {
-        if let PortValue::Float(f) = freq_in { if f > 0.0 { *frequency = f; } }
-    }
-    if let PortValue::Float(a) = amp_in { *amplitude = a.clamp(0.0, 1.0); }
-    if let PortValue::Float(g) = gate_in { *active = g > 0.5; }
-
-    // ── Output port: Audio (port 0, output) — right-aligned ──────────
+    // ── Output: Audio ────────────────────────────────────────────────
     ui.separator();
     crate::nodes::audio_port_row(ui, "Audio", node_id, 0, false, port_positions, dragging_from, connections, pending_disconnects, PortKind::Audio);
 
-    // ── Update audio engine (lock-free atomic writes) ──────────────
+    // ── Write params to engine ───────────────────────────────────────
     audio.engine_write_param(node_id, 0, *frequency);
     audio.engine_write_param(node_id, 1, *amplitude);
     audio.engine_write_param(node_id, 2, if *active { 1.0 } else { 0.0 });
-    audio.engine_write_param(node_id, 3, if is_fm { *frequency * fm_weight } else { 0.0 });
-    audio.engine_write_param(node_id, 4, *waveform as u32 as f32); // waveform type
-
+    audio.engine_write_param(node_id, 3, *fm_depth);
+    audio.engine_write_param(node_id, 4, *waveform as u32 as f32);
 }

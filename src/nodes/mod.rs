@@ -62,6 +62,7 @@ pub mod draw_node;
 pub mod zoom_control_node;
 pub mod html_viewer_node;
 pub mod console_node;
+pub mod midi_note_node;
 pub mod image_node;
 pub mod image_effects;
 pub mod blend;
@@ -355,6 +356,8 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
             factory: || NodeType::MidiOut { port_name: String::new(), mode: MidiMode::Note, channel: 0, manual_d1: 0, manual_d2: 64 } },
         NodeCatalogEntry { label: "MIDI In", category: "MIDI",
             factory: || NodeType::MidiIn { port_name: String::new(), channel: 0, note: 0, velocity: 0, log: Vec::new() } },
+        NodeCatalogEntry { label: "MIDI Note", category: "MIDI",
+            factory: || NodeType::Dynamic { inner: crate::graph::DynNode { node: Box::new(midi_note_node::MidiNoteNode::default()) } } },
 
         // ── Serial ───────────────────────────────────────────
         NodeCatalogEntry { label: "Serial", category: "Serial",

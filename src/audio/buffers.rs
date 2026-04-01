@@ -234,7 +234,7 @@ impl FilePlayerBuffer {
 /// during recording (audio thread) and read during playback (audio thread) —
 /// never simultaneously, so no data race.
 pub struct SamplerBuffer {
-    data: UnsafeCell<Vec<f32>>,
+    pub data: UnsafeCell<Vec<f32>>,
     pub capacity: usize,
     /// How many samples were actually recorded (set when recording stops).
     pub recorded_length: AtomicUsize,

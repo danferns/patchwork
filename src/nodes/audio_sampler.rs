@@ -1,8 +1,53 @@
 #![allow(dead_code)]
 use crate::audio::AudioManager;
+use crate::audio::buffers::SamplerBuffer;
 use crate::graph::*;
 use eframe::egui;
 use std::collections::HashMap;
+use std::sync::Arc;
+
+/// Export a region of the sampler buffer as a 32-bit float WAV file.
+fn export_wav(buffer: &Arc<SamplerBuffer>, start: usize, end: usize, sample_rate: u32, path: &std::path::Path) -> Result<(), String> {
+    let len = end.saturating_sub(start);
+    if len == 0 { return Err("Nothing to export".into()); }
+
+    // Read raw samples directly from buffer
+    let data = unsafe { &*buffer.data.get() };
+    let raw: Vec<f32> = (start..end.min(buffer.capacity)).map(|i| data[i]).collect();
+    if raw.is_empty() { return Err("No samples to export".into()); }
+
+    // Write WAV: 32-bit float, mono
+    let num_samples = raw.len() as u32;
+    let byte_rate = sample_rate * 4; // 4 bytes per sample (f32)
+    let data_size = num_samples * 4;
+
+    let mut file = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    use std::io::Write;
+
+    // RIFF header
+    file.write_all(b"RIFF").map_err(|e| e.to_string())?;
+    file.write_all(&(36 + data_size).to_le_bytes()).map_err(|e| e.to_string())?;
+    file.write_all(b"WAVE").map_err(|e| e.to_string())?;
+
+    // fmt chunk — format 3 = IEEE float
+    file.write_all(b"fmt ").map_err(|e| e.to_string())?;
+    file.write_all(&16u32.to_le_bytes()).map_err(|e| e.to_string())?;   // chunk size
+    file.write_all(&3u16.to_le_bytes()).map_err(|e| e.to_string())?;    // format = IEEE float
+    file.write_all(&1u16.to_le_bytes()).map_err(|e| e.to_string())?;    // channels = 1 (mono)
+    file.write_all(&sample_rate.to_le_bytes()).map_err(|e| e.to_string())?;
+    file.write_all(&byte_rate.to_le_bytes()).map_err(|e| e.to_string())?;
+    file.write_all(&4u16.to_le_bytes()).map_err(|e| e.to_string())?;    // block align
+    file.write_all(&32u16.to_le_bytes()).map_err(|e| e.to_string())?;   // bits per sample
+
+    // data chunk
+    file.write_all(b"data").map_err(|e| e.to_string())?;
+    file.write_all(&data_size.to_le_bytes()).map_err(|e| e.to_string())?;
+    for &s in &raw {
+        file.write_all(&s.to_le_bytes()).map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
 
 const WAVEFORM_HEIGHT: f32 = 50.0;
 const WHEEL_SIZE: f32 = 38.0;
@@ -354,7 +399,7 @@ pub fn render(
                 }
             });
 
-            // Loop + Reverse toggles
+            // Loop + Reverse + Save
             ui.horizontal(|ui| {
                 let loop_color = if *looping { egui::Color32::from_rgb(80, 170, 255) } else { egui::Color32::GRAY };
                 if ui.add(egui::Button::new(egui::RichText::new("↻").size(12.0).color(loop_color)).min_size(egui::vec2(22.0, 20.0))).clicked() {
@@ -364,6 +409,26 @@ pub fn render(
                 let rev_color = if *reverse { egui::Color32::from_rgb(255, 180, 60) } else { egui::Color32::GRAY };
                 if ui.add(egui::Button::new(egui::RichText::new("◀").size(10.0).color(rev_color)).min_size(egui::vec2(22.0, 20.0))).clicked() {
                     *reverse = !*reverse;
+                }
+
+                // Save button — export trimmed region as WAV
+                if rec_len > 0 && !is_recording {
+                    if ui.add(egui::Button::new(egui::RichText::new(crate::icons::FLOPPY_DISK).size(12.0)).min_size(egui::vec2(22.0, 20.0)))
+                        .on_hover_text("Save as WAV").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("WAV Audio", &["wav"])
+                            .set_file_name("recording.wav")
+                            .save_file()
+                        {
+                            let sr = buffer.sample_rate.load(std::sync::atomic::Ordering::Relaxed);
+                            let trim_s = (*trim_start * sr as f32) as usize;
+                            let trim_e = if *trim_end > 0.0 { (*trim_end * sr as f32) as usize } else { rec_len };
+                            let trim_e = trim_e.min(rec_len);
+                            if let Err(e) = export_wav(&buffer, trim_s, trim_e, sr, &path) {
+                                eprintln!("WAV export failed: {}", e);
+                            }
+                        }
+                    }
                 }
             });
 
@@ -382,7 +447,7 @@ pub fn render(
     // ── Record Duration ──────────────────────────────────────────
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Dur").small().color(egui::Color32::GRAY));
-        if ui.add(egui::Slider::new(record_duration, 0.1..=60.0).show_value(false).logarithmic(true)).changed() {
+        if ui.add(egui::Slider::new(record_duration, 0.1..=300.0).show_value(false).logarithmic(true)).changed() {
             // Recreate buffer with new duration on next frame
             audio.sampler_buffers.remove(&node_id);
         }

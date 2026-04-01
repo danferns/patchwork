@@ -1,5 +1,8 @@
-#![allow(dead_code)]
-//! SynthProcessor — oscillator with FM modulation support.
+//! SynthProcessor — oscillator with automatic FM modulation.
+//!
+//! If audio is connected to the input, it's used as FM modulation.
+//! The fm_depth parameter controls modulation amount in Hz.
+//! If no audio input, the synth generates a clean tone at params[0] Hz.
 
 use crate::audio::processor::{AudioProcessor, ProcessorKind, ProcessContext};
 use crate::audio::smoothed::SmoothedParam;
@@ -11,8 +14,6 @@ pub struct SynthProcessor {
     pub amplitude: SmoothedParam,
     pub phase: f32,
     pub active: bool,
-    /// Buffer index for FM modulator (set by chain compiler, not a param)
-    pub fm_buffer_idx: Option<usize>,
     pub fm_depth: f32,
 }
 
@@ -22,7 +23,7 @@ impl SynthProcessor {
             waveform, frequency,
             amplitude: SmoothedParam::new(amplitude, 5.0),
             phase: 0.0, active: true,
-            fm_buffer_idx: None, fm_depth: 0.0,
+            fm_depth: 0.0,
         }
     }
 }
@@ -36,16 +37,21 @@ impl AudioProcessor for SynthProcessor {
         self.amplitude.set(target_amp);
 
         if !self.active && self.amplitude.current < 0.0001 {
-            output.fill(0.0);
+            output[..ctx.block_size].fill(0.0);
             return;
         }
 
-        // Check if input has FM signal (non-zero)
-        let has_fm = self.fm_depth > 0.0 && input.iter().take(ctx.block_size).any(|&s| s.abs() > 0.0001);
+        // Detect if input has audio signal (for FM modulation)
+        let has_input = input.iter().take(ctx.block_size).any(|&s| s.abs() > 0.0001);
 
         for i in 0..ctx.block_size {
-            let fm_mod = if has_fm { input[i] * self.fm_depth } else { 0.0 };
-            let freq = self.frequency + fm_mod;
+            // If audio is connected, use it as FM modulation (input * depth)
+            let freq = if has_input && self.fm_depth > 0.0 {
+                self.frequency + input[i] * self.fm_depth
+            } else {
+                self.frequency
+            };
+
             let amp = self.amplitude.tick();
             output[i] = self.waveform.sample(self.phase) * amp;
             self.phase += freq / ctx.sample_rate;
@@ -55,8 +61,11 @@ impl AudioProcessor for SynthProcessor {
     }
 
     fn set_params(&mut self, params: &[f32]) {
-        // params[0] = frequency, params[1] = amplitude, params[2] = active (0/1),
-        // params[3] = fm_depth, params[4] = waveform (0=Sine, 1=Square, 2=Saw, 3=Triangle, 4=Noise)
+        // params[0] = frequency (Hz)
+        // params[1] = amplitude (0-1)
+        // params[2] = active/gate (0 or 1)
+        // params[3] = fm_depth (Hz — how much input modulates frequency)
+        // params[4] = waveform (0=Sine, 1=Square, 2=Saw, 3=Triangle, 4=Noise)
         if let Some(&v) = params.first() { self.frequency = v; }
         if let Some(&v) = params.get(1) { self.amplitude.set(v); }
         if let Some(&v) = params.get(2) { self.active = v > 0.5; }
