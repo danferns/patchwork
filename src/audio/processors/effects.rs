@@ -1,0 +1,380 @@
+#![allow(dead_code)]
+//! Effect processors — wrap existing DSP math from AudioEffect enum.
+//! Each struct implements AudioProcessor for one effect type.
+
+use crate::audio::processor::{AudioProcessor, ProcessorKind, ProcessContext};
+use crate::audio::smoothed::SmoothedParam;
+use crate::audio::biquad::BiquadFilter;
+
+// ── Gain ──────────────────────────────────────────────────────────────────────
+
+pub struct GainProcessor {
+    level: SmoothedParam,
+}
+
+impl GainProcessor {
+    pub fn new(level: f32) -> Self {
+        Self { level: SmoothedParam::new(level, 5.0) }
+    }
+}
+
+impl AudioProcessor for GainProcessor {
+    fn type_id(&self) -> &str { "gain" }
+    fn kind(&self) -> ProcessorKind { ProcessorKind::Effect }
+
+    fn process_block(&mut self, input: &[f32], output: &mut [f32], _ctx: &ProcessContext) {
+        for i in 0..input.len() {
+            output[i] = input[i] * self.level.tick();
+        }
+    }
+
+    fn set_params(&mut self, params: &[f32]) {
+        if let Some(&v) = params.first() { self.level.set(v); }
+    }
+
+    fn param_count(&self) -> usize { 1 }
+
+    fn prepare(&mut self, _sample_rate: f32, _max_block_size: usize) {
+        self.level = SmoothedParam::new(self.level.target, 5.0);
+    }
+
+    fn reset(&mut self) { self.level.current = self.level.target; }
+}
+
+// ── LowPass ───────────────────────────────────────────────────────────────────
+
+pub struct LowPassProcessor {
+    pub cutoff: SmoothedParam,
+    pub state: f32,
+}
+
+impl LowPassProcessor {
+    pub fn new(cutoff: f32) -> Self {
+        Self { cutoff: SmoothedParam::new(cutoff, 10.0), state: 0.0 }
+    }
+}
+
+impl AudioProcessor for LowPassProcessor {
+    fn type_id(&self) -> &str { "lowpass" }
+    fn kind(&self) -> ProcessorKind { ProcessorKind::Effect }
+
+    fn process_block(&mut self, input: &[f32], output: &mut [f32], ctx: &ProcessContext) {
+        for i in 0..input.len() {
+            let c = self.cutoff.tick().max(20.0);
+            let rc = 1.0 / (std::f32::consts::TAU * c);
+            let dt = 1.0 / ctx.sample_rate;
+            let alpha = dt / (rc + dt);
+            self.state += alpha * (input[i] - self.state);
+            output[i] = self.state;
+        }
+    }
+
+    fn set_params(&mut self, params: &[f32]) {
+        if let Some(&v) = params.first() { self.cutoff.set(v); }
+    }
+
+    fn param_count(&self) -> usize { 1 }
+
+    fn prepare(&mut self, _sample_rate: f32, _max_block_size: usize) {
+        self.cutoff = SmoothedParam::new(self.cutoff.target, 10.0);
+    }
+
+    fn reset(&mut self) { self.state = 0.0; }
+}
+
+// ── HighPass ──────────────────────────────────────────────────────────────────
+
+pub struct HighPassProcessor {
+    pub cutoff: SmoothedParam,
+    pub state: f32,
+}
+
+impl HighPassProcessor {
+    pub fn new(cutoff: f32) -> Self {
+        Self { cutoff: SmoothedParam::new(cutoff, 10.0), state: 0.0 }
+    }
+}
+
+impl AudioProcessor for HighPassProcessor {
+    fn type_id(&self) -> &str { "highpass" }
+    fn kind(&self) -> ProcessorKind { ProcessorKind::Effect }
+
+    fn process_block(&mut self, input: &[f32], output: &mut [f32], ctx: &ProcessContext) {
+        for i in 0..input.len() {
+            let c = self.cutoff.tick().max(20.0);
+            let rc = 1.0 / (std::f32::consts::TAU * c);
+            let dt = 1.0 / ctx.sample_rate;
+            let alpha = rc / (rc + dt);
+            let out = alpha * (self.state + input[i] - self.state);
+            self.state = input[i];
+            output[i] = out;
+        }
+    }
+
+    fn set_params(&mut self, params: &[f32]) {
+        if let Some(&v) = params.first() { self.cutoff.set(v); }
+    }
+
+    fn param_count(&self) -> usize { 1 }
+
+    fn prepare(&mut self, _sample_rate: f32, _max_block_size: usize) {
+        self.cutoff = SmoothedParam::new(self.cutoff.target, 10.0);
+    }
+
+    fn reset(&mut self) { self.state = 0.0; }
+}
+
+// ── Delay ─────────────────────────────────────────────────────────────────────
+
+pub struct DelayProcessor {
+    time_ms: f32,
+    feedback: SmoothedParam,
+    buffer: Vec<f32>,
+    write_pos: usize,
+    max_delay_samples: usize,
+    sample_rate: f32,
+}
+
+impl DelayProcessor {
+    pub fn new(time_ms: f32, feedback: f32) -> Self {
+        Self {
+            time_ms, feedback: SmoothedParam::new(feedback, 10.0),
+            buffer: Vec::new(), write_pos: 0, max_delay_samples: 0, sample_rate: 44100.0,
+        }
+    }
+}
+
+impl AudioProcessor for DelayProcessor {
+    fn type_id(&self) -> &str { "delay" }
+    fn kind(&self) -> ProcessorKind { ProcessorKind::Effect }
+
+    fn process_block(&mut self, input: &[f32], output: &mut [f32], _ctx: &ProcessContext) {
+        if self.buffer.is_empty() { return; }
+
+        let delay_samples = (self.time_ms * self.sample_rate / 1000.0) as usize;
+        let delay_samples = delay_samples.clamp(1, self.max_delay_samples - 1);
+
+        for i in 0..input.len() {
+            let read_pos = if self.write_pos >= delay_samples {
+                self.write_pos - delay_samples
+            } else {
+                self.max_delay_samples - (delay_samples - self.write_pos)
+            };
+            let delayed = self.buffer[read_pos];
+            let fb = self.feedback.tick();
+            let out = input[i] + delayed * fb;
+            self.buffer[self.write_pos] = out;
+            self.write_pos = (self.write_pos + 1) % self.max_delay_samples;
+            output[i] = out;
+        }
+    }
+
+    fn set_params(&mut self, params: &[f32]) {
+        if let Some(&v) = params.first() { self.time_ms = v; }
+        if let Some(&v) = params.get(1) { self.feedback.set(v); }
+    }
+
+    fn param_count(&self) -> usize { 2 } // time_ms, feedback
+
+    fn prepare(&mut self, sample_rate: f32, _max_block_size: usize) {
+        self.sample_rate = sample_rate;
+        self.max_delay_samples = (2.0 * sample_rate) as usize; // 2 second max
+        self.buffer = vec![0.0; self.max_delay_samples];
+        self.write_pos = 0;
+        self.feedback = SmoothedParam::new(self.feedback.target, 10.0);
+    }
+
+    fn reset(&mut self) {
+        self.buffer.fill(0.0);
+        self.write_pos = 0;
+    }
+}
+
+// ── Distortion ────────────────────────────────────────────────────────────────
+
+pub struct DistortionProcessor {
+    drive: SmoothedParam,
+}
+
+impl DistortionProcessor {
+    pub fn new(drive: f32) -> Self {
+        Self { drive: SmoothedParam::new(drive, 5.0) }
+    }
+}
+
+impl AudioProcessor for DistortionProcessor {
+    fn type_id(&self) -> &str { "distortion" }
+    fn kind(&self) -> ProcessorKind { ProcessorKind::Effect }
+
+    fn process_block(&mut self, input: &[f32], output: &mut [f32], _ctx: &ProcessContext) {
+        for i in 0..input.len() {
+            let d = self.drive.tick();
+            output[i] = (input[i] * d).tanh();
+        }
+    }
+
+    fn set_params(&mut self, params: &[f32]) {
+        if let Some(&v) = params.first() { self.drive.set(v); }
+    }
+
+    fn param_count(&self) -> usize { 1 }
+
+    fn prepare(&mut self, _sample_rate: f32, _max_block_size: usize) {
+        self.drive = SmoothedParam::new(self.drive.target, 5.0);
+    }
+
+    fn reset(&mut self) {}
+}
+
+// ── Reverb (Schroeder) ────────────────────────────────────────────────────────
+
+pub struct ReverbProcessor {
+    room_size: SmoothedParam,
+    damping: SmoothedParam,
+    mix: SmoothedParam,
+    comb_buffers: [Vec<f32>; 4],
+    comb_pos: [usize; 4],
+    comb_filter_state: [f32; 4],
+    allpass_buffers: [Vec<f32>; 2],
+    allpass_pos: [usize; 2],
+}
+
+impl ReverbProcessor {
+    pub fn new(room_size: f32, damping: f32, mix: f32) -> Self {
+        Self {
+            room_size: SmoothedParam::new(room_size, 20.0),
+            damping: SmoothedParam::new(damping, 20.0),
+            mix: SmoothedParam::new(mix, 20.0),
+            comb_buffers: [vec![], vec![], vec![], vec![]], comb_pos: [0; 4], comb_filter_state: [0.0; 4],
+            allpass_buffers: [vec![], vec![]], allpass_pos: [0; 2],
+        }
+    }
+}
+
+impl AudioProcessor for ReverbProcessor {
+    fn type_id(&self) -> &str { "reverb" }
+    fn kind(&self) -> ProcessorKind { ProcessorKind::Effect }
+
+    fn process_block(&mut self, input: &[f32], output: &mut [f32], _ctx: &ProcessContext) {
+        for i in 0..input.len() {
+            let sample = input[i];
+            let room = self.room_size.tick();
+            let damp = self.damping.tick();
+            let wet = self.mix.tick();
+
+            let feedback = room.clamp(0.0, 1.0) * 0.28 + 0.7;
+            let damp1 = damp;
+            let damp2 = 1.0 - damp;
+
+            let mut comb_out = 0.0f32;
+            for j in 0..4 {
+                let buf = &mut self.comb_buffers[j];
+                if buf.is_empty() { continue; }
+                let pos = &mut self.comb_pos[j];
+                let filt = &mut self.comb_filter_state[j];
+                let delayed = buf[*pos];
+                *filt = delayed * damp2 + *filt * damp1;
+                buf[*pos] = sample + *filt * feedback;
+                *pos = (*pos + 1) % buf.len();
+                comb_out += delayed;
+            }
+            comb_out *= 0.25;
+
+            let mut out = comb_out;
+            for j in 0..2 {
+                let buf = &mut self.allpass_buffers[j];
+                if buf.is_empty() { continue; }
+                let pos = &mut self.allpass_pos[j];
+                let delayed = buf[*pos];
+                let ap_out = -out + delayed;
+                buf[*pos] = out + delayed * 0.5;
+                *pos = (*pos + 1) % buf.len();
+                out = ap_out;
+            }
+
+            output[i] = sample * (1.0 - wet) + out * wet;
+        }
+    }
+
+    fn set_params(&mut self, params: &[f32]) {
+        if let Some(&v) = params.first() { self.room_size.set(v); }
+        if let Some(&v) = params.get(1) { self.damping.set(v); }
+        if let Some(&v) = params.get(2) { self.mix.set(v); }
+    }
+
+    fn param_count(&self) -> usize { 3 }
+
+    fn prepare(&mut self, sample_rate: f32, _max_block_size: usize) {
+        let sr_scale = (sample_rate / 44100.0).max(0.5);
+        let comb_lengths = [
+            (1116.0 * sr_scale) as usize,
+            (1188.0 * sr_scale) as usize,
+            (1277.0 * sr_scale) as usize,
+            (1356.0 * sr_scale) as usize,
+        ];
+        let allpass_lengths = [
+            (556.0 * sr_scale) as usize,
+            (441.0 * sr_scale) as usize,
+        ];
+        for (i, &len) in comb_lengths.iter().enumerate() {
+            self.comb_buffers[i] = vec![0.0; len.max(1)];
+            self.comb_pos[i] = 0;
+            self.comb_filter_state[i] = 0.0;
+        }
+        for (i, &len) in allpass_lengths.iter().enumerate() {
+            self.allpass_buffers[i] = vec![0.0; len.max(1)];
+            self.allpass_pos[i] = 0;
+        }
+        self.room_size = SmoothedParam::new(self.room_size.target, 20.0);
+        self.damping = SmoothedParam::new(self.damping.target, 20.0);
+        self.mix = SmoothedParam::new(self.mix.target, 20.0);
+    }
+
+    fn reset(&mut self) {
+        for buf in &mut self.comb_buffers { buf.fill(0.0); }
+        for buf in &mut self.allpass_buffers { buf.fill(0.0); }
+        self.comb_pos = [0; 4];
+        self.allpass_pos = [0; 2];
+        self.comb_filter_state = [0.0; 4];
+    }
+}
+
+// ── Parametric EQ ─────────────────────────────────────────────────────────────
+
+pub struct EqProcessor {
+    bands: Vec<BiquadFilter>,
+    curve_hash: u64,
+}
+
+impl EqProcessor {
+    pub fn new(bands: Vec<BiquadFilter>, curve_hash: u64) -> Self {
+        Self { bands, curve_hash }
+    }
+}
+
+impl AudioProcessor for EqProcessor {
+    fn type_id(&self) -> &str { "eq" }
+    fn kind(&self) -> ProcessorKind { ProcessorKind::Effect }
+
+    fn process_block(&mut self, input: &[f32], output: &mut [f32], _ctx: &ProcessContext) {
+        for i in 0..input.len() {
+            let mut s = input[i];
+            for band in self.bands.iter_mut() {
+                s = band.process(s);
+            }
+            output[i] = s;
+        }
+    }
+
+    fn set_params(&mut self, _params: &[f32]) {
+        // EQ params are the curve points — updated via replace, not atomic slots
+    }
+
+    fn param_count(&self) -> usize { 0 }
+
+    fn prepare(&mut self, _sample_rate: f32, _max_block_size: usize) {}
+
+    fn reset(&mut self) {
+        for band in &mut self.bands { band.reset(); }
+    }
+}

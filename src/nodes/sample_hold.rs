@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use eframe::egui;
 use crate::graph::{NodeId, PortValue, Connection, Graph, PortKind};
 use std::collections::HashMap;

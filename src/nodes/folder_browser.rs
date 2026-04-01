@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::graph::*;
 use crate::icons;
 use eframe::egui;

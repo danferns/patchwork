@@ -179,7 +179,14 @@ pub fn render(
     ui.separator();
     crate::nodes::audio_port_row(ui, "Audio", node_id, 0, false, port_positions, dragging_from, connections, pending_disconnects, PortKind::Audio);
 
-    // ── Update audio ─────────────────────────────────────────────────
+    // ── Update audio engine (lock-free atomic writes) ──────────────
+    audio.engine_write_param(node_id, 0, *frequency);
+    audio.engine_write_param(node_id, 1, *amplitude);
+    audio.engine_write_param(node_id, 2, if *active { 1.0 } else { 0.0 });
+    audio.engine_write_param(node_id, 3, if is_fm { *frequency * fm_weight } else { 0.0 });
+    audio.engine_write_param(node_id, 4, *waveform as u32 as f32); // waveform type
+
+    // Also update via old mutex path (for fallback)
     audio.set_synth(node_id, SynthParams {
         waveform: *waveform,
         frequency: *frequency,
@@ -188,7 +195,6 @@ pub fn render(
         phase: 0.0,
         active: *active,
         fm_source: if is_fm { fm_source_node } else { None },
-        // FM depth = frequency value * weight (0–1)
         fm_depth: if is_fm { *frequency * fm_weight } else { 0.0 },
     });
 }

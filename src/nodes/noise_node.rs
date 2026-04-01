@@ -317,6 +317,7 @@ fn generate_2d(scale: f32, seed: u32, noise_type: u8, size: u32) -> Arc<ImageDat
     Arc::new(ImageData::new(size, size, pixels))
 }
 
+#[allow(dead_code)]
 pub fn generate_2d_pub(scale: f32, seed: u32, noise_type: u8, size: u32) -> Arc<ImageData> {
     generate_2d(scale, seed, noise_type, size)
 }

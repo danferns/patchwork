@@ -1,5 +1,4 @@
 pub mod slider;
-pub mod math;
 pub mod math_formula;
 pub mod wgsl_viewer;
 pub mod midi_out;
@@ -21,7 +20,6 @@ pub mod ob_joystick;
 pub mod ob_encoder;
 pub mod html_viewer;
 pub mod mcp_server;
-pub mod profiler;
 pub mod rust_plugin;
 pub mod synth;
 pub mod audio_player;
@@ -37,6 +35,7 @@ pub mod audio_mixer;
 pub mod audio_input;
 pub mod audio_analyzer;
 pub mod audio_reverb;
+pub mod audio_sampler;
 pub mod folder_browser;
 // Trait-based nodes
 pub mod add_node;
@@ -345,8 +344,10 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
             factory: || NodeType::AudioMixer { channel_count: 2, gains: vec![0.8, 0.8] } },
         NodeCatalogEntry { label: "Audio Player", category: "Audio",
             factory: || NodeType::AudioPlayer { file_path: String::new(), volume: 1.0, looping: false, duration_secs: 0.0 } },
-        NodeCatalogEntry { label: "Audio Input", category: "Audio",
+        NodeCatalogEntry { label: "Microphone", category: "Audio",
             factory: || NodeType::AudioInput { selected_device: String::new(), gain: 1.0, active: false } },
+        NodeCatalogEntry { label: "Audio Sampler", category: "Audio",
+            factory: || NodeType::AudioSampler { record_duration: 5.0, trim_start: 0.0, trim_end: 0.0, volume: 1.0, looping: false, reverse: false } },
         NodeCatalogEntry { label: "Audio Analyzer", category: "Audio",
             factory: || NodeType::AudioAnalyzer },
         NodeCatalogEntry { label: "Audio Device", category: "Audio",
@@ -454,7 +455,7 @@ pub fn render_content(
     serial_ports: &[String],
     serial_connected: bool,
     serial_actions: &mut Vec<SerialAction>,
-    monitor_state: &monitor::MonitorState,
+    _monitor_state: &monitor::MonitorState,
     osc_listening: bool,
     osc_actions: &mut Vec<OscAction>,
     port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
@@ -536,6 +537,7 @@ pub fn render_content(
         NodeType::Speaker { active, volume } => speaker::render(ui, active, volume, node_id, values, connections, audio_manager, port_positions, dragging_from, pending_disconnects),
         NodeType::AudioMixer { channel_count, gains } =>
             audio_mixer::render(ui, channel_count, gains, node_id, values, connections, port_positions, dragging_from, pending_disconnects, audio_manager),
+        NodeType::AudioSampler { .. } => audio_sampler::render(ui, node_id, node_type, values, connections, audio_manager, port_positions, dragging_from, pending_disconnects),
         NodeType::RustPlugin { .. } => rust_plugin::render(ui, node_id, node_type, values, connections),
         NodeType::HtmlViewer => {} // migrated to trait — legacy fallback
         NodeType::McpServer => mcp_server::render(ui, mcp_log, mcp_active),

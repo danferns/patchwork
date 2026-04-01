@@ -59,6 +59,16 @@ pub fn render(
             });
     });
 
+    // Auto-start input if active but stream doesn't exist
+    // (happens after project load or DSP restart)
+    if *active && !audio.input_buffers.contains_key(&node_id) {
+        let dev = if selected_device.is_empty() { None } else { Some(selected_device.as_str()) };
+        if let Err(e) = audio.start_input(node_id, dev) {
+            eprintln!("Mic auto-start failed: {}", e);
+            *active = false;
+        }
+    }
+
     // ── Start / Stop ──────────────────────────────────────────────────
     ui.horizontal(|ui| {
         if *active {
@@ -107,5 +117,7 @@ pub fn render(
         if let Some(buf) = audio.input_buffers.get(&node_id) {
             audio.set_live_input(node_id, buf, *gain);
         }
+        // Write gain to engine (lock-free)
+        audio.engine_write_param(node_id, 0, *gain);
     }
 }

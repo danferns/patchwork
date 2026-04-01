@@ -198,6 +198,7 @@ pub fn node_icon(label: &str) -> &'static str {
         // Audio
         "Synth" => WAVEFORM,
         "Audio Player" => PLAY,
+        "Audio Sampler" => MUSIC_NOTE,
         "Audio Device" => SPEAKER_HIGH,
         "Audio FX" => FADERS,
         "Mixer" => SLIDERS,

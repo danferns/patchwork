@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use eframe::egui;
 
 pub struct FileMenuAction {

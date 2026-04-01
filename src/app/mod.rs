@@ -328,6 +328,30 @@ impl PatchworkApp {
             return;
         }
 
+        // ── Phase 0: Resolve sampler upstream sources (needs full graph access) ──
+        for (&nid, node) in &self.graph.nodes {
+            if let NodeType::AudioSampler { .. } = &node.node_type {
+                // Walk backward from port 0 to find the actual audio source
+                let mut upstream = self.graph.connections.iter()
+                    .find(|c| c.to_node == nid && c.to_port == 0)
+                    .map(|c| c.from_node);
+                let mut visited = std::collections::HashSet::new();
+                while let Some(uid) = upstream {
+                    if !visited.insert(uid) { break; }
+                    let is_src = self.graph.nodes.get(&uid).map(|n| {
+                        matches!(n.node_type, NodeType::Synth { .. } | NodeType::AudioPlayer { .. } | NodeType::AudioInput { .. } | NodeType::AudioMixer { .. })
+                    }).unwrap_or(false);
+                    if is_src {
+                        self.audio.sampler_input_sources.insert(nid, uid);
+                        break;
+                    }
+                    upstream = self.graph.connections.iter()
+                        .find(|c| c.to_node == uid && c.to_port == 0)
+                        .map(|c| c.from_node);
+                }
+            }
+        }
+
         // ── Phase 1: Collect all chain info without locking audio state ──
         let mut active_sources: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
         let mut render_only_sources: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
@@ -353,7 +377,7 @@ impl PatchworkApp {
 
             let source_id = chain[0];
             let is_source = self.graph.nodes.get(&source_id).map(|n| {
-                matches!(n.node_type, NodeType::Synth { .. } | NodeType::AudioPlayer { .. } | NodeType::AudioMixer { .. } | NodeType::AudioInput { .. })
+                matches!(n.node_type, NodeType::Synth { .. } | NodeType::AudioPlayer { .. } | NodeType::AudioMixer { .. } | NodeType::AudioInput { .. } | NodeType::AudioSampler { .. })
             }).unwrap_or(false);
             if !is_source { continue; }
 
@@ -395,7 +419,7 @@ impl PatchworkApp {
                             if sub_chain.contains(&current) { break; } // cycle
                             sub_chain.push(current);
                             let is_source = self.graph.nodes.get(&current).map(|n| {
-                                matches!(n.node_type, NodeType::Synth { .. } | NodeType::AudioPlayer { .. } | NodeType::AudioMixer { .. } | NodeType::AudioInput { .. })
+                                matches!(n.node_type, NodeType::Synth { .. } | NodeType::AudioPlayer { .. } | NodeType::AudioMixer { .. } | NodeType::AudioInput { .. } | NodeType::AudioSampler { .. })
                             }).unwrap_or(false);
                             if is_source { break; }
                             // For Select nodes, follow the active input
@@ -416,7 +440,7 @@ impl PatchworkApp {
 
                         // Determine what kind of source we found
                         let source_type = self.graph.nodes.get(&actual_source).map(|n| &n.node_type);
-                        let is_synth_or_player = source_type.map(|nt| matches!(nt, NodeType::Synth { .. } | NodeType::AudioPlayer { .. } | NodeType::AudioInput { .. })).unwrap_or(false);
+                        let is_synth_or_player = source_type.map(|nt| matches!(nt, NodeType::Synth { .. } | NodeType::AudioPlayer { .. } | NodeType::AudioInput { .. } | NodeType::AudioSampler { .. })).unwrap_or(false);
                         let is_nested_mixer = source_type.map(|nt| matches!(nt, NodeType::AudioMixer { .. })).unwrap_or(false);
 
                         if is_synth_or_player || is_nested_mixer {
@@ -496,6 +520,41 @@ impl PatchworkApp {
                         }
                     }
                     mixer_updates.push((mixer_id, mixer_inputs));
+                }
+            }
+
+            // AudioSampler: register its upstream input source as render-only so it produces audio,
+            // and store the resolved mapping so the sampler render can use it reliably.
+            if let Some(node) = self.graph.nodes.get(&source_id) {
+                if let NodeType::AudioSampler { .. } = &node.node_type {
+                    // Walk backward from the Sampler's Audio input (port 0) to find the source
+                    let mut upstream = self.graph.connections.iter()
+                        .find(|c| c.to_node == source_id && c.to_port == 0)
+                        .map(|c| c.from_node);
+                    let mut found_source: Option<NodeId> = None;
+                    let mut visited = std::collections::HashSet::new();
+                    while let Some(nid) = upstream {
+                        if !visited.insert(nid) { break; }
+                        let is_src = self.graph.nodes.get(&nid).map(|n| {
+                            matches!(n.node_type, NodeType::Synth { .. } | NodeType::AudioPlayer { .. } | NodeType::AudioInput { .. } | NodeType::AudioMixer { .. })
+                        }).unwrap_or(false);
+                        if is_src {
+                            found_source = Some(nid);
+                            if !active_sources.contains(&nid) {
+                                render_only_sources.insert(nid);
+                                active_sources.insert(nid);
+                                chain_updates.push((nid, Vec::new()));
+                            }
+                            break;
+                        }
+                        upstream = self.graph.connections.iter()
+                            .find(|c| c.to_node == nid && c.to_port == 0)
+                            .map(|c| c.from_node);
+                    }
+                    // Store resolved mapping so sampler render and audio callback can use it
+                    if let Some(src_nid) = found_source {
+                        self.audio.sampler_input_sources.insert(source_id, src_nid);
+                    }
                 }
             }
 
@@ -581,10 +640,21 @@ impl PatchworkApp {
         }
 
         // ── Phase 2: Apply ALL updates in a single lock ─────────────────
-        if let Ok(mut s) = self.audio.state.try_lock() {
+        // Use blocking lock() — the audio callback only uses the mutex as a
+        // fallback before the first compiled chain arrives. Once the compiled
+        // chain is active, the callback never touches this mutex, so we won't
+        // cause audio dropouts by blocking here.
+        if let Ok(mut s) = self.audio.state.lock() {
             // Apply mixer source registrations
             for (mixer_id, inputs) in mixer_updates {
                 s.sources.insert(mixer_id, AudioSource::Mixer { inputs });
+            }
+
+            // Fix sampler input_source fields with resolved upstream sources
+            for (&sampler_id, &upstream_id) in &self.audio.sampler_input_sources {
+                if let Some(AudioSource::Sampler { input_source, .. }) = s.sources.get_mut(&sampler_id) {
+                    *input_source = Some(upstream_id);
+                }
             }
 
             // Apply active chains (merge params to preserve filter/delay state)
@@ -653,6 +723,50 @@ impl PatchworkApp {
                 }
             }
 
+            // Keep ALL AudioSampler nodes active — they must always be in the
+            // audio pipeline so record/play works instantly.
+            // Use audio.sampler_buffers (no mutex) rather than s.sources (might not be populated yet).
+            for (&sampler_nid, sampler_buf) in &self.audio.sampler_buffers {
+                if active_sources.contains(&sampler_nid) { continue; }
+
+                // Get the resolved input source
+                let input_src = self.audio.sampler_input_sources.get(&sampler_nid).copied();
+
+                // Ensure the sampler source is registered in s.sources
+                if !s.sources.contains_key(&sampler_nid) {
+                    let volume = self.graph.nodes.get(&sampler_nid)
+                        .and_then(|n| if let NodeType::AudioSampler { volume, .. } = &n.node_type { Some(*volume) } else { None })
+                        .unwrap_or(1.0);
+                    s.sources.insert(sampler_nid, AudioSource::Sampler {
+                        buffer: sampler_buf.clone(),
+                        volume,
+                        input_source: input_src,
+                    });
+                }
+                // Also fix input_source in case it was set to None by a failed try_lock
+                if let Some(AudioSource::Sampler { input_source, .. }) = s.sources.get_mut(&sampler_nid) {
+                    if input_source.is_none() && input_src.is_some() {
+                        *input_source = input_src;
+                    }
+                }
+
+                active_sources.insert(sampler_nid);
+                s.render_only.insert(sampler_nid);
+                if !s.active_chains.contains_key(&sampler_nid) {
+                    s.active_chains.insert(sampler_nid, Vec::new());
+                }
+                // Also activate the upstream input source
+                if let Some(src_id) = input_src {
+                    if !active_sources.contains(&src_id) {
+                        active_sources.insert(src_id);
+                        s.render_only.insert(src_id);
+                        if !s.active_chains.contains_key(&src_id) {
+                            s.active_chains.insert(src_id, Vec::new());
+                        }
+                    }
+                }
+            }
+
             // Remove stale source chains (but not actively-playing file players)
             let stale: Vec<NodeId> = s.active_chains.keys()
                 .filter(|id| !active_sources.contains(id))
@@ -672,9 +786,11 @@ impl PatchworkApp {
             }
         }
 
-        // Start audio output if DSP is enabled but stream isn't running yet
-        // (e.g., user just toggled DSP on in the AudioDevice node)
-        if !active_sources.is_empty() && !self.audio.is_running() {
+        // Start audio output if DSP is enabled but stream isn't running yet.
+        // Also rebuild engine if it's running but has no processors
+        // (happens when AudioDevice node calls start_output directly during render,
+        // before build_audio_chains has a chance to call rebuild_engine_from_graph).
+        if !self.audio.is_running() {
             let device_name: Option<String> = self.graph.nodes.values()
                 .find_map(|n| {
                     if let NodeType::AudioDevice { selected_output, enabled: true, .. } = &n.node_type {
@@ -683,7 +799,149 @@ impl PatchworkApp {
                 });
             if let Err(e) = self.audio.start_output(device_name.as_deref()) {
                 eprintln!("Audio start failed: {}", e);
+            } else {
+                self.audio.rebuild_engine_from_graph(&self.graph);
             }
+        }
+        // If engine was just started (by AudioDevice during render or by us above),
+        // rebuild to register all processors and connections.
+        if self.audio.engine_needs_rebuild {
+            self.audio.rebuild_engine_from_graph(&self.graph);
+            self.audio.engine_needs_rebuild = false;
+        }
+
+        // ── Phase 3: Ensure every active node has a source entry ─────────────
+        // Node renders call set_synth/set_sampler etc. to populate sources, but
+        // a newly connected node might not have rendered yet this frame, or its
+        // render might have run before the connection was established. Fill in
+        // any gaps from the graph's NodeType data so the compile has all sources.
+        {
+            if let Ok(mut s) = self.audio.state.lock() {
+                let active_ids: Vec<NodeId> = s.active_chains.keys().copied().collect();
+                for &nid in &active_ids {
+                    if s.sources.contains_key(&nid) { continue; }
+                    // Register source from NodeType if missing
+                    if let Some(node) = self.graph.nodes.get(&nid) {
+                        match &node.node_type {
+                            NodeType::Synth { waveform, frequency, amplitude, active, fm_depth } => {
+                                let params = crate::audio::SynthParams {
+                                    waveform: *waveform,
+                                    frequency: *frequency,
+                                    amplitude: *amplitude,
+                                    active: *active,
+                                    fm_depth: *fm_depth,
+                                    ..Default::default()
+                                };
+                                s.sources.insert(nid, AudioSource::Synth(params));
+                            }
+                            NodeType::AudioSampler { volume, .. } => {
+                                if let Some(buf) = self.audio.sampler_buffers.get(&nid) {
+                                    let input_src = self.audio.sampler_input_sources.get(&nid).copied();
+                                    s.sources.insert(nid, AudioSource::Sampler {
+                                        buffer: buf.clone(), volume: *volume, input_source: input_src,
+                                    });
+                                }
+                            }
+                            NodeType::AudioInput { gain, .. } => {
+                                if let Some(buf) = self.audio.input_buffers.get(&nid) {
+                                    s.sources.insert(nid, AudioSource::LiveInput { buffer: buf.clone(), gain: *gain });
+                                }
+                            }
+                            NodeType::AudioPlayer { volume, .. } => {
+                                if let Some(buf) = self.audio.file_buffers.get(&nid) {
+                                    s.sources.insert(nid, AudioSource::FilePlayer { buffer: buf.clone(), volume: *volume });
+                                }
+                            }
+                            // Mixer sources are registered in Phase 2 from mixer_updates
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Phase 4: Sync all audio node params to engine ──────────────────
+        // Write current parameter values for all audio nodes to the engine.
+        // This covers effect nodes (delay, reverb, etc.) that don't have direct
+        // access to AudioManager in their render functions.
+        for (&nid, node) in &self.graph.nodes {
+            if !self.audio.has_processor(nid) { continue; }
+            match &node.node_type {
+                // Synth and Speaker write their own params in render — skip
+                NodeType::Synth { .. } | NodeType::Speaker { .. } => {}
+                // Effect nodes: sync params from NodeType fields
+                NodeType::AudioDelay { time_ms, feedback } => {
+                    self.audio.engine_write_param(nid, 0, *time_ms);
+                    self.audio.engine_write_param(nid, 1, *feedback);
+                }
+                NodeType::AudioDistortion { drive } => {
+                    self.audio.engine_write_param(nid, 0, *drive);
+                }
+                NodeType::AudioReverb { room_size, damping, mix } => {
+                    self.audio.engine_write_param(nid, 0, *room_size);
+                    self.audio.engine_write_param(nid, 1, *damping);
+                    self.audio.engine_write_param(nid, 2, *mix);
+                }
+                NodeType::AudioLowPass { cutoff } => {
+                    self.audio.engine_write_param(nid, 0, *cutoff);
+                }
+                NodeType::AudioHighPass { cutoff } => {
+                    self.audio.engine_write_param(nid, 0, *cutoff);
+                }
+                NodeType::AudioGain { level } => {
+                    self.audio.engine_write_param(nid, 0, *level);
+                }
+                NodeType::AudioMixer { gains, .. } => {
+                    for (ch, gain) in gains.iter().enumerate() {
+                        self.audio.engine_write_param(nid, ch, *gain);
+                    }
+                }
+                NodeType::AudioPlayer { volume, .. } => {
+                    self.audio.engine_write_param(nid, 0, *volume);
+                }
+                NodeType::AudioSampler { volume, .. } => {
+                    self.audio.engine_write_param(nid, 0, *volume);
+                }
+                NodeType::AudioInput { gain, .. } => {
+                    self.audio.engine_write_param(nid, 0, *gain);
+                }
+                _ => {}
+            }
+        }
+
+        // Auto-register new audio nodes that don't have processors yet
+        // (e.g., nodes added via palette after engine was started)
+        if self.audio.engine_tx.is_some() {
+            for (&nid, _node) in &self.graph.nodes {
+                if self.audio.has_processor(nid) { continue; }
+                // Rebuild just this node
+                let graph_snapshot = &self.graph;
+                if let Some(node) = graph_snapshot.nodes.get(&nid) {
+                    let proc_and_count = self.audio.create_processor_for_node(&node.node_type, nid);
+                    if let Some((processor, param_count)) = proc_and_count {
+                        self.audio.add_processor(nid, processor, param_count);
+                        // Set speaker state
+                        if let NodeType::Speaker { active, .. } = &node.node_type {
+                            self.audio.send_command(crate::audio::engine::AudioCommand::SetSpeaker {
+                                node_id: nid, active: *active,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        self.graph.audio_topology_dirty = false;
+    }
+
+    /// Map a graph port index to an engine port index.
+    /// For mixer nodes, audio ports are at even indices (0, 2, 4) → engine (0, 1, 2).
+    /// For all other nodes, port index passes through unchanged.
+    fn mixer_engine_port(&self, node_id: NodeId, graph_port: usize) -> usize {
+        if matches!(self.graph.nodes.get(&node_id).map(|n| &n.node_type), Some(NodeType::AudioMixer { .. })) {
+            graph_port / 2
+        } else {
+            graph_port
         }
     }
 
@@ -1240,9 +1498,39 @@ impl PatchworkApp {
             || !pending_connections.is_empty() || !palette_spawns.is_empty() {
             self.push_undo();
         }
-        for id in nodes_to_delete { self.midi.cleanup_node(id); self.serial.cleanup_node(id); self.osc.cleanup_node(id); self.ob.cleanup_node(id); self.audio.cleanup_node(id); crate::nodes::video_player::cleanup_node(id); self.graph.remove_node(id); }
-        for (nid, port) in pending_disconnects { self.graph.remove_connections_to_port(nid, port); }
-        for (fn_, fp, tn, tp) in pending_connections { self.graph.add_connection(fn_, fp, tn, tp); }
+        for id in nodes_to_delete {
+            self.audio.remove_processor(id); // Remove from engine before graph
+            self.midi.cleanup_node(id); self.serial.cleanup_node(id); self.osc.cleanup_node(id);
+            self.ob.cleanup_node(id); self.audio.cleanup_node(id); crate::nodes::video_player::cleanup_node(id);
+            self.graph.remove_node(id);
+        }
+        for (nid, port) in &pending_disconnects {
+            // Skip mixer gain ports — they're graph-layer, not engine connections
+            let is_mixer_gain_port = matches!(
+                self.graph.nodes.get(nid).map(|n| &n.node_type),
+                Some(NodeType::AudioMixer { .. })
+            ) && port % 2 != 0;
+            if !is_mixer_gain_port {
+                let engine_port = self.mixer_engine_port(*nid, *port);
+                self.audio.disconnect_audio(*nid, engine_port);
+            }
+            self.graph.remove_connections_to_port(*nid, *port);
+        }
+        for &(fn_, fp, tn, tp) in &pending_connections {
+            self.graph.add_connection(fn_, fp, tn, tp);
+            // Only send engine connect/disconnect for audio ports
+            // For mixer nodes, skip gain control ports (odd: 1, 3, 5)
+            let is_mixer_gain_port = matches!(
+                self.graph.nodes.get(&tn).map(|n| &n.node_type),
+                Some(NodeType::AudioMixer { .. })
+            ) && tp % 2 != 0;
+            if !is_mixer_gain_port && self.audio.has_processor(fn_) && self.audio.has_processor(tn) {
+                let engine_port = self.mixer_engine_port(tn, tp);
+                // Disconnect old, connect new
+                self.audio.disconnect_audio(tn, engine_port);
+                self.audio.connect_audio(fn_, tn, engine_port);
+            }
+        }
         // Spawn nodes from Palette clicks (place at center of the current viewport)
         for (_palette_pos, nt) in palette_spawns {
             let screen_center = ctx.screen_rect().center();
@@ -1333,9 +1621,6 @@ impl eframe::App for PatchworkApp {
         let now_secs = self.app_start_instant.elapsed().as_secs_f64();
         let mut values = self.graph.evaluate(now_secs);
 
-        // Build audio chains using evaluated values (Select nodes need Selector value)
-        self.build_audio_chains(&values);
-
         // Inject OB hardware values into the graph (before they're used by downstream nodes)
         // These need a second evaluation pass to propagate through Add/Multiply/etc.
         {
@@ -1403,26 +1688,7 @@ impl eframe::App for PatchworkApp {
         }
 
         // Profiler output values
-        for (&id, _node) in &self.graph.nodes {
-            if false { // Profiler removed — Monitor is now trait-based
-                let profiler_id = egui::Id::new(("profiler_state", id));
-                let state = ctx.data_mut(|d| {
-                    d.get_temp_mut_or_insert_with::<std::sync::Arc<std::sync::Mutex<crate::nodes::profiler::ProfilerState>>>(
-                        profiler_id,
-                        || std::sync::Arc::new(std::sync::Mutex::new(crate::nodes::profiler::ProfilerState::new()))
-                    ).clone()
-                });
-                if let Ok(s) = state.lock() {
-                    let fps = s.fps_history.back().copied().unwrap_or(0.0);
-                    if let Ok(m) = s.metrics.lock() {
-                        values.insert((id, 0), PortValue::Float(fps));
-                        values.insert((id, 1), PortValue::Float(m.cpu_usage));
-                        values.insert((id, 2), PortValue::Float(m.mem_percent));
-                        values.insert((id, 3), PortValue::Float(m.process_mem_mb));
-                    }
-                }
-            }
-        }
+        // Profiler removed — Monitor is now trait-based (MonitorNode)
 
         // Evaluate Rust Plugin nodes
         {
@@ -1707,6 +1973,13 @@ impl eframe::App for PatchworkApp {
         self.render_connections(ctx, &values);
         self.render_nodes_filtered(ctx, &values, false);
         self.render_nodes_filtered(ctx, &values, true);
+
+        // Build audio chains AFTER node rendering — nodes populate s.sources
+        // during render (set_synth, set_sampler, etc.), and connections are
+        // applied at the end of render_nodes_filtered. Both must happen before
+        // we compile the DSP chain.
+        self.build_audio_chains(&values);
+
         self.sync_console_messages();
         self.handle_system_node_actions(ctx);
 

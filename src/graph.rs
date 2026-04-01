@@ -216,11 +216,11 @@ impl PortKind {
         match self {
             Self::Number      => [80, 100, 230],    // blue
             Self::Normalized  => [60, 160, 230],    // cyan-blue
-            Self::Trigger     => [255, 160, 40],    // orange
-            Self::Gate        => [220, 180, 60],    // amber
+            Self::Trigger     => [255, 120, 40],    // orange
+            Self::Gate        => [255, 200, 0],    // amber
             Self::Text        => [60, 220, 80],     // green
             Self::Image       => [200, 30, 255],    // purple
-            Self::Audio       => [255, 220, 40],    // yellow
+            Self::Audio       => [255, 50, 50],    // red
             Self::Color       => [220, 220, 220],   // white (tinted per channel at render)
             Self::Generic     => [140, 140, 140],   // gray
         }
@@ -658,6 +658,27 @@ pub enum NodeType {
         #[serde(default = "default_mixer_gains")]
         gains: Vec<f32>,
     },
+    /// Audio Sampler — records audio from input, plays back with trim + trigger.
+    AudioSampler {
+        /// Maximum recording duration in seconds.
+        #[serde(default = "default_sampler_duration")]
+        record_duration: f32,
+        /// Trim start in seconds.
+        #[serde(default)]
+        trim_start: f32,
+        /// Trim end in seconds (0 = full recording).
+        #[serde(default)]
+        trim_end: f32,
+        /// Playback volume.
+        #[serde(default = "default_one")]
+        volume: f32,
+        /// Loop playback.
+        #[serde(default)]
+        looping: bool,
+        /// Reverse playback direction.
+        #[serde(default)]
+        reverse: bool,
+    },
     RustPlugin {
         #[serde(default)]
         input_names: Vec<String>,
@@ -929,6 +950,7 @@ fn default_draw_width() -> f32 { 2.0 }
 fn default_curve_points() -> Vec<[f32; 2]> { vec![[0.0, 0.0], [1.0, 1.0]] }
 /// Flat EQ: 5 points at 0dB (y=0.5) across the frequency range
 fn default_eq_points() -> Vec<[f32; 2]> { vec![[0.0, 0.5], [0.25, 0.5], [0.5, 0.5], [0.75, 0.5], [1.0, 0.5]] }
+fn default_sampler_duration() -> f32 { 5.0 }
 fn default_mixer_channels() -> usize { 2 }
 fn default_mixer_gains() -> Vec<f32> { vec![0.8, 0.8] }
 fn default_440() -> f32 { 440.0 }
@@ -967,7 +989,7 @@ impl NodeBehavior for NodeType {
             NodeType::ObEncoder { .. } => "OB Encoder",
             NodeType::Synth { .. } => "Synth",
             NodeType::AudioPlayer { .. } => "Audio Player",
-            NodeType::AudioInput { .. } => "Audio Input",
+            NodeType::AudioInput { .. } => "Microphone",
             NodeType::AudioAnalyzer => "Audio Analyzer",
             NodeType::AudioDevice { .. } => "Audio Manager",
             NodeType::AudioFx { .. } => "Audio FX",
@@ -980,6 +1002,7 @@ impl NodeBehavior for NodeType {
             NodeType::AudioEq { .. } => "EQ",
             NodeType::Speaker { .. } => "Speaker",
             NodeType::AudioMixer { .. } => "Mixer",
+            NodeType::AudioSampler { .. } => "Audio Sampler",
             NodeType::RustPlugin { .. } => "Rust Plugin",
             NodeType::McpServer => "MCP Server",
             NodeType::HtmlViewer => "HTML Viewer",
@@ -1078,6 +1101,12 @@ impl NodeBehavior for NodeType {
                 }
                 ports
             }
+            NodeType::AudioSampler { .. } => vec![
+                PortDef::new("Audio", Audio),
+                PortDef::new("Rec", Trigger),
+                PortDef::new("Play", Trigger),
+                PortDef::new("Vol", Normalized),
+            ],
             NodeType::RustPlugin { input_names, .. } => {
                 input_names.iter().map(|n| PortDef::dynamic(n.clone(), Generic)).collect()
             }
@@ -1192,6 +1221,7 @@ impl NodeBehavior for NodeType {
             NodeType::AudioEq { .. } => vec![PortDef::new("Audio", Audio)],
             NodeType::Speaker { .. } => vec![],
             NodeType::AudioMixer { .. } => vec![PortDef::new("Mix", Audio)],
+            NodeType::AudioSampler { .. } => vec![PortDef::new("Audio", Audio), PortDef::new("Progress", Normalized)],
             NodeType::RustPlugin { output_names, .. } => {
                 output_names.iter().map(|n| PortDef::dynamic(n.clone(), Generic)).collect()
             }
@@ -1253,6 +1283,7 @@ impl NodeBehavior for NodeType {
             NodeType::AudioEq { .. } => [200, 160, 255],
             NodeType::Speaker { .. } => [80, 200, 80],
             NodeType::AudioMixer { .. } => [160, 120, 220],
+            NodeType::AudioSampler { .. } => [220, 120, 80],
             NodeType::RustPlugin { .. } => [255, 120, 50],
             NodeType::McpServer => [120, 200, 255],
             NodeType::HtmlViewer => [60, 180, 220],
@@ -1277,7 +1308,7 @@ impl NodeBehavior for NodeType {
     fn inline_ports(&self) -> bool {
         match self {
             NodeType::Dynamic { inner } => inner.node.inline_ports(),
-            _ => matches!(self, NodeType::Theme { .. } | NodeType::MidiOut { .. } | NodeType::Synth { .. } | NodeType::WgslViewer { .. } | NodeType::ImageEffects { .. } | NodeType::Slider { .. } | NodeType::Blend { .. } | NodeType::HttpRequest { .. } | NodeType::AiRequest { .. } | NodeType::Math { .. } | NodeType::AudioDelay { .. } | NodeType::AudioDistortion { .. } | NodeType::AudioLowPass { .. } | NodeType::AudioHighPass { .. } | NodeType::AudioGain { .. } | NodeType::AudioReverb { .. } | NodeType::AudioEq { .. } | NodeType::AudioPlayer { .. } | NodeType::Timer { .. } | NodeType::SampleHold { .. } | NodeType::Select { .. } | NodeType::Curve { .. } | NodeType::AudioMixer { .. } | NodeType::Speaker { .. } | NodeType::AudioInput { .. } | NodeType::Console { .. }),
+            _ => matches!(self, NodeType::Theme { .. } | NodeType::MidiOut { .. } | NodeType::Synth { .. } | NodeType::WgslViewer { .. } | NodeType::ImageEffects { .. } | NodeType::Slider { .. } | NodeType::Blend { .. } | NodeType::HttpRequest { .. } | NodeType::AiRequest { .. } | NodeType::Math { .. } | NodeType::AudioDelay { .. } | NodeType::AudioDistortion { .. } | NodeType::AudioLowPass { .. } | NodeType::AudioHighPass { .. } | NodeType::AudioGain { .. } | NodeType::AudioReverb { .. } | NodeType::AudioEq { .. } | NodeType::AudioPlayer { .. } | NodeType::Timer { .. } | NodeType::SampleHold { .. } | NodeType::Select { .. } | NodeType::Curve { .. } | NodeType::AudioMixer { .. } | NodeType::Speaker { .. } | NodeType::AudioInput { .. } | NodeType::AudioSampler { .. } | NodeType::Console { .. }),
         }
     }
 
@@ -1351,6 +1382,14 @@ pub struct Graph {
     /// Uses skip_serializing + default_true so it starts as true after deserialization
     #[serde(skip_serializing, default = "default_true")]
     topo_dirty: bool,
+    /// True when audio topology changed (connection/node add/remove, Speaker toggle, Select switch).
+    /// The audio chain compiler reads this and recompiles when true.
+    #[serde(skip_serializing, default = "default_true")]
+    pub audio_topology_dirty: bool,
+    /// True when audio parameters changed (slider moved, knob turned).
+    /// Only requires ParamStore update, not full chain recompilation.
+    #[serde(skip)]
+    #[allow(dead_code)] pub audio_params_dirty: bool,
 }
 
 impl Graph {
@@ -1363,6 +1402,8 @@ impl Graph {
             topo_order: Vec::new(),
             cyclic_nodes: Vec::new(),
             topo_dirty: true,
+            audio_topology_dirty: true,
+            audio_params_dirty: false,
         }
     }
     /// Get the PortKind for a specific port on a node.
@@ -1377,21 +1418,25 @@ impl Graph {
         let id = self.next_id; self.next_id += 1;
         self.nodes.insert(id, Node { id, node_type, pos });
         self.topo_dirty = true;
+        self.audio_topology_dirty = true;
         id
     }
     pub fn remove_node(&mut self, id: NodeId) {
         self.nodes.remove(&id);
         self.connections.retain(|c| c.from_node != id && c.to_node != id);
         self.topo_dirty = true;
+        self.audio_topology_dirty = true;
     }
     pub fn remove_connections_to_port(&mut self, node_id: NodeId, port: usize) {
         self.connections.retain(|c| !(c.to_node == node_id && c.to_port == port));
         self.topo_dirty = true;
+        self.audio_topology_dirty = true;
     }
     pub fn add_connection(&mut self, from_node: NodeId, from_port: usize, to_node: NodeId, to_port: usize) {
         self.connections.retain(|c| !(c.to_node == to_node && c.to_port == to_port));
         self.connections.push(Connection { from_node, from_port, to_node, to_port, label: String::new() });
         self.topo_dirty = true;
+        self.audio_topology_dirty = true;
     }
 
     /// Rebuild topological evaluation order using Kahn's algorithm.

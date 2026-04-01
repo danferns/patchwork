@@ -53,7 +53,15 @@ impl super::PatchworkApp {
                 return false;
             }
         };
-        self.graph = state.graph;
+        let mut graph = state.graph;
+        // Always start with DSP off for safety (prevents unexpected audio on launch)
+        for node in graph.nodes.values_mut() {
+            if let NodeType::AudioDevice { enabled, .. } = &mut node.node_type {
+                *enabled = false;
+            }
+        }
+        self.graph = graph;
+        self.graph.audio_topology_dirty = true;
         self.canvas_offset = egui::Vec2::new(state.canvas_offset[0], state.canvas_offset[1]);
         self.canvas_zoom = state.canvas_zoom;
         self.pinned_nodes = state.pinned_nodes.into_iter().collect();
@@ -327,8 +335,16 @@ impl super::PatchworkApp {
             };
             // Load graph from the file
             if let Ok(json) = std::fs::read_to_string(&path) {
-                if let Ok(graph) = serde_json::from_str::<Graph>(&json) {
+                if let Ok(mut graph) = serde_json::from_str::<Graph>(&json) {
+                    // Always start with DSP off for safety (prevents unexpected audio on load)
+                    for node in graph.nodes.values_mut() {
+                        if let NodeType::AudioDevice { enabled, .. } = &mut node.node_type {
+                            *enabled = false;
+                        }
+                    }
                     self.graph = graph;
+                    self.graph.audio_topology_dirty = true;
+                    self.audio.stop_output();
                     self.port_positions.clear();
                     self.node_rects.clear();
                     self.undo_history.clear();
