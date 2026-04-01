@@ -73,17 +73,7 @@ pub fn render(
         *volume = Graph::static_input_value(connections, values, node_id, 3).as_float().clamp(0.0, 1.0);
     }
     // Write volume to ParamStore
-    audio.write_param(node_id, 0, *volume);
-
-    // Use the resolved upstream source from build_audio_chains (reliable, has full graph access).
-    // Falls back to the directly connected node if not resolved yet.
-    let input_source = audio.sampler_input_sources.get(&node_id).copied()
-        .or_else(|| connections.iter()
-            .find(|c| c.to_node == node_id && c.to_port == 0)
-            .map(|c| c.from_node));
-
-    // Register sampler in audio state
-    audio.set_sampler(node_id, &buffer, *volume, input_source);
+    audio.engine_write_param(node_id, 0, *volume);
 
     // ── Input ports ──────────────────────────────────────────────
     ui.horizontal(|ui| {
@@ -382,7 +372,7 @@ pub fn render(
                 crate::nodes::inline_port_circle(ui, node_id, 3, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Normalized);
                 ui.label(egui::RichText::new(crate::icons::SPEAKER_HIGH).size(10.0));
                 if ui.add(egui::Slider::new(volume, 0.0..=1.0).show_value(false)).changed() {
-                    audio.write_param(node_id, 0, *volume);
+                    audio.engine_write_param(node_id, 0, *volume);
                 }
                 ui.label(egui::RichText::new(format!("{:.0}%", *volume * 100.0)).small().color(egui::Color32::GRAY));
             });

@@ -308,484 +308,26 @@ impl PatchworkApp {
 
     /// Build audio chains from Speaker nodes backward through effects to sources.
     /// Only sources routed through an active Speaker will produce sound.
-    fn build_audio_chains(&mut self, values: &std::collections::HashMap<(NodeId, usize), PortValue>) {
-        use crate::audio::{AudioEffect, AudioSource, SmoothedParam};
-
+    /// Sync audio engine state with the graph. Called every frame after node rendering.
+    ///
+    /// Responsibilities:
+    /// 1. Start/stop audio output based on DSP enabled state
+    /// 2. Rebuild engine when it's freshly created
+    /// 3. Sync all audio node parameters to the engine (lock-free atomic writes)
+    /// 4. Auto-register new audio nodes that don't have processors yet
+    fn sync_audio_engine(&mut self) {
         // ── Gate: require an enabled AudioDevice node for any audio to flow ──
         let dsp_enabled = self.graph.nodes.values().any(|n| {
             matches!(n.node_type, NodeType::AudioDevice { enabled: true, .. })
         });
         if !dsp_enabled {
-            // No enabled AudioDevice — stop audio if running, clear chains
             if self.audio.is_running() {
                 self.audio.stop_output();
-            }
-            if let Ok(mut s) = self.audio.state.try_lock() {
-                s.active_chains.clear();
-                s.channel_chains.clear();
-                s.render_only.clear();
             }
             return;
         }
 
-        // ── Phase 0: Resolve sampler upstream sources (needs full graph access) ──
-        for (&nid, node) in &self.graph.nodes {
-            if let NodeType::AudioSampler { .. } = &node.node_type {
-                // Walk backward from port 0 to find the actual audio source
-                let mut upstream = self.graph.connections.iter()
-                    .find(|c| c.to_node == nid && c.to_port == 0)
-                    .map(|c| c.from_node);
-                let mut visited = std::collections::HashSet::new();
-                while let Some(uid) = upstream {
-                    if !visited.insert(uid) { break; }
-                    let is_src = self.graph.nodes.get(&uid).map(|n| {
-                        matches!(n.node_type, NodeType::Synth { .. } | NodeType::AudioPlayer { .. } | NodeType::AudioInput { .. } | NodeType::AudioMixer { .. })
-                    }).unwrap_or(false);
-                    if is_src {
-                        self.audio.sampler_input_sources.insert(nid, uid);
-                        break;
-                    }
-                    upstream = self.graph.connections.iter()
-                        .find(|c| c.to_node == uid && c.to_port == 0)
-                        .map(|c| c.from_node);
-                }
-            }
-        }
-
-        // ── Phase 1: Collect all chain info without locking audio state ──
-        let mut active_sources: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
-        let mut render_only_sources: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
-        // Collected updates to apply in a single lock
-        let mut chain_updates: Vec<(NodeId, Vec<AudioEffect>)> = Vec::new();
-        let mut mixer_updates: Vec<(NodeId, Vec<(NodeId, f32)>)> = Vec::new();
-        // Per-channel effect chains: (mixer_id, channel) → effects
-        // Keyed by channel so each channel has independent filter state and delay buffers,
-        // and the same source can feed two channels with different effects without conflict.
-        let mut channel_chain_updates: Vec<((NodeId, usize), Vec<AudioEffect>)> = Vec::new();
-        // Track which channel keys are active this frame (for stale-chain removal)
-        let mut active_channel_keys: std::collections::HashSet<(NodeId, usize)> = std::collections::HashSet::new();
-
-        for (&speaker_id, node) in &self.graph.nodes {
-            let is_active = match &node.node_type {
-                NodeType::Speaker { active, .. } => *active,
-                _ => continue,
-            };
-            if !is_active { continue; }
-
-            let chain = crate::nodes::speaker::trace_audio_chain(speaker_id, &self.graph, values);
-            if chain.is_empty() { continue; }
-
-            let source_id = chain[0];
-            let is_source = self.graph.nodes.get(&source_id).map(|n| {
-                matches!(n.node_type, NodeType::Synth { .. } | NodeType::AudioPlayer { .. } | NodeType::AudioMixer { .. } | NodeType::AudioInput { .. } | NodeType::AudioSampler { .. })
-            }).unwrap_or(false);
-            if !is_source { continue; }
-
-            // Mixer processing — iterative queue to support nested Mixers.
-            // Processes the top-level Mixer first; if any channel's source is another
-            // Mixer, that inner Mixer is queued for processing too (any nesting depth).
-            {
-                let mut mixers_to_process: Vec<NodeId> = Vec::new();
-                if self.graph.nodes.get(&source_id).map(|n| matches!(n.node_type, NodeType::AudioMixer { .. })).unwrap_or(false) {
-                    mixers_to_process.push(source_id);
-                }
-                // Track already-processed mixers to avoid infinite loops in cycles
-                let mut processed_mixers: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
-
-                while let Some(mixer_id) = mixers_to_process.pop() {
-                    if !processed_mixers.insert(mixer_id) { continue; } // skip if already done
-
-                    let (channel_count, gains_snapshot) = match self.graph.nodes.get(&mixer_id) {
-                        Some(n) => match &n.node_type {
-                            NodeType::AudioMixer { channel_count, gains } => (*channel_count, gains.clone()),
-                            _ => continue,
-                        },
-                        None => continue,
-                    };
-
-                    let mut mixer_inputs: Vec<(NodeId, f32)> = Vec::new();
-                    for ch in 0..channel_count {
-                        let audio_port = ch * 2;
-                        let conn_from = self.graph.connections.iter()
-                            .find(|c| c.to_node == mixer_id && c.to_port == audio_port)
-                            .map(|c| c.from_node);
-                        let Some(from_node) = conn_from else { continue };
-                        let gain = gains_snapshot.get(ch).copied().unwrap_or(0.8);
-
-                        // Walk backward from the connected node to find the actual source + effects
-                        let mut sub_chain = Vec::new();
-                        let mut current = from_node;
-                        loop {
-                            if sub_chain.contains(&current) { break; } // cycle
-                            sub_chain.push(current);
-                            let is_source = self.graph.nodes.get(&current).map(|n| {
-                                matches!(n.node_type, NodeType::Synth { .. } | NodeType::AudioPlayer { .. } | NodeType::AudioMixer { .. } | NodeType::AudioInput { .. } | NodeType::AudioSampler { .. })
-                            }).unwrap_or(false);
-                            if is_source { break; }
-                            // For Select nodes, follow the active input
-                            let follow_port = if let Some(n) = self.graph.nodes.get(&current) {
-                                if matches!(n.node_type, NodeType::Select { .. }) {
-                                    let sel = Graph::static_input_value(&self.graph.connections, values, current, 2).as_float();
-                                    if sel > 0.5 { 1 } else { 0 }
-                                } else { 0 }
-                            } else { 0 };
-                            match self.graph.connections.iter().find(|c| c.to_node == current && c.to_port == follow_port) {
-                                Some(c) => { current = c.from_node; }
-                                None => break,
-                            }
-                        }
-                        sub_chain.reverse(); // source first, effects in order
-                        if sub_chain.is_empty() { continue; }
-                        let actual_source = sub_chain[0];
-
-                        // Determine what kind of source we found
-                        let source_type = self.graph.nodes.get(&actual_source).map(|n| &n.node_type);
-                        let is_synth_or_player = source_type.map(|nt| matches!(nt, NodeType::Synth { .. } | NodeType::AudioPlayer { .. } | NodeType::AudioInput { .. } | NodeType::AudioSampler { .. })).unwrap_or(false);
-                        let is_nested_mixer = source_type.map(|nt| matches!(nt, NodeType::AudioMixer { .. })).unwrap_or(false);
-
-                        if is_synth_or_player || is_nested_mixer {
-                            mixer_inputs.push((actual_source, gain));
-                            render_only_sources.insert(actual_source);
-                            active_sources.insert(actual_source);
-                            // Register source in active_chains so the callback renders it
-                            chain_updates.push((actual_source, Vec::new()));
-
-                            // Build per-channel effects from the sub-chain (effect nodes between source and mixer)
-                            let mut ch_effects: Vec<AudioEffect> = Vec::new();
-                            for &nid in &sub_chain[1..] {
-                                if let Some(n) = self.graph.nodes.get(&nid) {
-                                    match &n.node_type {
-                                        NodeType::AudioDelay { time_ms, feedback } => {
-                                            ch_effects.push(AudioEffect::Delay { time_ms: *time_ms, feedback: SmoothedParam::new(*feedback, 10.0), buffer: Vec::new(), write_pos: 0, max_delay_samples: 0 });
-                                        }
-                                        NodeType::AudioDistortion { drive } => {
-                                            ch_effects.push(AudioEffect::Distortion { drive: SmoothedParam::new(*drive, 10.0) });
-                                        }
-                                        NodeType::AudioReverb { room_size, damping, mix } => {
-                                            ch_effects.push(AudioEffect::Reverb {
-                                                room_size: SmoothedParam::new(*room_size, 20.0), damping: SmoothedParam::new(*damping, 20.0), mix: SmoothedParam::new(*mix, 10.0),
-                                                comb_buffers: [vec![], vec![], vec![], vec![]], comb_pos: [0; 4], comb_filter_state: [0.0; 4],
-                                                allpass_buffers: [vec![], vec![]], allpass_pos: [0; 2], initialized: false,
-                                            });
-                                        }
-                                        NodeType::AudioLowPass { cutoff } => {
-                                            ch_effects.push(AudioEffect::LowPass { cutoff: SmoothedParam::new(*cutoff, 10.0), state: 0.0 });
-                                        }
-                                        NodeType::AudioHighPass { cutoff } => {
-                                            ch_effects.push(AudioEffect::HighPass { cutoff: SmoothedParam::new(*cutoff, 10.0), state: 0.0 });
-                                        }
-                                        NodeType::AudioGain { level } => {
-                                            ch_effects.push(AudioEffect::Gain { level: SmoothedParam::new(*level, 5.0) });
-                                        }
-                                        NodeType::AudioEq { points } => {
-                                            let sr = self.audio.state.try_lock().map(|s| s.sample_rate).unwrap_or(44100.0);
-                                            let bands = crate::audio::curve_to_eq_bands(points, sr);
-                                            let hash = {
-                                                use std::collections::hash_map::DefaultHasher;
-                                                use std::hash::{Hash, Hasher};
-                                                let mut h = DefaultHasher::new();
-                                                for p in points.iter() {
-                                                    p[0].to_bits().hash(&mut h);
-                                                    p[1].to_bits().hash(&mut h);
-                                                }
-                                                h.finish()
-                                            };
-                                            ch_effects.push(AudioEffect::ParametricEq { bands, curve_hash: hash });
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                            let ch_key = (mixer_id, ch);
-                            active_channel_keys.insert(ch_key);
-                            channel_chain_updates.push((ch_key, ch_effects));
-
-                            // If this is a nested mixer, queue it for processing its own channels
-                            if is_nested_mixer {
-                                mixers_to_process.push(actual_source);
-                            }
-
-                            // FM: check if a Synth source has an FM modulator
-                            if is_synth_or_player {
-                                if let Some(conn) = self.graph.connections.iter().find(|c| c.to_node == actual_source && c.to_port == 0 && c.from_port == 0) {
-                                    let fm_id = conn.from_node;
-                                    let is_fm_synth = self.graph.nodes.get(&fm_id).map(|n| matches!(n.node_type, NodeType::Synth { .. })).unwrap_or(false);
-                                    if is_fm_synth && !active_sources.contains(&fm_id) {
-                                        render_only_sources.insert(fm_id);
-                                        active_sources.insert(fm_id);
-                                        chain_updates.push((fm_id, Vec::new()));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    mixer_updates.push((mixer_id, mixer_inputs));
-                }
-            }
-
-            // AudioSampler: register its upstream input source as render-only so it produces audio,
-            // and store the resolved mapping so the sampler render can use it reliably.
-            if let Some(node) = self.graph.nodes.get(&source_id) {
-                if let NodeType::AudioSampler { .. } = &node.node_type {
-                    // Walk backward from the Sampler's Audio input (port 0) to find the source
-                    let mut upstream = self.graph.connections.iter()
-                        .find(|c| c.to_node == source_id && c.to_port == 0)
-                        .map(|c| c.from_node);
-                    let mut found_source: Option<NodeId> = None;
-                    let mut visited = std::collections::HashSet::new();
-                    while let Some(nid) = upstream {
-                        if !visited.insert(nid) { break; }
-                        let is_src = self.graph.nodes.get(&nid).map(|n| {
-                            matches!(n.node_type, NodeType::Synth { .. } | NodeType::AudioPlayer { .. } | NodeType::AudioInput { .. } | NodeType::AudioMixer { .. })
-                        }).unwrap_or(false);
-                        if is_src {
-                            found_source = Some(nid);
-                            if !active_sources.contains(&nid) {
-                                render_only_sources.insert(nid);
-                                active_sources.insert(nid);
-                                chain_updates.push((nid, Vec::new()));
-                            }
-                            break;
-                        }
-                        upstream = self.graph.connections.iter()
-                            .find(|c| c.to_node == nid && c.to_port == 0)
-                            .map(|c| c.from_node);
-                    }
-                    // Store resolved mapping so sampler render and audio callback can use it
-                    if let Some(src_nid) = found_source {
-                        self.audio.sampler_input_sources.insert(source_id, src_nid);
-                    }
-                }
-            }
-
-            // FM: if source Synth's Freq input (port 0) is connected to another Synth, register modulator
-            if let Some(node) = self.graph.nodes.get(&source_id) {
-                if let NodeType::Synth { .. } = &node.node_type {
-                    if let Some(conn) = self.graph.connections.iter().find(|c| c.to_node == source_id && c.to_port == 0 && c.from_port == 0) {
-                        let fm_id = conn.from_node;
-                        let is_synth = self.graph.nodes.get(&fm_id).map(|n| matches!(n.node_type, NodeType::Synth { .. })).unwrap_or(false);
-                        if is_synth && !active_sources.contains(&fm_id) {
-                            render_only_sources.insert(fm_id);
-                            active_sources.insert(fm_id);
-                            chain_updates.push((fm_id, Vec::new()));
-                        }
-                    }
-                }
-            }
-
-            // Build effects list from the rest of the chain
-            let mut effects: Vec<AudioEffect> = Vec::new();
-            for &nid in &chain[1..] {
-                if let Some(n) = self.graph.nodes.get(&nid) {
-                    match &n.node_type {
-                        NodeType::AudioDelay { time_ms, feedback } => {
-                            effects.push(AudioEffect::Delay {
-                                time_ms: *time_ms, feedback: SmoothedParam::new(*feedback, 10.0),
-                                buffer: Vec::new(), write_pos: 0, max_delay_samples: 0,
-                            });
-                        }
-                        NodeType::AudioDistortion { drive } => {
-                            effects.push(AudioEffect::Distortion { drive: SmoothedParam::new(*drive, 10.0) });
-                        }
-                        NodeType::AudioReverb { room_size, damping, mix } => {
-                            effects.push(AudioEffect::Reverb {
-                                room_size: SmoothedParam::new(*room_size, 20.0), damping: SmoothedParam::new(*damping, 20.0), mix: SmoothedParam::new(*mix, 10.0),
-                                comb_buffers: [vec![], vec![], vec![], vec![]], comb_pos: [0; 4], comb_filter_state: [0.0; 4],
-                                allpass_buffers: [vec![], vec![]], allpass_pos: [0; 2], initialized: false,
-                            });
-                        }
-                        NodeType::AudioLowPass { cutoff } => {
-                            effects.push(AudioEffect::LowPass { cutoff: SmoothedParam::new(*cutoff, 10.0), state: 0.0 });
-                        }
-                        NodeType::AudioHighPass { cutoff } => {
-                            effects.push(AudioEffect::HighPass { cutoff: SmoothedParam::new(*cutoff, 10.0), state: 0.0 });
-                        }
-                        NodeType::AudioGain { level } => {
-                            effects.push(AudioEffect::Gain { level: SmoothedParam::new(*level, 5.0) });
-                        }
-                        NodeType::AudioFx { effects: fx_list } => {
-                            effects.extend(fx_list.iter().cloned());
-                        }
-                        NodeType::AudioEq { points } => {
-                            let sr = self.audio.state.try_lock().map(|s| s.sample_rate).unwrap_or(44100.0);
-                            let bands = crate::audio::curve_to_eq_bands(points, sr);
-                            let hash = {
-                                use std::collections::hash_map::DefaultHasher;
-                                use std::hash::{Hash, Hasher};
-                                let mut h = DefaultHasher::new();
-                                for p in points.iter() {
-                                    p[0].to_bits().hash(&mut h);
-                                    p[1].to_bits().hash(&mut h);
-                                }
-                                h.finish()
-                            };
-                            effects.push(AudioEffect::ParametricEq { bands, curve_hash: hash });
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
-            // Append the Speaker's volume as the final gain stage in the chain.
-            // This makes each Speaker's volume control independent and per-chain,
-            // rather than a global master_volume that affects all audio.
-            if let Some(spk) = self.graph.nodes.get(&speaker_id) {
-                if let NodeType::Speaker { volume, .. } = &spk.node_type {
-                    effects.push(AudioEffect::Gain { level: SmoothedParam::new(*volume, 5.0) });
-                }
-            }
-
-            chain_updates.push((source_id, effects));
-            active_sources.insert(source_id);
-        }
-
-        // ── Phase 2: Apply ALL updates in a single lock ─────────────────
-        // Use blocking lock() — the audio callback only uses the mutex as a
-        // fallback before the first compiled chain arrives. Once the compiled
-        // chain is active, the callback never touches this mutex, so we won't
-        // cause audio dropouts by blocking here.
-        if let Ok(mut s) = self.audio.state.lock() {
-            // Apply mixer source registrations
-            for (mixer_id, inputs) in mixer_updates {
-                s.sources.insert(mixer_id, AudioSource::Mixer { inputs });
-            }
-
-            // Fix sampler input_source fields with resolved upstream sources
-            for (&sampler_id, &upstream_id) in &self.audio.sampler_input_sources {
-                if let Some(AudioSource::Sampler { input_source, .. }) = s.sources.get_mut(&sampler_id) {
-                    *input_source = Some(upstream_id);
-                }
-            }
-
-            // Apply active chains (merge params to preserve filter/delay state)
-            for (node_id, effects) in chain_updates {
-                if let Some(existing) = s.active_chains.get_mut(&node_id) {
-                    if existing.len() != effects.len() || !crate::audio::effects_same_types(existing, &effects) {
-                        s.active_chains.insert(node_id, effects);
-                    } else {
-                        for (old, new) in existing.iter_mut().zip(effects.iter()) {
-                            old.merge_params(new);
-                        }
-                    }
-                } else {
-                    s.active_chains.insert(node_id, effects);
-                }
-            }
-
-            // Apply per-channel effect chains (merge params to preserve internal state)
-            for (ch_key, effects) in channel_chain_updates {
-                if let Some(existing) = s.channel_chains.get_mut(&ch_key) {
-                    if existing.len() != effects.len() || !crate::audio::effects_same_types(existing, &effects) {
-                        s.channel_chains.insert(ch_key, effects);
-                    } else {
-                        for (old, new) in existing.iter_mut().zip(effects.iter()) {
-                            old.merge_params(new);
-                        }
-                    }
-                } else {
-                    s.channel_chains.insert(ch_key, effects);
-                }
-            }
-
-            // Update render_only set
-            s.render_only = render_only_sources;
-
-            // Keep actively-playing FilePlayer sources in active_chains even if
-            // they aren't routed through a Speaker.  This ensures the audio callback
-            // keeps consuming from their ring buffer (preventing backpressure stalls)
-            // and the playhead keeps advancing.  Without this, the stale-chain cleanup
-            // removes FilePlayers every frame they're not traced from a Speaker, causing
-            // "plays, stops, plays, stops" stuttering.
-            // Keep actively-playing FilePlayer sources in active_chains even if
-            // they aren't routed through a Speaker — but mark them as render_only
-            // so the audio callback consumes samples (keeping the playhead moving)
-            // without mixing them to the output.  Sound only comes through when
-            // routed: AudioPlayer → [effects] → Speaker.
-            let playing_files: Vec<NodeId> = s.sources.iter()
-                .filter_map(|(&nid, src)| {
-                    if let AudioSource::FilePlayer { buffer, .. } = src {
-                        if !buffer.finished.load(std::sync::atomic::Ordering::Relaxed)
-                            && !buffer.paused.load(std::sync::atomic::Ordering::Relaxed)
-                            && !active_sources.contains(&nid)
-                        {
-                            return Some(nid);
-                        }
-                    }
-                    None
-                })
-                .collect();
-            for nid in playing_files {
-                active_sources.insert(nid);
-                // render_only = consume buffer but don't output sound
-                s.render_only.insert(nid);
-                if !s.active_chains.contains_key(&nid) {
-                    s.active_chains.insert(nid, Vec::new());
-                }
-            }
-
-            // Keep ALL AudioSampler nodes active — they must always be in the
-            // audio pipeline so record/play works instantly.
-            // Use audio.sampler_buffers (no mutex) rather than s.sources (might not be populated yet).
-            for (&sampler_nid, sampler_buf) in &self.audio.sampler_buffers {
-                if active_sources.contains(&sampler_nid) { continue; }
-
-                // Get the resolved input source
-                let input_src = self.audio.sampler_input_sources.get(&sampler_nid).copied();
-
-                // Ensure the sampler source is registered in s.sources
-                if !s.sources.contains_key(&sampler_nid) {
-                    let volume = self.graph.nodes.get(&sampler_nid)
-                        .and_then(|n| if let NodeType::AudioSampler { volume, .. } = &n.node_type { Some(*volume) } else { None })
-                        .unwrap_or(1.0);
-                    s.sources.insert(sampler_nid, AudioSource::Sampler {
-                        buffer: sampler_buf.clone(),
-                        volume,
-                        input_source: input_src,
-                    });
-                }
-                // Also fix input_source in case it was set to None by a failed try_lock
-                if let Some(AudioSource::Sampler { input_source, .. }) = s.sources.get_mut(&sampler_nid) {
-                    if input_source.is_none() && input_src.is_some() {
-                        *input_source = input_src;
-                    }
-                }
-
-                active_sources.insert(sampler_nid);
-                s.render_only.insert(sampler_nid);
-                if !s.active_chains.contains_key(&sampler_nid) {
-                    s.active_chains.insert(sampler_nid, Vec::new());
-                }
-                // Also activate the upstream input source
-                if let Some(src_id) = input_src {
-                    if !active_sources.contains(&src_id) {
-                        active_sources.insert(src_id);
-                        s.render_only.insert(src_id);
-                        if !s.active_chains.contains_key(&src_id) {
-                            s.active_chains.insert(src_id, Vec::new());
-                        }
-                    }
-                }
-            }
-
-            // Remove stale source chains (but not actively-playing file players)
-            let stale: Vec<NodeId> = s.active_chains.keys()
-                .filter(|id| !active_sources.contains(id))
-                .copied()
-                .collect();
-            for id in stale {
-                s.active_chains.remove(&id);
-            }
-
-            // Remove stale per-channel chains (mixer removed or channel count changed)
-            let stale_ch: Vec<(NodeId, usize)> = s.channel_chains.keys()
-                .filter(|k| !active_channel_keys.contains(k))
-                .copied()
-                .collect();
-            for k in stale_ch {
-                s.channel_chains.remove(&k);
-            }
-        }
-
+        // ── Start/rebuild engine ──
         // Start audio output if DSP is enabled but stream isn't running yet.
         // Also rebuild engine if it's running but has no processors
         // (happens when AudioDevice node calls start_output directly during render,
@@ -810,57 +352,7 @@ impl PatchworkApp {
             self.audio.engine_needs_rebuild = false;
         }
 
-        // ── Phase 3: Ensure every active node has a source entry ─────────────
-        // Node renders call set_synth/set_sampler etc. to populate sources, but
-        // a newly connected node might not have rendered yet this frame, or its
-        // render might have run before the connection was established. Fill in
-        // any gaps from the graph's NodeType data so the compile has all sources.
-        {
-            if let Ok(mut s) = self.audio.state.lock() {
-                let active_ids: Vec<NodeId> = s.active_chains.keys().copied().collect();
-                for &nid in &active_ids {
-                    if s.sources.contains_key(&nid) { continue; }
-                    // Register source from NodeType if missing
-                    if let Some(node) = self.graph.nodes.get(&nid) {
-                        match &node.node_type {
-                            NodeType::Synth { waveform, frequency, amplitude, active, fm_depth } => {
-                                let params = crate::audio::SynthParams {
-                                    waveform: *waveform,
-                                    frequency: *frequency,
-                                    amplitude: *amplitude,
-                                    active: *active,
-                                    fm_depth: *fm_depth,
-                                    ..Default::default()
-                                };
-                                s.sources.insert(nid, AudioSource::Synth(params));
-                            }
-                            NodeType::AudioSampler { volume, .. } => {
-                                if let Some(buf) = self.audio.sampler_buffers.get(&nid) {
-                                    let input_src = self.audio.sampler_input_sources.get(&nid).copied();
-                                    s.sources.insert(nid, AudioSource::Sampler {
-                                        buffer: buf.clone(), volume: *volume, input_source: input_src,
-                                    });
-                                }
-                            }
-                            NodeType::AudioInput { gain, .. } => {
-                                if let Some(buf) = self.audio.input_buffers.get(&nid) {
-                                    s.sources.insert(nid, AudioSource::LiveInput { buffer: buf.clone(), gain: *gain });
-                                }
-                            }
-                            NodeType::AudioPlayer { volume, .. } => {
-                                if let Some(buf) = self.audio.file_buffers.get(&nid) {
-                                    s.sources.insert(nid, AudioSource::FilePlayer { buffer: buf.clone(), volume: *volume });
-                                }
-                            }
-                            // Mixer sources are registered in Phase 2 from mixer_updates
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── Phase 4: Sync all audio node params to engine ──────────────────
+        // ── Sync all audio node params to engine ──────────────────────────
         // Write current parameter values for all audio nodes to the engine.
         // This covers effect nodes (delay, reverb, etc.) that don't have direct
         // access to AudioManager in their render functions.
@@ -1848,38 +1340,30 @@ impl eframe::App for PatchworkApp {
                 .map(|(&id, _)| id)
                 .collect();
             for id in analyzer_ids {
-                // Trace backward from the Analyzer's Audio input to find the actual source
-                let source_id = crate::nodes::audio_analyzer::trace_audio_source(id, &connections, &self.graph.nodes);
-                let (amp, peak, bass, mid, treble, source_name) = if let Some(src_id) = source_id {
-                    // Request per-source analysis
-                    self.audio.request_analysis(src_id);
-                    let a = self.audio.get_source_analysis(src_id);
-                    let name = self.graph.nodes.get(&src_id).map(|n| n.node_type.title().to_string()).unwrap_or_default();
-                    if let Some(a) = a {
-                        (a.amplitude, a.peak, a.bass, a.mid, a.treble, name)
-                    } else {
-                        (0.0, 0.0, 0.0, 0.0, 0.0, name)
-                    }
-                } else {
-                    // Not connected — analyze master output mix
-                    let a = self.audio.get_analysis();
-                    if let Some(a) = a {
-                        (a.amplitude, a.peak, a.bass, a.mid, a.treble, String::new())
-                    } else {
-                        (0.0, 0.0, 0.0, 0.0, 0.0, String::new())
-                    }
-                };
+                // Read analysis from the engine's AnalyzerProcessor (shared via Arc<Mutex>)
+                let (amp, peak, bass, mid, treble) = self.audio.analyzer_results.get(&id)
+                    .and_then(|a| a.try_lock().ok())
+                    .map(|a| (a.amplitude, a.peak, a.bass, a.mid, a.treble))
+                    .unwrap_or((0.0, 0.0, 0.0, 0.0, 0.0));
+
+                // Find what's connected to the analyzer's input
+                let source_name = connections.iter()
+                    .find(|c| c.to_node == id && c.to_port == 0)
+                    .and_then(|c| self.graph.nodes.get(&c.from_node))
+                    .map(|n| n.node_type.title().to_string())
+                    .unwrap_or_default();
+
                 // Store for the node's render function to display
                 ctx.data_mut(|d| {
                     d.insert_temp(egui::Id::new(("audio_analysis", id)), [amp, peak, bass, mid, treble]);
                     d.insert_temp(egui::Id::new(("audio_analysis_source", id)), source_name);
                 });
-                // Inject output port values into graph
-                values.insert((id, 0), PortValue::Float(amp));
-                values.insert((id, 1), PortValue::Float(peak));
-                values.insert((id, 2), PortValue::Float(bass));
-                values.insert((id, 3), PortValue::Float(mid));
-                values.insert((id, 4), PortValue::Float(treble));
+                // Inject output port values into graph (port 0 = Audio pass-through, 1-5 = analysis)
+                values.insert((id, 1), PortValue::Float(amp));
+                values.insert((id, 2), PortValue::Float(peak));
+                values.insert((id, 3), PortValue::Float(bass));
+                values.insert((id, 4), PortValue::Float(mid));
+                values.insert((id, 5), PortValue::Float(treble));
             }
         }
 
@@ -1975,10 +1459,8 @@ impl eframe::App for PatchworkApp {
         self.render_nodes_filtered(ctx, &values, true);
 
         // Build audio chains AFTER node rendering — nodes populate s.sources
-        // during render (set_synth, set_sampler, etc.), and connections are
-        // applied at the end of render_nodes_filtered. Both must happen before
-        // we compile the DSP chain.
-        self.build_audio_chains(&values);
+        // Sync audio engine state with the graph (start/stop, rebuild, param sync)
+        self.sync_audio_engine();
 
         self.sync_console_messages();
         self.handle_system_node_actions(ctx);

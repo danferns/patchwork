@@ -601,10 +601,6 @@ pub enum NodeType {
         #[serde(default)]
         enabled: bool,
     },
-    AudioFx {
-        #[serde(default)]
-        effects: Vec<crate::audio::AudioEffect>,
-    },
     // Individual audio effect nodes
     AudioDelay {
         #[serde(default = "default_delay_ms")]
@@ -992,7 +988,6 @@ impl NodeBehavior for NodeType {
             NodeType::AudioInput { .. } => "Microphone",
             NodeType::AudioAnalyzer => "Audio Analyzer",
             NodeType::AudioDevice { .. } => "Audio Manager",
-            NodeType::AudioFx { .. } => "Audio FX",
             NodeType::AudioDelay { .. } => "Delay",
             NodeType::AudioDistortion { .. } => "Distortion",
             NodeType::AudioReverb { .. } => "Reverb",
@@ -1083,7 +1078,6 @@ impl NodeBehavior for NodeType {
             NodeType::AudioInput { .. } => vec![PortDef::new("Gain", Normalized)],
             NodeType::AudioAnalyzer => vec![PortDef::new("Audio", Audio)],
             NodeType::AudioDevice { .. } => vec![],
-            NodeType::AudioFx { .. } => vec![PortDef::new("Source", Audio)],
             NodeType::AudioDelay { .. } => vec![PortDef::new("Audio", Audio), PortDef::new("Time", Number), PortDef::new("Feedback", Normalized)],
             NodeType::AudioDistortion { .. } => vec![PortDef::new("Audio", Audio), PortDef::new("Drive", Number)],
             NodeType::AudioReverb { .. } => vec![PortDef::new("Audio", Audio), PortDef::new("Room", Normalized), PortDef::new("Damp", Normalized), PortDef::new("Mix", Normalized)],
@@ -1206,12 +1200,12 @@ impl NodeBehavior for NodeType {
             NodeType::AudioPlayer { .. } => vec![PortDef::new("Audio", Audio), PortDef::new("Progress", Normalized)],
             NodeType::AudioInput { .. } => vec![PortDef::new("Audio", Audio)],
             NodeType::AudioAnalyzer => vec![
+                PortDef::new("Audio", Audio),
                 PortDef::new("Amp", Normalized), PortDef::new("Peak", Normalized),
                 PortDef::new("Bass", Normalized), PortDef::new("Mid", Normalized),
                 PortDef::new("Treble", Normalized),
             ],
             NodeType::AudioDevice { .. } => vec![],
-            NodeType::AudioFx { .. } => vec![PortDef::new("Audio", Audio)],
             NodeType::AudioDelay { .. } => vec![PortDef::new("Audio", Audio)],
             NodeType::AudioDistortion { .. } => vec![PortDef::new("Audio", Audio)],
             NodeType::AudioReverb { .. } => vec![PortDef::new("Audio", Audio)],
@@ -1273,7 +1267,6 @@ impl NodeBehavior for NodeType {
             NodeType::AudioInput { .. } => [220, 80, 120],
             NodeType::AudioAnalyzer => [255, 180, 60],
             NodeType::AudioDevice { .. } => [220, 180, 100],
-            NodeType::AudioFx { .. } => [200, 100, 160],
             NodeType::AudioDelay { .. } => [180, 120, 200],
             NodeType::AudioDistortion { .. } => [220, 80, 80],
             NodeType::AudioReverb { .. } => [120, 140, 220],

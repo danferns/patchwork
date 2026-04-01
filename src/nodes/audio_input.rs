@@ -112,12 +112,8 @@ pub fn render(
     ui.separator();
     crate::nodes::audio_port_row(ui, "Audio", node_id, 0, false, port_positions, dragging_from, connections, pending_disconnects, PortKind::Audio);
 
-    // ── Register audio source each frame ──────────────────────────────
+    // Write gain to engine (lock-free atomic)
     if *active {
-        if let Some(buf) = audio.input_buffers.get(&node_id) {
-            audio.set_live_input(node_id, buf, *gain);
-        }
-        // Write gain to engine (lock-free)
         audio.engine_write_param(node_id, 0, *gain);
     }
 }

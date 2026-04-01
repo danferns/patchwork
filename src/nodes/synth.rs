@@ -1,4 +1,4 @@
-use crate::audio::{Waveform, AudioManager, SynthParams};
+use crate::audio::{Waveform, AudioManager};
 use crate::graph::*;
 use eframe::egui;
 use std::collections::HashMap;
@@ -186,15 +186,4 @@ pub fn render(
     audio.engine_write_param(node_id, 3, if is_fm { *frequency * fm_weight } else { 0.0 });
     audio.engine_write_param(node_id, 4, *waveform as u32 as f32); // waveform type
 
-    // Also update via old mutex path (for fallback)
-    audio.set_synth(node_id, SynthParams {
-        waveform: *waveform,
-        frequency: *frequency,
-        amplitude: *amplitude,
-        amp_smooth: crate::audio::SmoothedParam::new(*amplitude, 5.0),
-        phase: 0.0,
-        active: *active,
-        fm_source: if is_fm { fm_source_node } else { None },
-        fm_depth: if is_fm { *frequency * fm_weight } else { 0.0 },
-    });
 }

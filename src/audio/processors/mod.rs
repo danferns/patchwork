@@ -10,3 +10,4 @@ pub mod mixer;
 pub mod input;
 pub mod sampler;
 pub mod speaker;
+pub mod analyzer;

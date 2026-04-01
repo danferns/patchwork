@@ -47,8 +47,6 @@ pub enum AudioCommand {
         node_id: NodeId,
         active: bool,
     },
-    /// Update master volume.
-    SetMasterVolume(f32),
 }
 
 // ── Engine Internals ─────────────────────────────────────────────────────────
@@ -81,7 +79,7 @@ pub struct AudioEngine {
     /// Scratch buffer for building mixed input from multiple sources.
     input_scratch: Vec<f32>,
     sample_rate: f32,
-    master_volume: f32,
+    master_volume: Arc<AtomicF32>,
     pub master_analysis: AudioAnalysis,
     max_block_size: usize,
     /// Pre-collected speaker IDs (rebuilt when speakers change).
@@ -93,7 +91,7 @@ pub struct AudioEngine {
 
 impl AudioEngine {
     /// Create a new engine. The Receiver end of the command channel is moved in.
-    pub fn new(commands: Receiver<AudioCommand>, sample_rate: f32) -> Self {
+    pub fn new(commands: Receiver<AudioCommand>, sample_rate: f32, master_volume: Arc<AtomicF32>) -> Self {
         let max_block_size = 2048;
         Self {
             slots: HashMap::new(),
@@ -101,7 +99,7 @@ impl AudioEngine {
             silence: vec![0.0f32; max_block_size],
             input_scratch: vec![0.0f32; max_block_size],
             sample_rate,
-            master_volume: 0.8,
+            master_volume,
             master_analysis: AudioAnalysis::default(),
             max_block_size,
             speaker_ids: Vec::new(),
@@ -161,9 +159,6 @@ impl AudioEngine {
                         slot.is_speaker = active;
                     }
                     self.ids_dirty = true;
-                }
-                AudioCommand::SetMasterVolume(vol) => {
-                    self.master_volume = vol;
                 }
             }
         }
@@ -270,7 +265,7 @@ impl AudioEngine {
         }
 
         // 3. Mix active speakers to master output
-        let master_vol = self.master_volume;
+        let master_vol = self.master_volume.load();
         for &spk_id in &self.speaker_ids {
             if let Some(slot) = self.slots.get(&spk_id) {
                 let buf = &slot.output_buffer;

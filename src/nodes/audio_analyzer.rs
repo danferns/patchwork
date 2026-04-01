@@ -3,26 +3,6 @@ use crate::graph::*;
 use eframe::egui;
 use std::collections::HashMap;
 
-/// Walk backward from a node's Audio input (port 0) through effect nodes
-/// to find the actual audio source (Synth, AudioPlayer, AudioMixer).
-pub fn trace_audio_source(node_id: NodeId, connections: &[Connection], nodes: &HashMap<NodeId, Node>) -> Option<NodeId> {
-    let conn = connections.iter().find(|c| c.to_node == node_id && c.to_port == 0)?;
-    let mut current = conn.from_node;
-    for _ in 0..20 {
-        let is_source = nodes.get(&current).map(|n| {
-            matches!(n.node_type,
-                NodeType::Synth { .. } | NodeType::AudioPlayer { .. } | NodeType::AudioMixer { .. }
-            )
-        }).unwrap_or(false);
-        if is_source { return Some(current); }
-        match connections.iter().find(|c| c.to_node == current && c.to_port == 0) {
-            Some(c) => current = c.from_node,
-            None => return None,
-        }
-    }
-    None
-}
-
 pub fn render(
     ui: &mut egui::Ui,
     node_id: NodeId,
@@ -50,12 +30,15 @@ pub fn render(
 
     // Connection status
     if source_name.is_empty() {
-        ui.label(egui::RichText::new("Master mix").small().color(egui::Color32::GRAY));
+        ui.label(egui::RichText::new("Connect audio input").small().color(egui::Color32::from_rgb(100, 100, 110)));
     } else {
-        ui.label(egui::RichText::new(format!("Source: {}", source_name)).small().color(egui::Color32::from_rgb(80, 200, 120)));
+        ui.label(egui::RichText::new(format!("← {}", source_name)).small().color(egui::Color32::from_rgb(80, 200, 120)));
     }
 
-    // ── Level meters ──────────────────────────────────────────────────
+    // Audio pass-through output (port 0) — placed before closure to avoid borrow conflicts
+    crate::nodes::audio_port_row(ui, "Audio", node_id, 0, false, port_positions, dragging_from, connections, pending_disconnects, PortKind::Audio);
+
+    // ── Level meters (output ports 1-5) ──────────────────────────────
     let bar_w = 110.0;
     let bar_h = 8.0;
 
@@ -77,11 +60,11 @@ pub fn render(
         });
     };
 
-    meter(ui, "Amp", amp, egui::Color32::from_rgb(80, 200, 120), 0);
-    meter(ui, "Peak", peak, egui::Color32::from_rgb(255, 200, 60), 1);
-    meter(ui, "Bass", bass, egui::Color32::from_rgb(255, 80, 80), 2);
-    meter(ui, "Mid", mid, egui::Color32::from_rgb(80, 160, 255), 3);
-    meter(ui, "Treble", treble, egui::Color32::from_rgb(200, 120, 255), 4);
+    meter(ui, "Amp", amp, egui::Color32::from_rgb(80, 200, 120), 1);
+    meter(ui, "Peak", peak, egui::Color32::from_rgb(255, 200, 60), 2);
+    meter(ui, "Bass", bass, egui::Color32::from_rgb(255, 80, 80), 3);
+    meter(ui, "Mid", mid, egui::Color32::from_rgb(80, 160, 255), 4);
+    meter(ui, "Treble", treble, egui::Color32::from_rgb(200, 120, 255), 5);
 
     if amp > 0.001 {
         ui.ctx().request_repaint();

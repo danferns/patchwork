@@ -1,24 +1,14 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crate::graph::NodeId;
-use super::sources::AudioSource;
-use super::effects::AudioEffect;
-use super::analysis::SharedAudioState;
 use super::buffers::{LiveInputBuffer, FilePlayerBuffer};
-use super::waveform::SynthParams;
 use super::decode::{decode_file_thread, probe_file_duration};
-#[allow(unused_imports)]
-use super::callback::audio_callback;
-use super::smoothed::SmoothedParam;
-use super::effects::effects_same_types;
-use super::analysis::AudioAnalysis;
 
 // ── Audio Manager ────────────────────────────────────────────────────────────
 
 pub struct AudioManager {
-    pub state: Arc<Mutex<SharedAudioState>>,
     stream: Option<cpal::Stream>,
     pub output_device_name: String,
     pub _input_device_name: String,
@@ -34,6 +24,7 @@ pub struct AudioManager {
     // Sampler buffers (one per AudioSampler node)
     pub sampler_buffers: HashMap<NodeId, Arc<super::buffers::SamplerBuffer>>,
     /// Resolved upstream audio source for each sampler node.
+    #[allow(dead_code)]
     pub sampler_input_sources: HashMap<NodeId, NodeId>,
     // Cached device lists (refreshed periodically, not every frame)
     pub cached_output_devices: Vec<String>,
@@ -41,12 +32,8 @@ pub struct AudioManager {
     /// Dropout counter — lives outside the Mutex so the audio callback can
     /// increment it even when try_lock fails (which is the whole point).
     pub dropout_count: Arc<AtomicU32>,
-    /// Chain swap sender — UI sends compiled chains to audio thread.
-    pub chain_sender: Option<super::swap::ChainSender>,
-    /// Shared ParamStore for lock-free parameter updates (UI writes, audio reads).
-    pub param_store: Option<Arc<super::params::ParamStore>>,
-    /// Maps (NodeId, param_index) → ParamStore slot. Rebuilt on chain recompilation.
-    pub param_map: Option<super::params::ParamMap>,
+    /// Master volume — shared atomic between UI and engine. No command needed.
+    pub master_volume: Arc<super::params::AtomicF32>,
 
     // ── New engine (VCV Rack style) ──────────────────────────────────────
     /// Command sender for the new audio engine (UI → audio thread).
@@ -57,14 +44,13 @@ pub struct AudioManager {
     pub engine_sample_rate: f32,
     /// Whether rebuild_engine_from_graph needs to run for the current engine.
     pub engine_needs_rebuild: bool,
+    /// Per-analyzer shared analysis results. UI reads, engine writes.
+    pub analyzer_results: HashMap<NodeId, Arc<std::sync::Mutex<super::analysis::AudioAnalysis>>>,
 }
 
 impl AudioManager {
     pub fn new() -> Self {
-        let state = Arc::new(Mutex::new(SharedAudioState::default()));
-
         Self {
-            state,
             stream: None,
             output_device_name: String::new(),
             _input_device_name: String::new(),
@@ -80,15 +66,16 @@ impl AudioManager {
             cached_output_devices: Vec::new(),
             cached_input_devices: Vec::new(),
             dropout_count: Arc::new(AtomicU32::new(0)),
-            chain_sender: None, param_store: None, param_map: None,
-            engine_tx: None, node_params: HashMap::new(), engine_sample_rate: 44100.0, engine_needs_rebuild: false,
+            master_volume: Arc::new(super::params::AtomicF32::new(0.8)),
+            engine_tx: None, node_params: HashMap::new(),
+            engine_sample_rate: 44100.0, engine_needs_rebuild: false,
+            analyzer_results: HashMap::new(),
         }
     }
 
     /// Create a cheap placeholder (used during mem::replace swap)
     pub fn placeholder() -> Self {
         Self {
-            state: Arc::new(Mutex::new(SharedAudioState::default())),
             stream: None,
             output_device_name: String::new(),
             _input_device_name: String::new(),
@@ -104,8 +91,10 @@ impl AudioManager {
             cached_output_devices: Vec::new(),
             cached_input_devices: Vec::new(),
             dropout_count: Arc::new(AtomicU32::new(0)),
-            chain_sender: None, param_store: None, param_map: None,
-            engine_tx: None, node_params: HashMap::new(), engine_sample_rate: 44100.0, engine_needs_rebuild: false,
+            master_volume: Arc::new(super::params::AtomicF32::new(0.8)),
+            engine_tx: None, node_params: HashMap::new(),
+            engine_sample_rate: 44100.0, engine_needs_rebuild: false,
+            analyzer_results: HashMap::new(),
         }
     }
 
@@ -152,11 +141,6 @@ impl AudioManager {
         let channels = config.channels() as usize;
         self.engine_sample_rate = sample_rate;
 
-        {
-            if let Ok(mut s) = self.state.try_lock() {
-                s.sample_rate = sample_rate;
-            }
-        }
 
         // Create command channel for the new engine.
         // Clear stale state from any previous engine — node_params pointed to
@@ -167,7 +151,8 @@ impl AudioManager {
         self.engine_needs_rebuild = true;
 
         // Create engine — owned by the audio thread closure
-        let mut engine = super::engine::AudioEngine::new(rx, sample_rate);
+        let master_vol = self.master_volume.clone();
+        let mut engine = super::engine::AudioEngine::new(rx, sample_rate, master_vol);
 
         let stream = device.build_output_stream(
             &config.into(),
@@ -197,35 +182,12 @@ impl AudioManager {
         self.stream.is_some()
     }
 
-    /// Send a compiled DSP chain to the audio thread and store the ParamMap
-    /// so the UI can write parameters via atomic stores.
-    #[allow(dead_code)]
-    pub fn update_chain(&mut self, chain: super::chain::CompiledDspChain, param_map: super::params::ParamMap) {
-        // Store the param store Arc for UI param writes
-        self.param_store = Some(chain.param_store.clone());
-        self.param_map = Some(param_map);
-        // Send chain to audio thread
-        if let Some(sender) = &self.chain_sender {
-            sender.send(chain);
-        }
-    }
-
-    /// Write a parameter value atomically (no lock). Called from node UI code.
-    /// node_id + param_index → ParamStore slot via ParamMap.
-    pub fn write_param(&self, node_id: NodeId, param_index: u16, value: f32) {
-        if let (Some(store), Some(map)) = (&self.param_store, &self.param_map) {
-            if let Some(slot) = map.get_slot(node_id, param_index) {
-                store.set(slot, value);
-            }
-        }
-    }
-
-    // ── New Engine API ──────────────────────────────────────────────────────
+    // ── Engine API ────────────────────────────────────────────────────────
 
     /// Send a command to the audio engine (non-blocking).
     pub fn send_command(&self, cmd: super::engine::AudioCommand) {
         if let Some(tx) = &self.engine_tx {
-            let _ = tx.try_send(cmd);
+            let _ = tx.send(cmd);
         }
     }
 
@@ -286,7 +248,7 @@ impl AudioManager {
     }
 
     /// Create a processor for a given NodeType. Returns None for non-audio nodes.
-    pub fn create_processor_for_node(&self, node_type: &crate::graph::NodeType, nid: NodeId) -> Option<(Box<dyn super::processor::AudioProcessor>, usize)> {
+    pub fn create_processor_for_node(&mut self, node_type: &crate::graph::NodeType, nid: NodeId) -> Option<(Box<dyn super::processor::AudioProcessor>, usize)> {
         use crate::graph::NodeType;
         use super::processors::*;
 
@@ -324,6 +286,11 @@ impl AudioManager {
             }
             NodeType::AudioMixer { channel_count, .. } => {
                 Some((Box::new(mixer::MixerProcessor::new()), *channel_count))
+            }
+            NodeType::AudioAnalyzer => {
+                let (proc, analysis) = analyzer::AnalyzerProcessor::new();
+                self.analyzer_results.insert(nid, analysis);
+                Some((Box::new(proc), 0))
             }
             NodeType::AudioInput { gain, .. } => {
                 if let Some(buf) = self.input_buffers.get(&nid) {
@@ -388,7 +355,7 @@ impl AudioManager {
         if let Some(buf) = self.sampler_buffers.get(&node_id) {
             return buf.clone();
         }
-        let sr = self.state.lock().map(|s| s.sample_rate).unwrap_or(44100.0) as u32;
+        let sr = self.engine_sample_rate as u32;
         let buf = std::sync::Arc::new(super::buffers::SamplerBuffer::new(sr, record_duration));
         self.sampler_buffers.insert(node_id, buf.clone());
 
@@ -399,17 +366,6 @@ impl AudioManager {
         }
 
         buf
-    }
-
-    /// Register a sampler source in the audio state.
-    pub fn set_sampler(&self, node_id: NodeId, buffer: &std::sync::Arc<super::buffers::SamplerBuffer>, volume: f32, input_source: Option<NodeId>) {
-        if let Ok(mut s) = self.state.try_lock() {
-            s.sources.insert(node_id, AudioSource::Sampler {
-                buffer: buffer.clone(),
-                volume,
-                input_source,
-            });
-        }
     }
 
     // ── Live Audio Input ────────────────────────────────────────────────────
@@ -472,104 +428,9 @@ impl AudioManager {
 
     /// Stop capturing audio for a node.
     pub fn stop_input(&mut self, node_id: NodeId) {
-        self.input_streams.remove(&node_id); // Drops the stream, stopping capture
+        self.input_streams.remove(&node_id);
         self.input_buffers.remove(&node_id);
         self.remove_processor(node_id);
-        // Remove from audio sources
-        if let Ok(mut s) = self.state.try_lock() {
-            s.sources.remove(&node_id);
-        }
-    }
-
-    /// Register or update a live input source in the audio state.
-    /// Called each frame from the AudioInput node's render function.
-    pub fn set_live_input(&self, node_id: NodeId, buffer: &Arc<LiveInputBuffer>, gain: f32) {
-        if let Ok(mut s) = self.state.try_lock() {
-            s.sources.insert(node_id, AudioSource::LiveInput {
-                buffer: buffer.clone(),
-                gain,
-            });
-        }
-    }
-
-    /// Update synth parameters for a node (preserves phase from audio thread)
-    pub fn set_synth(&self, node_id: NodeId, params: SynthParams) {
-        if let Ok(mut s) = self.state.try_lock() {
-            // Preserve running state from the audio thread (phase + smoother current value)
-            let (existing_phase, existing_amp_smooth) = match s.sources.get(&node_id) {
-                Some(AudioSource::Synth(existing)) => (existing.phase, existing.amp_smooth.current),
-                _ => (0.0, params.amplitude),
-            };
-            let mut amp_smooth = SmoothedParam::new(params.amplitude, 5.0);
-            amp_smooth.current = existing_amp_smooth; // preserve current, set new target
-            s.sources.insert(node_id, AudioSource::Synth(SynthParams {
-                phase: existing_phase,
-                amp_smooth,
-                ..params
-            }));
-        }
-        // If lock fails, skip this frame's update (audio thread is busy — no clicking)
-    }
-
-    /// Remove a source
-    pub fn remove_source(&self, node_id: NodeId) {
-        if let Ok(mut s) = self.state.try_lock() {
-            s.sources.remove(&node_id);
-            s.effects.remove(&node_id);
-        }
-    }
-
-    /// Update effects chain for a node — preserves audio processing state (filter state,
-    /// delay buffers) while updating user-controlled params (cutoff, feedback, etc.).
-    /// This prevents clicks/pops from resetting filter state every frame.
-    pub fn set_effects(&self, node_id: NodeId, new_effects: Vec<AudioEffect>) {
-        if let Ok(mut s) = self.state.try_lock() {
-            if let Some(existing) = s.effects.get_mut(&node_id) {
-                // If chain length or types changed, replace entirely
-                if existing.len() != new_effects.len() || !effects_same_types(existing, &new_effects) {
-                    s.effects.insert(node_id, new_effects);
-                } else {
-                    // Same structure — merge params only, preserve state
-                    for (old, new) in existing.iter_mut().zip(new_effects.iter()) {
-                        old.merge_params(new);
-                    }
-                }
-            } else {
-                s.effects.insert(node_id, new_effects);
-            }
-        }
-    }
-
-    /// Set the active audio chain for a source node (called by Speaker node logic).
-    /// Only sources with active chains will produce sound.
-    #[allow(dead_code)]
-    pub fn set_active_chain(&self, source_node_id: NodeId, effects: Vec<AudioEffect>) {
-        if let Ok(mut s) = self.state.try_lock() {
-            if let Some(existing) = s.active_chains.get_mut(&source_node_id) {
-                if existing.len() != effects.len() || !effects_same_types(existing, &effects) {
-                    s.active_chains.insert(source_node_id, effects);
-                } else {
-                    for (old, new) in existing.iter_mut().zip(effects.iter()) {
-                        old.merge_params(new);
-                    }
-                }
-            } else {
-                s.active_chains.insert(source_node_id, effects);
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn get_master_volume(&self) -> f32 {
-        self.state.try_lock().ok().map(|s| s.master_volume).unwrap_or(0.8)
-    }
-
-    /// Remove a source from active chains (Speaker disconnected or muted)
-    #[allow(dead_code)]
-    pub fn remove_active_chain(&self, source_node_id: NodeId) {
-        if let Ok(mut s) = self.state.try_lock() {
-            s.active_chains.remove(&source_node_id);
-        }
     }
 
     /// Play an audio file — if paused, resume; if stopped/new, start fresh.
@@ -592,10 +453,7 @@ impl AudioManager {
         // Stop any existing playback for this node
         self.stop_file(node_id);
 
-        // Get output sample rate from shared state
-        let output_sr = self.state.try_lock()
-            .map(|s| s.sample_rate)
-            .unwrap_or(44100.0);
+        let output_sr = self.engine_sample_rate;
 
         // Probe file for duration (fast metadata read, no full decode)
         if !self.file_durations.contains_key(&node_id) {
@@ -622,14 +480,6 @@ impl AudioManager {
                 decode_file_thread(path_owned, buf_clone, output_sr, looping_clone);
             })
             .map_err(|e| format!("Spawn decode thread: {}", e))?;
-
-        // Register as audio source so the CPAL callback can render it
-        if let Ok(mut s) = self.state.try_lock() {
-            s.sources.insert(node_id, AudioSource::FilePlayer {
-                buffer: buffer.clone(),
-                volume: 1.0,
-            });
-        }
 
         self.file_buffers.insert(node_id, buffer.clone());
         self.file_threads.insert(node_id, handle);
@@ -697,7 +547,7 @@ impl AudioManager {
             // Use whichever is further ahead — callback_pos when Speaker is consuming,
             // decoded_pos when no Speaker is connected
             let pos = callback_pos.max(decoded_pos);
-            let sr = self.state.try_lock().map(|s| s.sample_rate).unwrap_or(44100.0) as f64;
+            let sr = self.engine_sample_rate as f64;
             if sr > 0.0 { pos as f64 / sr } else { 0.0 }
         } else {
             0.0
@@ -706,11 +556,7 @@ impl AudioManager {
 
     /// Set volume for a specific node's file player
     pub fn set_file_volume(&self, node_id: NodeId, volume: f32) {
-        if let Ok(mut s) = self.state.try_lock() {
-            if let Some(AudioSource::FilePlayer { volume: v, .. }) = s.sources.get_mut(&node_id) {
-                *v = volume;
-            }
-        }
+        self.engine_write_param(node_id, 0, volume);
     }
 
     /// Set playback speed (turntable style — affects both tempo and pitch).
@@ -744,36 +590,14 @@ impl AudioManager {
         self.file_looping.remove(&node_id);
         self.file_playing.remove(&node_id);
         self.remove_processor(node_id);
-        // Remove from audio source registry
-        if let Ok(mut s) = self.state.try_lock() {
-            s.sources.remove(&node_id);
-        }
     }
 
     /// Cleanup when a node is deleted
     pub fn cleanup_node(&mut self, node_id: NodeId) {
-        self.remove_source(node_id);
         self.stop_file(node_id);
         self.stop_input(node_id);
+        self.sampler_buffers.remove(&node_id);
     }
 
-    /// Read the latest audio analysis (amplitude, bass, mid, treble).
-    /// If `source_id` is Some, returns analysis for that specific source.
-    /// If None, returns the master output mix analysis.
-    pub fn get_analysis(&self) -> Option<AudioAnalysis> {
-        self.state.try_lock().ok().map(|s| s.analysis.clone())
-    }
-
-    /// Get per-source analysis for a specific audio source node.
-    pub fn get_source_analysis(&self, source_id: NodeId) -> Option<AudioAnalysis> {
-        self.state.try_lock().ok().and_then(|s| s.source_analysis.get(&source_id).cloned())
-    }
-
-    /// Register a source node for per-source analysis.
-    pub fn request_analysis(&self, source_id: NodeId) {
-        if let Ok(mut s) = self.state.try_lock() {
-            s.analyze_sources.insert(source_id);
-        }
-    }
 }
 

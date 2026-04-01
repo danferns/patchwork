@@ -1,39 +1,4 @@
-use super::smoothed::SmoothedParam;
-use crate::graph::NodeId;
-
-// ── Audio Source Trait ────────────────────────────────────────────────────────
-
-/// Each audio source generates samples on demand.
-/// Called from the audio thread — must be lock-free / fast.
-#[derive(Clone)]
-pub struct SynthParams {
-    pub waveform: Waveform,
-    pub frequency: f32,
-    pub amplitude: f32,
-    /// Smoothed amplitude — eliminates zipper noise on slider drag
-    pub amp_smooth: SmoothedParam,
-    pub phase: f32,         // current phase (0..1), updated by audio thread
-    pub active: bool,
-    /// FM modulation: which synth node modulates this synth's frequency
-    pub fm_source: Option<NodeId>,
-    /// FM modulation depth in Hz (modulator output * depth = frequency offset)
-    pub fm_depth: f32,
-}
-
-impl Default for SynthParams {
-    fn default() -> Self {
-        Self {
-            waveform: Waveform::Sine,
-            frequency: 440.0,
-            amplitude: 0.5,
-            amp_smooth: SmoothedParam::new(0.5, 5.0),
-            phase: 0.0,
-            active: true,
-            fm_source: None,
-            fm_depth: 0.0,
-        }
-    }
-}
+//! Waveform oscillator math — used by SynthProcessor.
 
 #[derive(Clone, Copy, Debug, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Waveform {
@@ -77,7 +42,6 @@ impl Waveform {
 }
 
 fn fastrand_f32() -> f32 {
-    // Simple LCG random for noise - not thread safe but fine for audio
     use std::cell::Cell;
     thread_local! {
         static SEED: Cell<u32> = const { Cell::new(12345) };
@@ -88,4 +52,3 @@ fn fastrand_f32() -> f32 {
         (v >> 16) as f32 / 32768.0
     })
 }
-

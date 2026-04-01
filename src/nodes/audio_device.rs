@@ -35,13 +35,7 @@ pub fn render(
                     *enabled = false;
                 }
             } else {
-                // Force stop — cuts all audio immediately
                 audio.stop_output();
-                if let Ok(mut s) = audio.state.try_lock() {
-                    s.active_chains.clear();
-                    s.channel_chains.clear();
-                    s.render_only.clear();
-                }
             }
         }
     }
@@ -70,10 +64,6 @@ pub fn render(
     // Auto-restart stream when device selection changes
     if device_changed && *enabled && audio.is_running() {
         audio.stop_output();
-        if let Ok(mut s) = audio.state.try_lock() {
-            s.active_chains.clear();
-            s.channel_chains.clear();
-        }
         let dev = if selected_output.is_empty() { None } else { Some(selected_output.as_str()) };
         if let Err(e) = audio.start_output(dev) {
             eprintln!("Device switch failed: {}", e);
@@ -85,11 +75,9 @@ pub fn render(
     // ── Master volume (always visible) ───────────────────────────────
     ui.horizontal(|ui| {
         ui.label("Master:");
-        if ui.add(egui::Slider::new(master_volume, 0.0..=1.0).show_value(false)).changed() {
-            if let Ok(mut s) = audio.state.try_lock() {
-                s.master_volume = *master_volume;
-            }
-        }
+        ui.add(egui::Slider::new(master_volume, 0.0..=1.0).show_value(false));
+        // Write directly to shared atomic — engine reads it every callback, no command needed
+        audio.master_volume.store(*master_volume);
         ui.label(egui::RichText::new(format!("{:.0}%", *master_volume * 100.0)).small().monospace());
     });
 
@@ -114,51 +102,13 @@ pub fn render(
     ui.separator();
 
     // ── Performance metrics ──────────────────────────────────────────
-    if let Ok(s) = audio.state.try_lock() {
-        let sr = s.sample_rate as u32;
+    {
+        let sr = audio.engine_sample_rate as u32;
         let sr_text = if sr >= 1000 { format!("{}.{}kHz", sr / 1000, (sr % 1000) / 100) } else { format!("{}Hz", sr) };
-
-        // Audio load: callback_duration / budget * 100%
-        let load_pct = if s.callback_budget_us > 0.0 {
-            (s.callback_duration_us / s.callback_budget_us * 100.0).min(999.0)
-        } else {
-            0.0
-        };
-
-        let load_color = if load_pct > 80.0 {
-            egui::Color32::from_rgb(255, 80, 80)
-        } else if load_pct > 50.0 {
-            egui::Color32::from_rgb(255, 200, 60)
-        } else {
-            egui::Color32::from_rgb(80, 200, 80)
-        };
-
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("SR:").small());
             ui.label(egui::RichText::new(sr_text).small().color(egui::Color32::from_rgb(120, 180, 255)));
         });
-
-        // Audio load bar
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Load:").small());
-            let bar_w = 100.0;
-            let bar_h = 8.0;
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(bar_w, bar_h), egui::Sense::hover());
-            let painter = ui.painter();
-            painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(25, 25, 30));
-            let fill_w = (rect.width() * (load_pct / 100.0).clamp(0.0, 1.0)).max(0.0);
-            if fill_w > 0.5 {
-                let fill_rect = egui::Rect::from_min_size(rect.min, egui::vec2(fill_w, rect.height()));
-                painter.rect_filled(fill_rect, 2.0, load_color);
-            }
-            ui.label(egui::RichText::new(format!("{:.0}%", load_pct)).small().monospace().color(load_color));
-        });
-
-        // Timing details
-        ui.label(egui::RichText::new(format!(
-            "{:.0}µs / {:.0}µs budget",
-            s.callback_duration_us, s.callback_budget_us
-        )).small().color(egui::Color32::from_rgb(100, 100, 110)));
     }
 
     // Dropout counter — read from AtomicU32 (outside the mutex, always works)

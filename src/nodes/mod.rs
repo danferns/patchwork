@@ -24,7 +24,6 @@ pub mod rust_plugin;
 pub mod synth;
 pub mod audio_player;
 pub mod audio_device;
-pub mod audio_fx;
 pub mod audio_delay;
 pub mod audio_distortion;
 pub mod audio_filter;
@@ -322,8 +321,6 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
         // ── Audio ────────────────────────────────────────────
         NodeCatalogEntry { label: "Synth", category: "Audio",
             factory: || NodeType::Synth { waveform: crate::audio::Waveform::Sine, frequency: 440.0, amplitude: 0.5, active: true, fm_depth: 0.0 } },
-        NodeCatalogEntry { label: "Audio FX", category: "Audio",
-            factory: || NodeType::AudioFx { effects: Vec::new() } },
         NodeCatalogEntry { label: "Delay", category: "Audio",
             factory: || NodeType::AudioDelay { time_ms: 250.0, feedback: 0.5 } },
         NodeCatalogEntry { label: "Distortion", category: "Audio",
@@ -526,7 +523,6 @@ pub fn render_content(
         NodeType::AudioInput { .. } => audio_input::render(ui, node_id, node_type, values, connections, audio_manager, port_positions, dragging_from, pending_disconnects),
         NodeType::AudioAnalyzer => audio_analyzer::render(ui, node_id, values, audio_manager, port_positions, dragging_from, connections, pending_disconnects),
         NodeType::AudioDevice { .. } => audio_device::render(ui, node_id, node_type, audio_manager),
-        NodeType::AudioFx { .. } => audio_fx::render(ui, node_id, node_type, values, connections, audio_manager),
         NodeType::AudioDelay { time_ms, feedback } => audio_delay::render(ui, time_ms, feedback, node_id, values, connections, port_positions, dragging_from, pending_disconnects),
         NodeType::AudioDistortion { drive } => audio_distortion::render(ui, drive, node_id, values, connections, port_positions, dragging_from, pending_disconnects),
         NodeType::AudioReverb { room_size, damping, mix } => audio_reverb::render(ui, node_id, room_size, damping, mix, values, connections, port_positions, dragging_from, pending_disconnects),

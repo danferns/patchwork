@@ -1,0 +1,433 @@
+{
+  "nodes": {
+    "62": {
+      "id": 62,
+      "node_type": {
+        "Synth": {
+          "waveform": "Sine",
+          "frequency": 607.0,
+          "amplitude": 0.27085507,
+          "active": true,
+          "fm_depth": 0.0
+        }
+      },
+      "pos": [
+        345.7215,
+        603.53064
+      ]
+    },
+    "61": {
+      "id": 61,
+      "node_type": {
+        "AudioSampler": {
+          "record_duration": 5.0,
+          "trim_start": 1.5,
+          "trim_end": 4.38,
+          "volume": 1.0,
+          "looping": true,
+          "reverse": false
+        }
+      },
+      "pos": [
+        681.909,
+        -278.28186
+      ]
+    },
+    "33": {
+      "id": 33,
+      "node_type": {
+        "Synth": {
+          "waveform": "Square",
+          "frequency": 635.0,
+          "amplitude": 0.0,
+          "active": true,
+          "fm_depth": 0.0
+        }
+      },
+      "pos": [
+        1268.9402,
+        847.40564
+      ]
+    },
+    "68": {
+      "id": 68,
+      "node_type": {
+        "Speaker": {
+          "active": true,
+          "volume": 0.8
+        }
+      },
+      "pos": [
+        844.75275,
+        647.15564
+      ]
+    },
+    "12": {
+      "id": 12,
+      "node_type": {
+        "Curve": {
+          "points": [
+            [
+              0.0,
+              1.0
+            ],
+            [
+              0.3,
+              1.0
+            ],
+            [
+              0.19920027,
+              0.0
+            ],
+            [
+              0.8015164,
+              0.0017737495
+            ],
+            [
+              0.7,
+              1.0
+            ],
+            [
+              1.0,
+              1.0
+            ]
+          ],
+          "mode": 2,
+          "speed": 5.3,
+          "looping": true
+        }
+      },
+      "pos": [
+        -14.247253,
+        301.9369
+      ]
+    },
+    "63": {
+      "id": 63,
+      "node_type": {
+        "Synth": {
+          "waveform": "Noise",
+          "frequency": 440.0,
+          "amplitude": 1.0,
+          "active": true,
+          "fm_depth": 0.0
+        }
+      },
+      "pos": [
+        372.87775,
+        -20.93811
+      ]
+    },
+    "56": {
+      "id": 56,
+      "node_type": {
+        "AudioLowPass": {
+          "cutoff": 991.0
+        }
+      },
+      "pos": [
+        864.2215,
+        74.81189
+      ]
+    },
+    "6": {
+      "id": 6,
+      "node_type": {
+        "Theme": {
+          "dark_mode": true,
+          "accent": [
+            103,
+            186,
+            228
+          ],
+          "font_size": 14.0,
+          "bg_color": [
+            20,
+            20,
+            20
+          ],
+          "text_color": [
+            220,
+            220,
+            220
+          ],
+          "window_bg": [
+            24,
+            24,
+            24
+          ],
+          "window_alpha": 240,
+          "grid_color": [
+            28,
+            28,
+            28
+          ],
+          "grid_style": 2,
+          "wire_style": 3,
+          "wiggle_gravity": 0.0,
+          "wiggle_range": 4.0,
+          "wiggle_speed": 16.0,
+          "rounding": 16.0,
+          "spacing": 4.0,
+          "use_hsl": false,
+          "wire_thickness": 6.0,
+          "background_path": ""
+        }
+      },
+      "pos": [
+        1417.2527,
+        -21.93811
+      ]
+    },
+    "71": {
+      "id": 71,
+      "node_type": {
+        "AudioInput": {
+          "selected_device": "",
+          "gain": 2.0,
+          "active": true
+        }
+      },
+      "pos": [
+        -296.7785,
+        -304.5006
+      ]
+    },
+    "73": {
+      "id": 73,
+      "node_type": {
+        "AudioGain": {
+          "level": 2.0
+        }
+      },
+      "pos": [
+        282.534,
+        -194.75061
+      ]
+    },
+    "70": {
+      "id": 70,
+      "node_type": {
+        "AudioMixer": {
+          "channel_count": 4,
+          "gains": [
+            0.25,
+            1.0,
+            0.95,
+            0.8
+          ]
+        }
+      },
+      "pos": [
+        649.3465,
+        277.90564
+      ]
+    },
+    "9": {
+      "id": 9,
+      "node_type": {
+        "Timer": {
+          "interval": 1.0,
+          "elapsed": 10188.413,
+          "running": true,
+          "pulse_width": 0.1
+        }
+      },
+      "pos": [
+        -323.30975,
+        -41.46936
+      ]
+    },
+    "3": {
+      "id": 3,
+      "node_type": {
+        "Palette": {
+          "search": ""
+        }
+      },
+      "pos": [
+        7.7812524,
+        508.42575
+      ]
+    },
+    "65": {
+      "id": 65,
+      "node_type": {
+        "AudioReverb": {
+          "room_size": 1.0,
+          "damping": 0.88,
+          "mix": 0.0
+        }
+      },
+      "pos": [
+        1098.4714,
+        42.99939
+      ]
+    },
+    "72": {
+      "id": 72,
+      "node_type": {
+        "AudioDelay": {
+          "time_ms": 370.0,
+          "feedback": 0.95
+        }
+      },
+      "pos": [
+        -8.622253,
+        -201.15686
+      ]
+    },
+    "51": {
+      "id": 51,
+      "node_type": {
+        "AudioDevice": {
+          "selected_output": "",
+          "selected_input": "",
+          "master_volume": 0.8,
+          "enabled": true
+        }
+      },
+      "pos": [
+        1050.8152,
+        401.34314
+      ]
+    },
+    "14": {
+      "id": 14,
+      "node_type": {
+        "Curve": {
+          "points": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              0.3,
+              0.0
+            ],
+            [
+              0.5,
+              1.0
+            ],
+            [
+              0.7,
+              0.0
+            ],
+            [
+              1.0,
+              0.0
+            ]
+          ],
+          "mode": 1,
+          "speed": 3.9,
+          "looping": false
+        }
+      },
+      "pos": [
+        222.409,
+        -52.75061
+      ]
+    }
+  },
+  "connections": [
+    {
+      "from_node": 9,
+      "from_port": 0,
+      "to_node": 12,
+      "to_port": 1,
+      "label": ""
+    },
+    {
+      "from_node": 9,
+      "from_port": 0,
+      "to_node": 14,
+      "to_port": 1,
+      "label": ""
+    },
+    {
+      "from_node": 9,
+      "from_port": 1,
+      "to_node": 12,
+      "to_port": 0,
+      "label": ""
+    },
+    {
+      "from_node": 12,
+      "from_port": 1,
+      "to_node": 62,
+      "to_port": 1,
+      "label": ""
+    },
+    {
+      "from_node": 14,
+      "from_port": 2,
+      "to_node": 63,
+      "to_port": 2,
+      "label": ""
+    },
+    {
+      "from_node": 61,
+      "from_port": 0,
+      "to_node": 56,
+      "to_port": 0,
+      "label": ""
+    },
+    {
+      "from_node": 56,
+      "from_port": 0,
+      "to_node": 65,
+      "to_port": 0,
+      "label": ""
+    },
+    {
+      "from_node": 63,
+      "from_port": 0,
+      "to_node": 70,
+      "to_port": 0,
+      "label": ""
+    },
+    {
+      "from_node": 65,
+      "from_port": 0,
+      "to_node": 70,
+      "to_port": 2,
+      "label": ""
+    },
+    {
+      "from_node": 71,
+      "from_port": 0,
+      "to_node": 72,
+      "to_port": 0,
+      "label": ""
+    },
+    {
+      "from_node": 70,
+      "from_port": 0,
+      "to_node": 68,
+      "to_port": 0,
+      "label": ""
+    },
+    {
+      "from_node": 72,
+      "from_port": 0,
+      "to_node": 73,
+      "to_port": 0,
+      "label": ""
+    },
+    {
+      "from_node": 73,
+      "from_port": 0,
+      "to_node": 70,
+      "to_port": 4,
+      "label": ""
+    },
+    {
+      "from_node": 62,
+      "from_port": 0,
+      "to_node": 70,
+      "to_port": 6,
+      "label": ""
+    }
+  ],
+  "next_id": 74
+}
