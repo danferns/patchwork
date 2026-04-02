@@ -202,7 +202,7 @@ pub(crate) fn decode_file_thread(
     };
 
     if let Err(e) = open_and_decode(&path, &buffer, 0.0) {
-        eprintln!("File decode error: {}", e);
+        crate::system_log::error(format!("File decode error: {}", e));
         buffer.finished.store(true, Ordering::Release);
     }
 }

@@ -15,6 +15,7 @@ pub mod processor;
 pub mod processors;
 pub mod params;
 pub mod engine;
+pub mod clap_host;
 
 // Re-export what external code uses
 pub use waveform::Waveform;

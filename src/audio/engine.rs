@@ -114,6 +114,7 @@ impl AudioEngine {
             match cmd {
                 AudioCommand::AddProcessor { node_id, mut processor, params } => {
                     processor.prepare(self.sample_rate, self.max_block_size);
+                    processor.set_shared_params(params.clone());
                     let param_count = processor.param_count();
                     let is_speaker = processor.kind() == ProcessorKind::Output;
                     self.slots.insert(node_id, ProcessorSlot {
@@ -264,15 +265,41 @@ impl AudioEngine {
             }
         }
 
-        // 3. Mix active speakers to master output
+        // 3. Mix active speakers to master output (stereo-aware)
+        // Speaker inputs: port 0 = L/Mono, port 1 = R (optional)
+        // If only L connected: duplicate to both channels
+        // If both connected: true stereo
         let master_vol = self.master_volume.load();
         for &spk_id in &self.speaker_ids {
             if let Some(slot) = self.slots.get(&spk_id) {
-                let buf = &slot.output_buffer;
+                // Read volume from speaker's output buffer (processor already applied it)
+                let mono_buf = &slot.output_buffer;
+
+                // Check if R channel source is connected (port 1)
+                let r_source = slot.inputs.get(1).and_then(|id| *id);
+                let r_buf = r_source.and_then(|rid| self.slots.get(&rid).map(|s| &s.output_buffer));
+
                 for frame in 0..num_frames {
-                    let sample = buf[frame] * master_vol;
-                    for ch in 0..channels {
-                        data[frame * channels + ch] += sample;
+                    let l_sample = mono_buf[frame] * master_vol;
+                    if channels >= 2 {
+                        if let Some(r) = r_buf {
+                            // True stereo: L from port 0 (processed), R from port 1 source (raw)
+                            // Apply speaker volume to R channel too
+                            let vol = if slot.params.len() > 0 { slot.params[0].load().clamp(0.0, 1.0) } else { 1.0 };
+                            let r_sample = r[frame] * vol * master_vol;
+                            data[frame * channels] += l_sample;
+                            data[frame * channels + 1] += r_sample;
+                        } else {
+                            // Mono: duplicate L to both channels
+                            data[frame * channels] += l_sample;
+                            data[frame * channels + 1] += l_sample;
+                        }
+                        // Fill any extra channels with L
+                        for ch in 2..channels {
+                            data[frame * channels + ch] += l_sample;
+                        }
+                    } else {
+                        data[frame] += l_sample;
                     }
                 }
             }

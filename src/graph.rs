@@ -675,6 +675,31 @@ pub enum NodeType {
         #[serde(default)]
         reverse: bool,
     },
+    /// CLAP audio plugin — loaded from a .clap file.
+    ClapPlugin {
+        #[serde(default)]
+        plugin_path: String,
+        #[serde(default)]
+        plugin_name: String,
+        /// Cached parameter names (from plugin, for UI display)
+        #[serde(default)]
+        param_names: Vec<String>,
+        /// Cached parameter ranges: [min, max, default]
+        #[serde(default)]
+        param_ranges: Vec<[f64; 3]>,
+        /// Cached parameter flags
+        #[serde(default)]
+        param_flags: Vec<u32>,
+        /// Current parameter values (normalized 0..1 for storage, scaled on send)
+        #[serde(default)]
+        param_values: Vec<f32>,
+        /// Per-param text labels for enum/stepped params (empty vec for continuous)
+        #[serde(default)]
+        param_labels: Vec<Vec<String>>,
+        /// Whether this plugin is an instrument (synth) vs effect
+        #[serde(default)]
+        is_instrument: bool,
+    },
     RustPlugin {
         #[serde(default)]
         input_names: Vec<String>,
@@ -887,7 +912,7 @@ impl Clone for DynNode {
         // Reconstruct from serialized state via the registry
         let tag = self.node.type_tag();
         let state = self.node.save_state();
-        if let Some(cloned) = crate::node_trait::NODE_REGISTRY.lock().unwrap().create(tag, &state) {
+        if let Some(cloned) = crate::node_trait::NODE_REGISTRY.lock().ok().and_then(|r| r.create(tag, &state)) {
             DynNode { node: cloned }
         } else {
             // Fallback: create a placeholder
@@ -917,8 +942,8 @@ impl<'de> serde::Deserialize<'de> for DynNode {
         let v = serde_json::Value::deserialize(d)?;
         let tag = v.get("type_tag").and_then(|t| t.as_str()).unwrap_or("add");
         let state = v.get("state").cloned().unwrap_or(serde_json::Value::Null);
-        let registry = crate::node_trait::NODE_REGISTRY.lock().unwrap();
-        if let Some(node) = registry.create(tag, &state) {
+        let node_opt = crate::node_trait::NODE_REGISTRY.lock().ok().and_then(|r| r.create(tag, &state));
+        if let Some(node) = node_opt {
             Ok(DynNode { node })
         } else {
             Ok(DynNode { node: Box::new(crate::nodes::add_node::AddNode::default()) })
@@ -998,6 +1023,7 @@ impl NodeBehavior for NodeType {
             NodeType::Speaker { .. } => "Speaker",
             NodeType::AudioMixer { .. } => "Mixer",
             NodeType::AudioSampler { .. } => "Audio Sampler",
+            NodeType::ClapPlugin { plugin_name, .. } => if plugin_name.is_empty() { "CLAP Plugin" } else { plugin_name.as_str() },
             NodeType::RustPlugin { .. } => "Rust Plugin",
             NodeType::McpServer => "MCP Server",
             NodeType::HtmlViewer => "HTML Viewer",
@@ -1085,7 +1111,7 @@ impl NodeBehavior for NodeType {
             NodeType::AudioHighPass { .. } => vec![PortDef::new("Audio", Audio), PortDef::new("Cutoff", Number)],
             NodeType::AudioGain { .. } => vec![PortDef::new("Audio", Audio), PortDef::new("Level", Number)],
             NodeType::AudioEq { .. } => vec![PortDef::new("Audio", Audio)],
-            NodeType::Speaker { .. } => vec![PortDef::new("Audio", Audio), PortDef::new("Volume", Normalized)],
+            NodeType::Speaker { .. } => vec![PortDef::new("L/Mono", Audio), PortDef::new("R", Audio), PortDef::new("Volume", Normalized)],
             NodeType::AudioMixer { channel_count, .. } => {
                 // Per channel: Audio input + Gain control input
                 let mut ports = Vec::new();
@@ -1101,6 +1127,20 @@ impl NodeBehavior for NodeType {
                 PortDef::new("Play", Trigger),
                 PortDef::new("Vol", Normalized),
             ],
+            NodeType::ClapPlugin { param_names, is_instrument, .. } => {
+                let mut ports = Vec::new();
+                if *is_instrument {
+                    ports.push(PortDef::new("Note", Number));
+                    ports.push(PortDef::new("Vel", Normalized));
+                    ports.push(PortDef::new("Gate", Gate));
+                } else {
+                    ports.push(PortDef::new("Audio", Audio));
+                }
+                for name in param_names {
+                    ports.push(PortDef::dynamic(name.clone(), Normalized));
+                }
+                ports
+            }
             NodeType::RustPlugin { input_names, .. } => {
                 input_names.iter().map(|n| PortDef::dynamic(n.clone(), Generic)).collect()
             }
@@ -1216,6 +1256,7 @@ impl NodeBehavior for NodeType {
             NodeType::Speaker { .. } => vec![],
             NodeType::AudioMixer { .. } => vec![PortDef::new("Mix", Audio)],
             NodeType::AudioSampler { .. } => vec![PortDef::new("Audio", Audio), PortDef::new("Progress", Normalized)],
+            NodeType::ClapPlugin { .. } => vec![PortDef::new("Audio", Audio)],
             NodeType::RustPlugin { output_names, .. } => {
                 output_names.iter().map(|n| PortDef::dynamic(n.clone(), Generic)).collect()
             }
@@ -1277,6 +1318,7 @@ impl NodeBehavior for NodeType {
             NodeType::Speaker { .. } => [80, 200, 80],
             NodeType::AudioMixer { .. } => [160, 120, 220],
             NodeType::AudioSampler { .. } => [220, 120, 80],
+            NodeType::ClapPlugin { .. } => [160, 80, 255],
             NodeType::RustPlugin { .. } => [255, 120, 50],
             NodeType::McpServer => [120, 200, 255],
             NodeType::HtmlViewer => [60, 180, 220],
@@ -1301,7 +1343,7 @@ impl NodeBehavior for NodeType {
     fn inline_ports(&self) -> bool {
         match self {
             NodeType::Dynamic { inner } => inner.node.inline_ports(),
-            _ => matches!(self, NodeType::Theme { .. } | NodeType::MidiOut { .. } | NodeType::Synth { .. } | NodeType::WgslViewer { .. } | NodeType::ImageEffects { .. } | NodeType::Slider { .. } | NodeType::Blend { .. } | NodeType::HttpRequest { .. } | NodeType::AiRequest { .. } | NodeType::Math { .. } | NodeType::AudioDelay { .. } | NodeType::AudioDistortion { .. } | NodeType::AudioLowPass { .. } | NodeType::AudioHighPass { .. } | NodeType::AudioGain { .. } | NodeType::AudioReverb { .. } | NodeType::AudioEq { .. } | NodeType::AudioPlayer { .. } | NodeType::Timer { .. } | NodeType::SampleHold { .. } | NodeType::Select { .. } | NodeType::Curve { .. } | NodeType::AudioMixer { .. } | NodeType::Speaker { .. } | NodeType::AudioInput { .. } | NodeType::AudioSampler { .. } | NodeType::Console { .. }),
+            _ => matches!(self, NodeType::Theme { .. } | NodeType::MidiOut { .. } | NodeType::Synth { .. } | NodeType::WgslViewer { .. } | NodeType::ImageEffects { .. } | NodeType::Slider { .. } | NodeType::Blend { .. } | NodeType::HttpRequest { .. } | NodeType::AiRequest { .. } | NodeType::Math { .. } | NodeType::AudioDelay { .. } | NodeType::AudioDistortion { .. } | NodeType::AudioLowPass { .. } | NodeType::AudioHighPass { .. } | NodeType::AudioGain { .. } | NodeType::AudioReverb { .. } | NodeType::AudioEq { .. } | NodeType::AudioPlayer { .. } | NodeType::Timer { .. } | NodeType::SampleHold { .. } | NodeType::Select { .. } | NodeType::Curve { .. } | NodeType::AudioMixer { .. } | NodeType::Speaker { .. } | NodeType::AudioInput { .. } | NodeType::AudioSampler { .. } | NodeType::ClapPlugin { .. } | NodeType::Console { .. }),
         }
     }
 
@@ -1458,8 +1500,8 @@ impl Graph {
         let mut in_degree: HashMap<NodeId, usize> = node_ids.iter().map(|&id| (id, 0)).collect();
         let mut successors: HashMap<NodeId, Vec<NodeId>> = node_ids.iter().map(|&id| (id, Vec::new())).collect();
         for &(from, to) in &edge_set {
-            *in_degree.get_mut(&to).unwrap() += 1;
-            successors.get_mut(&from).unwrap().push(to);
+            if let Some(d) = in_degree.get_mut(&to) { *d += 1; }
+            if let Some(s) = successors.get_mut(&from) { s.push(to); }
         }
 
         // Seed with all zero-in-degree nodes, sorted for deterministic ordering.
@@ -1477,9 +1519,10 @@ impl Graph {
             let succs: Vec<NodeId> = successors[&nid].clone();
             let mut newly_zero: Vec<NodeId> = Vec::new();
             for succ in succs {
-                let deg = in_degree.get_mut(&succ).unwrap();
-                *deg -= 1;
-                if *deg == 0 { newly_zero.push(succ); }
+                if let Some(deg) = in_degree.get_mut(&succ) {
+                    *deg = deg.saturating_sub(1);
+                    if *deg == 0 { newly_zero.push(succ); }
+                }
             }
             newly_zero.sort_unstable();   // keep deterministic
             queue.extend(newly_zero);

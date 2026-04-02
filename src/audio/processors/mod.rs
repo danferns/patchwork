@@ -11,3 +11,4 @@ pub mod input;
 pub mod sampler;
 pub mod speaker;
 pub mod analyzer;
+pub mod clap;

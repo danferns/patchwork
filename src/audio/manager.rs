@@ -46,6 +46,8 @@ pub struct AudioManager {
     pub engine_needs_rebuild: bool,
     /// Per-analyzer shared analysis results. UI reads, engine writes.
     pub analyzer_results: HashMap<NodeId, Arc<std::sync::Mutex<super::analysis::AudioAnalysis>>>,
+    /// CLAP plugin GUI handles — stored here so we can close all GUIs before stopping DSP.
+    pub clap_gui_handles: HashMap<NodeId, Arc<std::sync::Mutex<super::clap_host::ClapGuiHandle>>>,
 }
 
 impl AudioManager {
@@ -70,6 +72,7 @@ impl AudioManager {
             engine_tx: None, node_params: HashMap::new(),
             engine_sample_rate: 44100.0, engine_needs_rebuild: false,
             analyzer_results: HashMap::new(),
+            clap_gui_handles: HashMap::new(),
         }
     }
 
@@ -95,6 +98,7 @@ impl AudioManager {
             engine_tx: None, node_params: HashMap::new(),
             engine_sample_rate: 44100.0, engine_needs_rebuild: false,
             analyzer_results: HashMap::new(),
+            clap_gui_handles: HashMap::new(),
         }
     }
 
@@ -160,7 +164,7 @@ impl AudioManager {
                 engine.execute(data, channels);
             },
             |err| {
-                eprintln!("Audio error: {}", err);
+                crate::system_log::error(format!("Audio error: {}", err));
             },
             None,
         ).map_err(|e| format!("Build stream failed: {}", e))?;
@@ -168,12 +172,24 @@ impl AudioManager {
         stream.play().map_err(|e| format!("Play failed: {}", e))?;
         self.stream = Some(stream);
 
+        crate::system_log::log(format!("DSP started: {} @ {}Hz", self.output_device_name, sample_rate));
         Ok(())
+    }
+
+    /// Close all open CLAP plugin GUI windows. Call before stopping DSP.
+    pub fn close_all_guis(&mut self) {
+        for (_, handle) in &self.clap_gui_handles {
+            if let Ok(mut h) = handle.try_lock() {
+                h.close();
+            }
+        }
     }
 
     /// Stop audio output
     pub fn stop_output(&mut self) {
+        self.close_all_guis(); // Close plugin GUIs before dropping the engine
         self.stream = None;
+        crate::system_log::log("DSP stopped");
         self.engine_tx = None;
         self.node_params.clear();
     }
@@ -403,7 +419,7 @@ impl AudioManager {
                 buf_clone.write_interleaved(data, channels);
             },
             |err| {
-                eprintln!("Audio input error: {}", err);
+                crate::system_log::error(format!("Audio input error: {}", err));
             },
             None,
         ).map_err(|e| format!("Build input stream failed: {}", e))?;
@@ -597,6 +613,8 @@ impl AudioManager {
         self.stop_file(node_id);
         self.stop_input(node_id);
         self.sampler_buffers.remove(&node_id);
+        self.sampler_input_sources.remove(&node_id);
+        self.analyzer_results.remove(&node_id);
     }
 
 }

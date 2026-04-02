@@ -70,4 +70,9 @@ pub trait AudioProcessor: Send {
 
     /// Reset internal state (filter memory, delay buffers) without deallocating.
     fn reset(&mut self);
+
+    /// Optionally receive the shared atomic params for bidirectional sync.
+    /// Called by the engine after the processor is added. Default: no-op.
+    /// Used by ClapProcessor to write back GUI param changes.
+    fn set_shared_params(&mut self, _params: std::sync::Arc<Vec<super::params::AtomicF32>>) {}
 }

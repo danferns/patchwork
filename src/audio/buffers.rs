@@ -67,6 +67,16 @@ impl LiveInputBuffer {
         let mut rp = self.read_pos.load(Ordering::Relaxed);
 
         let available = wp.wrapping_sub(rp);
+
+        // Skip ahead if too much buffered — keeps latency low (~2 blocks).
+        // Without this, the reader chases the writer from behind and
+        // accumulated samples create audible delay.
+        let max_buffer = num_frames * 3;
+        if available > max_buffer {
+            rp = wp.wrapping_sub(num_frames);
+        }
+
+        let available = wp.wrapping_sub(rp);
         let to_read = num_frames.min(available).min(buf.len());
 
         for i in 0..to_read {

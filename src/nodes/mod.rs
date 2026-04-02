@@ -34,6 +34,7 @@ pub mod audio_mixer;
 pub mod audio_input;
 pub mod audio_analyzer;
 pub mod audio_reverb;
+pub mod clap_plugin;
 pub mod audio_sampler;
 pub mod folder_browser;
 // Trait-based nodes
@@ -63,6 +64,7 @@ pub mod zoom_control_node;
 pub mod html_viewer_node;
 pub mod console_node;
 pub mod midi_note_node;
+pub mod timer_node;
 pub mod image_node;
 pub mod image_effects;
 pub mod blend;
@@ -260,7 +262,7 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
         NodeCatalogEntry { label: "Gate", category: "Logic",
             factory: || NodeType::Dynamic { inner: crate::graph::DynNode { node: Box::new(gate_node::GateNode::default()) } } },
         NodeCatalogEntry { label: "Timer", category: "Input",
-            factory: || NodeType::Timer { interval: 1.0, elapsed: 0.0, running: true, pulse_width: 0.1, ref_time: 0.0, paused_elapsed: 0.0, time_initialized: false } },
+            factory: || NodeType::Dynamic { inner: crate::graph::DynNode { node: Box::new(timer_node::TimerNode::default()) } } },
         NodeCatalogEntry { label: "Map/Range", category: "Math",
             factory: || NodeType::Dynamic { inner: crate::graph::DynNode { node: Box::new(map_range_node::MapRangeNode::default()) } } },
         NodeCatalogEntry { label: "String Format", category: "IO",
@@ -346,6 +348,8 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
             factory: || NodeType::AudioInput { selected_device: String::new(), gain: 1.0, active: false } },
         NodeCatalogEntry { label: "Audio Sampler", category: "Audio",
             factory: || NodeType::AudioSampler { record_duration: 5.0, trim_start: 0.0, trim_end: 0.0, volume: 1.0, looping: false, reverse: false } },
+        NodeCatalogEntry { label: "CLAP Plugin", category: "Audio",
+            factory: || NodeType::ClapPlugin { plugin_path: String::new(), plugin_name: String::new(), param_names: Vec::new(), param_ranges: Vec::new(), param_flags: Vec::new(), param_values: Vec::new(), param_labels: Vec::new(), is_instrument: false } },
         NodeCatalogEntry { label: "Audio Analyzer", category: "Audio",
             factory: || NodeType::AudioAnalyzer },
         NodeCatalogEntry { label: "Audio Device", category: "Audio",
@@ -537,6 +541,7 @@ pub fn render_content(
         NodeType::AudioMixer { channel_count, gains } =>
             audio_mixer::render(ui, channel_count, gains, node_id, values, connections, port_positions, dragging_from, pending_disconnects, audio_manager),
         NodeType::AudioSampler { .. } => audio_sampler::render(ui, node_id, node_type, values, connections, audio_manager, port_positions, dragging_from, pending_disconnects),
+        NodeType::ClapPlugin { .. } => clap_plugin::render(ui, node_id, node_type, values, connections, audio_manager, port_positions, dragging_from, pending_disconnects),
         NodeType::RustPlugin { .. } => rust_plugin::render(ui, node_id, node_type, values, connections),
         NodeType::HtmlViewer => {} // migrated to trait — legacy fallback
         NodeType::McpServer => mcp_server::render(ui, mcp_log, mcp_active),
@@ -553,7 +558,7 @@ pub fn render_content(
         NodeType::MlModel { .. } => ml_model::render(ui, node_id, node_type, values, connections),
         // Gate migrated to trait-based node
         NodeType::Timer { interval, elapsed, running, pulse_width, ref_time, paused_elapsed, time_initialized } =>
-            timer::render(ui, interval, elapsed, running, pulse_width, ref_time, paused_elapsed, time_initialized, node_id, values, connections, port_positions, dragging_from, pending_disconnects),
+            timer::render(ui, interval, elapsed, running, pulse_width, ref_time, paused_elapsed, time_initialized, node_id, values, connections, port_positions, dragging_from, pending_disconnects), // legacy — new timers use Dynamic
         // MapRange, StringFormat, SampleHold, VisualOutput migrated to trait-based nodes
         NodeType::Select { mode } =>
             select::render(ui, mode, node_id, values, connections, port_positions, dragging_from, pending_disconnects),

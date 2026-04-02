@@ -24,8 +24,11 @@ fn compute_hash(s: &str) -> u64 {
 }
 
 fn start_server(state: SharedState) -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind");
-    let port = listener.local_addr().unwrap().port();
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(l) => l,
+        Err(e) => { crate::system_log::error(format!("HTML server bind failed: {}", e)); return 0; }
+    };
+    let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
     if let Ok(mut s) = state.lock() { s.port = port; s.is_running = true; }
 
     std::thread::spawn(move || {

@@ -340,7 +340,7 @@ impl PatchworkApp {
                     } else { None }
                 });
             if let Err(e) = self.audio.start_output(device_name.as_deref()) {
-                eprintln!("Audio start failed: {}", e);
+                crate::system_log::error(format!("Audio start failed: {}", e));
             } else {
                 self.audio.rebuild_engine_from_graph(&self.graph);
             }

@@ -11,13 +11,15 @@ mod nodes;
 mod ob;
 mod osc;
 mod serial;
+pub mod system_log;
 
 use eframe::egui;
 use std::sync::Arc;
 
 fn main() -> eframe::Result {
+    audio::clap_host::init_main_thread();
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../icons/icon.png"))
-        .expect("Failed to load icon");
+        .expect("Failed to decode embedded icon PNG");
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

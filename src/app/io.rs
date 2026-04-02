@@ -49,7 +49,7 @@ impl super::PatchworkApp {
         let state: SessionState = match serde_json::from_str(&json) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("Failed to restore session: {}", e);
+                crate::system_log::warn(format!("Failed to restore session: {}", e));
                 return false;
             }
         };

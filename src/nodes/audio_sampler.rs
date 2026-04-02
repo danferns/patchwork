@@ -424,8 +424,9 @@ pub fn render(
                             let trim_s = (*trim_start * sr as f32) as usize;
                             let trim_e = if *trim_end > 0.0 { (*trim_end * sr as f32) as usize } else { rec_len };
                             let trim_e = trim_e.min(rec_len);
-                            if let Err(e) = export_wav(&buffer, trim_s, trim_e, sr, &path) {
-                                eprintln!("WAV export failed: {}", e);
+                            match export_wav(&buffer, trim_s, trim_e, sr, &path) {
+                                Ok(()) => crate::system_log::log(format!("Saved WAV: {}", path.display())),
+                                Err(e) => crate::system_log::error(format!("WAV export failed: {}", e)),
                             }
                         }
                     }

@@ -64,7 +64,7 @@ pub fn render(
     if *active && !audio.input_buffers.contains_key(&node_id) {
         let dev = if selected_device.is_empty() { None } else { Some(selected_device.as_str()) };
         if let Err(e) = audio.start_input(node_id, dev) {
-            eprintln!("Mic auto-start failed: {}", e);
+            crate::system_log::warn(format!("Mic auto-start failed: {}", e));
             *active = false;
         }
     }
@@ -81,7 +81,7 @@ pub fn render(
                 let dev = if selected_device.is_empty() { None } else { Some(selected_device.as_str()) };
                 match audio.start_input(node_id, dev) {
                     Ok(()) => *active = true,
-                    Err(e) => eprintln!("Mic start failed: {}", e),
+                    Err(e) => crate::system_log::error(format!("Mic start failed: {}", e)),
                 }
             }
         }

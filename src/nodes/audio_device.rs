@@ -31,7 +31,7 @@ pub fn render(
             if *enabled {
                 let dev = if selected_output.is_empty() { None } else { Some(selected_output.as_str()) };
                 if let Err(e) = audio.start_output(dev) {
-                    eprintln!("Audio start failed: {}", e);
+                    crate::system_log::error(format!("Audio start failed: {}", e));
                     *enabled = false;
                 }
             } else {
@@ -66,7 +66,7 @@ pub fn render(
         audio.stop_output();
         let dev = if selected_output.is_empty() { None } else { Some(selected_output.as_str()) };
         if let Err(e) = audio.start_output(dev) {
-            eprintln!("Device switch failed: {}", e);
+            crate::system_log::error(format!("Device switch failed: {}", e));
         }
     }
 

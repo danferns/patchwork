@@ -142,7 +142,7 @@ fn evaluate_curve_at(points: &[[f32; 2]], x: f32) -> f32 {
     if points.is_empty() { return 0.5; } // flat (0dB)
     if points.len() == 1 { return points[0][1]; }
     if x <= points[0][0] { return points[0][1]; }
-    if x >= points.last().unwrap()[0] { return points.last().unwrap()[1]; }
+    if let Some(last) = points.last() { if x >= last[0] { return last[1]; } }
 
     // Find the segment
     for i in 0..points.len() - 1 {
