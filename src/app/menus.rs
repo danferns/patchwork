@@ -210,17 +210,7 @@ impl super::PatchworkApp {
             }, [1100.0, 350.0]);
             self.pinned_nodes.insert(id);
         }
-        if !has(&self.graph.nodes, &|t| matches!(t, NodeType::Theme { .. })) {
-            let accent = crate::nodes::theme::random_accent();
-            self.graph.add_node(NodeType::Theme {
-                dark_mode: true, accent, font_size: 14.0,
-                bg_color: [20, 20, 20], text_color: [220, 220, 220],
-                window_bg: [24, 24, 24], window_alpha: 240,
-                grid_color: [28, 28, 28], grid_style: 2, wire_style: 0,
-                wiggle_gravity: 0.0, wiggle_range: 1.0, wiggle_speed: 1.0,
-                rounding: 16.0, spacing: 4.0, use_hsl: false,
-                wire_thickness: 6.0, background_path: String::new(),
-            }, [1100.0, 100.0]);
-        }
+        // Theme node is optional — not added by default.
+        // Users can add it from the palette when needed.
     }
 }

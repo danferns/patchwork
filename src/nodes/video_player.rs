@@ -328,7 +328,10 @@ fn cached_camera_list() -> Vec<(u32, String)> {
     use std::sync::{Mutex, OnceLock};
     static CACHE: OnceLock<Mutex<(std::time::Instant, Vec<(u32, String)>, bool)>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new((std::time::Instant::now() - std::time::Duration::from_secs(100), Vec::new(), false)));
-    let mut guard = cache.lock().unwrap();
+    let mut guard = match cache.lock() {
+        Ok(g) => g,
+        Err(_) => return Vec::new(), // Mutex poisoned — return empty list
+    };
     let (last_refresh, ref cameras, ref mut refreshing) = *guard;
     if last_refresh.elapsed().as_secs() >= 10 && !*refreshing {
         *refreshing = true;

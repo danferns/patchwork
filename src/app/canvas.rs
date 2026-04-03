@@ -643,9 +643,11 @@ impl super::PatchworkApp {
                         let dist = tpos.distance(ptr);
                         if dist < hit_radius {
                             let tgt_kind = self.graph.port_kind(tnid, tpidx, !tis_input);
-                            let compat = src_kind.is_none() || tgt_kind.is_none()
-                                || PortKind::compatible(src_kind.unwrap(), tgt_kind.unwrap());
-                            if snap_target.is_none() || dist < snap_target.unwrap().0 {
+                            let compat = match (src_kind, tgt_kind) {
+                                (Some(s), Some(t)) => PortKind::compatible(s, t),
+                                _ => true,
+                            };
+                            if snap_target.as_ref().map(|s| dist < s.0).unwrap_or(true) {
                                 snap_target = Some((dist, tpos, compat));
                             }
                         }

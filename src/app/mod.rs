@@ -936,10 +936,12 @@ impl PatchworkApp {
                                     // Check port type compatibility
                                     let src_kind = self.graph.port_kind(src_node, src_port, is_output);
                                     let tgt_kind = self.graph.port_kind(nid, pidx, !is_input);
-                                    let compatible = src_kind.is_none() || tgt_kind.is_none()
-                                        || PortKind::compatible(src_kind.unwrap(), tgt_kind.unwrap());
+                                    let compatible = match (src_kind, tgt_kind) {
+                                        (Some(s), Some(t)) => PortKind::compatible(s, t),
+                                        _ => true, // Unknown port kind — allow connection
+                                    };
                                     if compatible {
-                                        if best.is_none() || dist < best.unwrap().0 {
+                                        if best.as_ref().map(|b| dist < b.0).unwrap_or(true) {
                                             best = Some((dist, nid, pidx, is_input));
                                         }
                                     }
@@ -1042,6 +1044,53 @@ impl PatchworkApp {
                 }
             }
         }
+        // Handle WGSL "+" button spawn requests
+        if let Some(req) = ctx.data_mut(|d| d.get_temp::<crate::nodes::wgsl_viewer::WgslSpawnRequest>(egui::Id::new("wgsl_spawn_request"))) {
+            ctx.data_mut(|d| d.remove::<crate::nodes::wgsl_viewer::WgslSpawnRequest>(egui::Id::new("wgsl_spawn_request")));
+
+            // Position the new node to the left of the WGSL node
+            let wgsl_pos = self.graph.nodes.get(&req.target_node).map(|n| n.pos).unwrap_or([0.0, 0.0]);
+            let spawn_pos = [wgsl_pos[0] - 200.0, wgsl_pos[1] + (req.target_port as f32 * 30.0)];
+
+            let (new_id, from_port) = match req.source_type.as_str() {
+                "time" => {
+                    let id = self.graph.add_node(
+                        NodeType::Dynamic { inner: crate::graph::DynNode { node: Box::new(crate::nodes::time_node::TimeNode::default()) } },
+                        spawn_pos,
+                    );
+                    (id, 0) // Time node output port 0 = Seconds
+                }
+                "color" => {
+                    let id = self.graph.add_node(
+                        NodeType::Dynamic { inner: crate::graph::DynNode { node: Box::new(crate::nodes::color_node::ColorNode::default()) } },
+                        spawn_pos,
+                    );
+                    (id, 0) // Color node output port 0 = R (will connect R, G, B separately)
+                }
+                _ => {
+                    // Slider with smart defaults
+                    let (min, max, step, value) = crate::nodes::wgsl_viewer::slider_defaults_for_uniform(&req.uniform_name);
+                    let id = self.graph.add_node(
+                        NodeType::Slider { value, min, max, step, slider_color: [80, 160, 255], label: req.uniform_name.clone() },
+                        spawn_pos,
+                    );
+                    (id, 0) // Slider output port 0 = Value
+                }
+            };
+
+            // Connect the new node to the WGSL uniform port
+            if req.source_type == "color" {
+                // Connect R, G, B outputs to 3 consecutive ports
+                self.graph.add_connection(new_id, 0, req.target_node, req.target_port);     // R
+                self.graph.add_connection(new_id, 1, req.target_node, req.target_port + 1); // G
+                self.graph.add_connection(new_id, 2, req.target_node, req.target_port + 2); // B
+            } else {
+                self.graph.add_connection(new_id, from_port, req.target_node, req.target_port);
+            }
+
+            crate::system_log::log(format!("Auto-created {} for u.{}", req.source_type, req.uniform_name));
+        }
+
         self.midi.process(midi_actions);
         self.serial.process(serial_actions);
         self.osc.process(osc_actions);

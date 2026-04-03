@@ -9,8 +9,51 @@ use std::collections::{HashMap, HashSet};
 const MAX_UNIFORM_FLOATS: usize = 64;
 const UNIFORM_BUF_SIZE: u64 = (MAX_UNIFORM_FLOATS * 4) as u64; // 256 bytes
 
+/// Request to auto-create a source node and connect it to a WGSL uniform port.
+#[derive(Clone, Debug)]
+pub struct WgslSpawnRequest {
+    pub source_type: String,  // "time", "slider", "color"
+    pub target_node: crate::graph::NodeId,
+    pub target_port: usize,
+    pub uniform_name: String,
+}
+
+/// Determine what source node to create and with what defaults based on uniform name.
+fn uniform_spawn_request(name: &str, target_node: crate::graph::NodeId, target_port: usize) -> WgslSpawnRequest {
+    let lower = name.to_lowercase();
+    let source_type = if lower == "time" || lower == "t" { "time" } else { "slider" };
+    WgslSpawnRequest {
+        source_type: source_type.to_string(),
+        target_node,
+        target_port,
+        uniform_name: name.to_string(),
+    }
+}
+
+/// Get smart slider defaults (min, max, step, initial value) based on uniform name.
+pub fn slider_defaults_for_uniform(name: &str) -> (f32, f32, f32, f32) {
+    let lower = name.to_lowercase();
+    if lower.contains("count") || lower.contains("num") || lower == "n" || lower == "i" {
+        (0.0, 20.0, 1.0, 5.0)       // integers
+    } else if lower.contains("speed") || lower.contains("rate") {
+        (0.0, 10.0, 0.1, 1.0)
+    } else if lower.contains("size") || lower.contains("scale") || lower.contains("radius") {
+        (0.0, 2.0, 0.01, 0.5)
+    } else if lower.contains("freq") {
+        (20.0, 2000.0, 1.0, 440.0)
+    } else if lower.contains("angle") || lower.contains("rotation") || lower.contains("rot") {
+        (0.0, 6.2832, 0.01, 0.0)    // 0–2π
+    } else if lower.contains("mix") || lower.contains("blend") || lower.contains("amount") || lower.contains("alpha") {
+        (0.0, 1.0, 0.01, 0.5)
+    } else {
+        (0.0, 1.0, 0.01, 0.5)       // safe default
+    }
+}
+
+// time is NOT a builtin — it's a normal uniform port that users connect a Time node to.
+// This lets them control speed, sync with audio, or use Timer phase.
 const BUILTINS: &[&str] = &[
-    "time", "resolution", "mouse",
+    "resolution", "mouse",
     "resolution_x", "resolution_y", "mouse_x", "mouse_y",
     "_p0", "_p1", "_p2",
 ];
@@ -436,8 +479,22 @@ pub fn render(
         for (i, name) in names_clone.iter().enumerate() {
             let t = types_clone.get(i).map(|s| s.as_str()).unwrap_or("float");
             if t == "color" {
-                // Color group: label row, then ● R [val] ● G [val] ● B [val]
-                ui.label(egui::RichText::new(format!("u.{}", name)).small());
+                // Color group: label + optional "+" button
+                let any_wired = (0..3).any(|c| connections.iter().any(|cn| cn.to_node == node_id && cn.to_port == pi + c));
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(format!("u.{}", name)).small());
+                    if !any_wired {
+                        if ui.small_button("+").on_hover_text("Create Color node").clicked() {
+                            let spawn = WgslSpawnRequest {
+                                source_type: "color".to_string(),
+                                target_node: node_id,
+                                target_port: pi,
+                                uniform_name: name.clone(),
+                            };
+                            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("wgsl_spawn_request"), spawn));
+                        }
+                    }
+                });
                 ui.horizontal(|ui| {
                     for c in 0..3 {
                         let port = pi;
@@ -455,7 +512,7 @@ pub fn render(
                 });
                 vi += 3;
             } else {
-                // Float: ● label [DragValue]
+                // Float: ● label [DragValue] [+]
                 let port = pi;
                 let is_wired = connections.iter().any(|cn| cn.to_node == node_id && cn.to_port == port);
                 ui.horizontal(|ui| {
@@ -465,8 +522,15 @@ pub fn render(
                         let v = if vi < uniform_values.len() { uniform_values[vi] } else { 0.0 };
                         ui.label(egui::RichText::new(format!("{:.3}", v)).strong().monospace());
                         ui.label(egui::RichText::new("⟵").small().color(egui::Color32::from_rgb(80, 170, 255)));
-                    } else if vi < uniform_values.len() {
-                        ui.add(egui::DragValue::new(&mut uniform_values[vi]).speed(0.01));
+                    } else {
+                        if vi < uniform_values.len() {
+                            ui.add(egui::DragValue::new(&mut uniform_values[vi]).speed(0.01));
+                        }
+                        // "+" button: auto-create the right source node
+                        if ui.small_button("+").on_hover_text("Create source node").clicked() {
+                            let spawn = uniform_spawn_request(name, node_id, port);
+                            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("wgsl_spawn_request"), spawn));
+                        }
                     }
                 });
                 pi += 1;

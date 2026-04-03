@@ -212,7 +212,17 @@ fn build_input_tensor(
         vec![1usize, ts, ts, 3]
     };
     let boxed = input_data.into_boxed_slice();
-    let tensor = ort::value::Tensor::from_array((shape, boxed.clone())).unwrap();
+    let tensor = match ort::value::Tensor::from_array((shape, boxed.clone())) {
+        Ok(t) => t,
+        Err(e) => {
+            crate::system_log::error(format!("ML tensor creation failed: {}", e));
+            // Return a minimal 1x1 tensor as fallback
+            let fallback_shape = vec![1usize, 3, 1, 1];
+            let fallback_data = vec![0.0f32; 3].into_boxed_slice();
+            let t = ort::value::Tensor::from_array((fallback_shape, fallback_data)).expect("fallback tensor");
+            return (t, boxed);
+        }
+    };
     (tensor, boxed)
 }
 

@@ -387,11 +387,28 @@ pub fn execute_command(
         }
 
         McpCommand::Connect { from_node, from_port, to_node, to_port } => {
-            if !graph.nodes.contains_key(&from_node) {
-                return McpResult::Error { error: format!("Source node {} not found", from_node) };
+            let src_node = match graph.nodes.get(&from_node) {
+                Some(n) => n,
+                None => return McpResult::Error { error: format!("Source node {} not found", from_node) },
+            };
+            let dst_node = match graph.nodes.get(&to_node) {
+                Some(n) => n,
+                None => return McpResult::Error { error: format!("Target node {} not found", to_node) },
+            };
+            // Validate port bounds
+            let src_outputs = src_node.node_type.outputs();
+            let dst_inputs = dst_node.node_type.inputs();
+            if from_port >= src_outputs.len() {
+                return McpResult::Error { error: format!("Source port {} out of range (node has {} outputs)", from_port, src_outputs.len()) };
             }
-            if !graph.nodes.contains_key(&to_node) {
-                return McpResult::Error { error: format!("Target node {} not found", to_node) };
+            if to_port >= dst_inputs.len() {
+                return McpResult::Error { error: format!("Target port {} out of range (node has {} inputs)", to_port, dst_inputs.len()) };
+            }
+            // Validate port type compatibility
+            let src_kind = src_outputs[from_port].kind;
+            let dst_kind = dst_inputs[to_port].kind;
+            if !PortKind::compatible(src_kind, dst_kind) {
+                return McpResult::Error { error: format!("Incompatible ports: {:?} → {:?}", src_kind, dst_kind) };
             }
             graph.add_connection(from_node, from_port, to_node, to_port);
             McpResult::Json(json!({ "success": true }))

@@ -1,16 +1,15 @@
-//! MonitorNode — standalone struct implementing NodeBehavior.
+//! MonitorNode — system profiler with inline output ports.
 //!
-//! System profiler: FPS, CPU, RAM, GPU, process memory, node/connection count.
-//! Background thread collects sysinfo metrics every 1 second.
+//! Shows FPS, CPU, RAM, GPU, process metrics, node/wire count.
+//! Output ports sit inline next to their values — no duplicate display.
 
 use crate::graph::{PortDef, PortKind, PortValue};
-use crate::node_trait::NodeBehavior;
+use crate::node_trait::{NodeBehavior, RenderContext};
 use serde::{Serialize, Deserialize};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-/// System metrics collected by background thread
 #[derive(Clone, Default)]
 struct SystemMetrics {
     cpu_usage: f32,
@@ -25,17 +24,12 @@ struct SystemMetrics {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct MonitorNode {
-    // Serialized fields (minimal — just need to reconstruct)
     #[serde(skip, default = "default_metrics")]
     metrics: Arc<Mutex<SystemMetrics>>,
     #[serde(skip)]
     fps_history: VecDeque<f32>,
     #[serde(skip)]
     cpu_history: VecDeque<f32>,
-    #[serde(skip)]
-    mem_history: VecDeque<f32>,
-    #[serde(skip)]
-    process_mem_history: VecDeque<f32>,
     #[serde(skip)]
     frame_times: VecDeque<f32>,
     #[serde(skip, default = "Instant::now")]
@@ -62,11 +56,9 @@ impl Default for MonitorNode {
     fn default() -> Self {
         Self {
             metrics: default_metrics(),
-            fps_history: VecDeque::with_capacity(120),
-            cpu_history: VecDeque::with_capacity(120),
-            mem_history: VecDeque::with_capacity(120),
-            process_mem_history: VecDeque::with_capacity(120),
-            frame_times: VecDeque::with_capacity(120),
+            fps_history: VecDeque::with_capacity(60),
+            cpu_history: VecDeque::with_capacity(60),
+            frame_times: VecDeque::with_capacity(60),
             last_frame: Instant::now(),
             node_count: 0,
             connection_count: 0,
@@ -105,6 +97,12 @@ impl MonitorNode {
                         .map(|p| (p.memory() as f32 / 1_048_576.0, p.cpu_usage()))
                         .unwrap_or((0.0, 0.0));
 
+                    // Normalize process CPU to overall percentage
+                    // sysinfo returns per-core percentage (e.g., 200% = 2 full cores)
+                    // Divide by core count to get percentage of total system CPU
+                    let num_cores = cores.len().max(1) as f32;
+                    let proc_cpu_normalized = proc_cpu / num_cores;
+
                     if let Ok(mut m) = metrics.lock() {
                         m.cpu_usage = cpu;
                         m.cpu_per_core = cores;
@@ -112,7 +110,7 @@ impl MonitorNode {
                         m.mem_total_gb = mem_total as f32;
                         m.mem_percent = mem_pct;
                         m.process_mem_mb = proc_mem;
-                        m.process_cpu = proc_cpu;
+                        m.process_cpu = proc_cpu_normalized;
                     }
                     std::thread::sleep(std::time::Duration::from_secs(1));
                 }
@@ -127,38 +125,36 @@ impl MonitorNode {
         if dt > 0.0 {
             self.fps_history.push_back(1.0 / dt);
             self.frame_times.push_back(dt * 1000.0);
-            if self.fps_history.len() > 120 { self.fps_history.pop_front(); }
-            if self.frame_times.len() > 120 { self.frame_times.pop_front(); }
+            if self.fps_history.len() > 60 { self.fps_history.pop_front(); }
+            if self.frame_times.len() > 60 { self.frame_times.pop_front(); }
         }
 
         if let Ok(m) = self.metrics.lock() {
             self.cpu_history.push_back(m.cpu_usage);
-            self.mem_history.push_back(m.mem_percent);
-            self.process_mem_history.push_back(m.process_mem_mb);
-            if self.cpu_history.len() > 120 { self.cpu_history.pop_front(); }
-            if self.mem_history.len() > 120 { self.mem_history.pop_front(); }
-            if self.process_mem_history.len() > 120 { self.process_mem_history.pop_front(); }
+            if self.cpu_history.len() > 60 { self.cpu_history.pop_front(); }
         }
     }
 }
 
 impl NodeBehavior for MonitorNode {
     fn title(&self) -> &str { "Monitor" }
-
     fn inputs(&self) -> Vec<PortDef> { vec![] }
 
     fn outputs(&self) -> Vec<PortDef> {
         vec![
-            PortDef::new("FPS", PortKind::Number),
-            PortDef::new("Frame ms", PortKind::Number),
-            PortDef::new("CPU %", PortKind::Number),
-            PortDef::new("RAM %", PortKind::Number),
-            PortDef::new("Proc MB", PortKind::Number),
-            PortDef::new("Nodes", PortKind::Number),
+            PortDef::new("FPS", PortKind::Number),        // 0
+            PortDef::new("Frame ms", PortKind::Number),   // 1
+            PortDef::new("CPU %", PortKind::Number),       // 2 (system)
+            PortDef::new("RAM %", PortKind::Number),       // 3 (system)
+            PortDef::new("Proc MB", PortKind::Number),     // 4 (patchwork)
+            PortDef::new("Nodes", PortKind::Number),       // 5
+            PortDef::new("Proc CPU", PortKind::Number),    // 6 (patchwork CPU%)
+            PortDef::new("Wires", PortKind::Number),       // 7
         ]
     }
 
     fn color_hint(&self) -> [u8; 3] { [255, 160, 60] }
+    fn inline_ports(&self) -> bool { true }
 
     fn evaluate(&mut self, _inputs: &[PortValue]) -> Vec<(usize, PortValue)> {
         self.ensure_thread();
@@ -170,6 +166,7 @@ impl NodeBehavior for MonitorNode {
             .map(|m| (m.cpu_usage, m.mem_percent, m.process_mem_mb))
             .unwrap_or((0.0, 0.0, 0.0));
 
+        let proc_cpu = self.metrics.lock().map(|m| m.process_cpu).unwrap_or(0.0);
         vec![
             (0, PortValue::Float(fps)),
             (1, PortValue::Float(frame_ms)),
@@ -177,16 +174,15 @@ impl NodeBehavior for MonitorNode {
             (3, PortValue::Float(ram)),
             (4, PortValue::Float(proc_mb)),
             (5, PortValue::Float(self.node_count as f32)),
+            (6, PortValue::Float(proc_cpu)),
+            (7, PortValue::Float(self.connection_count as f32)),
         ]
     }
 
     fn type_tag(&self) -> &str { "monitor" }
+    fn save_state(&self) -> serde_json::Value { serde_json::json!({}) }
 
-    fn save_state(&self) -> serde_json::Value {
-        serde_json::json!({})
-    }
-
-    fn render_ui(&mut self, ui: &mut eframe::egui::Ui) {
+    fn render_with_context(&mut self, ui: &mut eframe::egui::Ui, ctx: &mut RenderContext) {
         use eframe::egui;
 
         self.ensure_thread();
@@ -194,21 +190,29 @@ impl NodeBehavior for MonitorNode {
         let m = self.metrics.lock().ok().map(|m| m.clone()).unwrap_or_default();
         let fps = self.fps_history.back().copied().unwrap_or(0.0);
         let frame_ms = self.frame_times.back().copied().unwrap_or(0.0);
+        let dim = ui.visuals().widgets.noninteractive.fg_stroke.color;
 
-        // FPS
+        // ── FPS + Frame ms (one line, ports inline) ──────────────
         let fps_color = if fps >= 55.0 { egui::Color32::from_rgb(80, 200, 80) }
             else if fps >= 30.0 { egui::Color32::from_rgb(200, 200, 80) }
             else { egui::Color32::from_rgb(255, 80, 80) };
 
         ui.horizontal(|ui| {
-            ui.label("FPS:");
-            ui.colored_label(fps_color, egui::RichText::new(format!("{:.0}", fps)).strong());
-            ui.label(egui::RichText::new(format!("{:.1}ms", frame_ms)).small()
-                .color(ui.visuals().widgets.noninteractive.fg_stroke.color));
+            ui.label(egui::RichText::new("FPS").small());
+            ui.label(egui::RichText::new(format!("{:.0}", fps)).strong().color(fps_color));
+            crate::nodes::inline_port_circle(ui, ctx.node_id, 0, false, ctx.connections,
+                ctx.port_positions, ctx.dragging_from, ctx.pending_disconnects, PortKind::Number);
+        });
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Frame").small());
+            ui.label(egui::RichText::new(format!("{:.1}ms", frame_ms)).small().color(dim));
+            crate::nodes::inline_port_circle(ui, ctx.node_id, 1, false, ctx.connections,
+                ctx.port_positions, ctx.dragging_from, ctx.pending_disconnects, PortKind::Number);
         });
         draw_sparkline(ui, &self.fps_history, fps_color, 0.0, 120.0);
 
-        ui.separator();
+        // ── System ───────────────────────────────────────────────
+        ui.label(egui::RichText::new("System").small().strong().color(dim));
 
         // CPU
         let cpu_color = if m.cpu_usage < 50.0 { egui::Color32::from_rgb(80, 180, 255) }
@@ -216,16 +220,16 @@ impl NodeBehavior for MonitorNode {
             else { egui::Color32::from_rgb(255, 80, 80) };
 
         ui.horizontal(|ui| {
-            ui.label("CPU:");
-            ui.colored_label(cpu_color, egui::RichText::new(format!("{:.0}%", m.cpu_usage)).strong());
-            let dim = ui.visuals().widgets.noninteractive.fg_stroke.color;
-            ui.label(egui::RichText::new(format!("({} cores)", m.cpu_per_core.len())).small().color(dim));
+            ui.label(egui::RichText::new("CPU").small());
+            ui.label(egui::RichText::new(format!("{:.0}%", m.cpu_usage)).strong().color(cpu_color));
+            crate::nodes::inline_port_circle(ui, ctx.node_id, 2, false, ctx.connections,
+                ctx.port_positions, ctx.dragging_from, ctx.pending_disconnects, PortKind::Number);
+            ui.label(egui::RichText::new(format!("({}c)", m.cpu_per_core.len())).small().color(dim));
         });
-        draw_sparkline(ui, &self.cpu_history, cpu_color, 0.0, 100.0);
 
-        // Per-core bars
+        // Per-core bars (compact)
         if !m.cpu_per_core.is_empty() {
-            let bar_h = 4.0;
+            let bar_h = 3.0;
             let total_w = ui.available_width();
             let bar_w = (total_w / m.cpu_per_core.len() as f32).max(2.0) - 1.0;
             let (rect, _) = ui.allocate_exact_size(egui::vec2(total_w, bar_h), egui::Sense::hover());
@@ -244,49 +248,56 @@ impl NodeBehavior for MonitorNode {
             }
         }
 
-        ui.separator();
-
         // RAM
         ui.horizontal(|ui| {
-            ui.label("RAM:");
-            ui.colored_label(egui::Color32::from_rgb(200, 120, 255),
-                egui::RichText::new(format!("{:.1}/{:.0}GB ({:.0}%)", m.mem_used_gb, m.mem_total_gb, m.mem_percent)).strong());
+            ui.label(egui::RichText::new("RAM").small());
+            ui.label(egui::RichText::new(format!("{:.0}%", m.mem_percent)).strong().color(egui::Color32::from_rgb(200, 120, 255)));
+            crate::nodes::inline_port_circle(ui, ctx.node_id, 3, false, ctx.connections,
+                ctx.port_positions, ctx.dragging_from, ctx.pending_disconnects, PortKind::Number);
+            ui.label(egui::RichText::new(format!("{:.1}/{:.0}G", m.mem_used_gb, m.mem_total_gb)).small().color(dim));
         });
-        draw_sparkline(ui, &self.mem_history, egui::Color32::from_rgb(200, 120, 255), 0.0, 100.0);
-
-        ui.separator();
 
         // GPU
         if !m.gpu_name.is_empty() && m.gpu_name != "Unknown GPU" {
             ui.horizontal(|ui| {
-                ui.label("GPU:");
-                ui.label(egui::RichText::new(&m.gpu_name).small()
-                    .color(egui::Color32::from_rgb(180, 220, 100)));
+                ui.label(egui::RichText::new("GPU").small());
+                ui.label(egui::RichText::new(&m.gpu_name).small().color(egui::Color32::from_rgb(180, 220, 100)));
             });
         }
 
-        ui.separator();
+        // ── Patchwork ────────────────────────────────────────────
+        ui.label(egui::RichText::new("Patchwork").small().strong().color(dim));
 
-        // Process
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(format!("Mem: {:.0}MB  CPU: {:.1}%", m.process_mem_mb, m.process_cpu)).small());
+            ui.label(egui::RichText::new("CPU").small());
+            ui.label(egui::RichText::new(format!("{:.1}%", m.process_cpu)).small());
+            crate::nodes::inline_port_circle(ui, ctx.node_id, 6, false, ctx.connections,
+                ctx.port_positions, ctx.dragging_from, ctx.pending_disconnects, PortKind::Number);
         });
-        draw_sparkline(ui, &self.process_mem_history, egui::Color32::from_rgb(255, 180, 80),
-            0.0, (m.process_mem_mb * 2.0).max(100.0));
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("RAM").small());
+            ui.label(egui::RichText::new(format!("{:.0}MB", m.process_mem_mb)).small().color(egui::Color32::from_rgb(255, 180, 80)));
+            crate::nodes::inline_port_circle(ui, ctx.node_id, 4, false, ctx.connections,
+                ctx.port_positions, ctx.dragging_from, ctx.pending_disconnects, PortKind::Number);
+        });
 
-        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(format!("{} nodes", self.node_count)).small().color(dim));
+            crate::nodes::inline_port_circle(ui, ctx.node_id, 5, false, ctx.connections,
+                ctx.port_positions, ctx.dragging_from, ctx.pending_disconnects, PortKind::Number);
+            ui.label(egui::RichText::new(format!("  {} wires", self.connection_count)).small().color(dim));
+            crate::nodes::inline_port_circle(ui, ctx.node_id, 7, false, ctx.connections,
+                ctx.port_positions, ctx.dragging_from, ctx.pending_disconnects, PortKind::Number);
+        });
 
-        // Graph stats
-        let dim = ui.visuals().widgets.noninteractive.fg_stroke.color;
-        ui.label(egui::RichText::new(format!("Nodes: {}  Wires: {}", self.node_count, self.connection_count))
-            .small().color(dim));
+        ui.ctx().request_repaint();
     }
 }
 
 fn draw_sparkline(ui: &mut eframe::egui::Ui, data: &VecDeque<f32>, color: eframe::egui::Color32, min: f32, max: f32) {
     use eframe::egui;
 
-    let h = 25.0;
+    let h = 18.0;
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
     let painter = ui.painter();
@@ -301,14 +312,12 @@ fn draw_sparkline(ui: &mut eframe::egui::Ui, data: &VecDeque<f32>, color: eframe
         egui::pos2(x, y)
     }).collect();
 
-    // Fill
+    let fill_color = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 25);
     let mut fill_pts = points.clone();
     fill_pts.push(egui::pos2(rect.right(), rect.bottom()));
     fill_pts.push(egui::pos2(rect.left(), rect.bottom()));
-    let fill_color = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 30);
     painter.add(egui::Shape::convex_polygon(fill_pts, fill_color, egui::Stroke::NONE));
 
-    // Line
     for window in points.windows(2) {
         painter.line_segment([window[0], window[1]], egui::Stroke::new(1.0, color));
     }
@@ -330,7 +339,6 @@ fn get_gpu_name() -> String {
     "Unknown GPU".to_string()
 }
 
-/// Register MonitorNode in the node registry for deserialization.
 #[allow(dead_code)]
 pub fn register(registry: &mut crate::node_trait::NodeRegistryInner) {
     registry.register("monitor", |_state| Box::new(MonitorNode::default()));

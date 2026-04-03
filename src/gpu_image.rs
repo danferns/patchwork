@@ -129,7 +129,10 @@ impl egui_wgpu::CallbackTrait for GpuBlendCallback {
         if store.resources.is_none() {
             store.resources = Some(create_blend_pipeline(device, self.target_format));
         }
-        let res = store.resources.as_ref().unwrap();
+        let res = match store.resources.as_ref() {
+            Some(r) => r,
+            None => return Vec::new(), // Pipeline creation failed — skip this frame
+        };
 
         let w = self.img_a.width.max(self.img_b.width);
         let h = self.img_a.height.max(self.img_b.height);
