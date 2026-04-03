@@ -113,15 +113,8 @@ impl super::PatchworkApp {
                 self.pinned_nodes.clear();
                 self.undo_history.clear();
                 self.spawn_default_nodes();
-                // Randomise accent on any Theme node (or apply to egui temp for next Theme creation)
-                let new_accent = crate::nodes::theme::random_accent();
-                for node in self.graph.nodes.values_mut() {
-                    if let NodeType::Theme { accent, .. } = &mut node.node_type {
-                        *accent = new_accent;
-                    }
-                }
-                // Store for nodes/wires that read accent from egui temp data
-                ctx.data_mut(|d| d.insert_temp(egui::Id::new("theme_accent"), new_accent));
+                // Randomise accent for the new session
+                self.session_accent = crate::nodes::theme::random_accent();
             }
             // Cmd+O → Open project
             if ctx.input(|i| i.key_pressed(egui::Key::O)) {
@@ -314,8 +307,8 @@ impl super::PatchworkApp {
         }
         // Delete / Backspace = delete selected (only if no text input is focused)
         if !text_focused && ctx.input(|i| i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete)) {
-            if let Some(conn_idx) = self.selected_connection.take() {
-                if conn_idx < self.graph.connections.len() {
+            if let Some(conn_id) = self.selected_connection.take() {
+                if let Some(conn_idx) = self.find_connection_index(&conn_id) {
                     self.push_undo();
                     self.graph.connections.remove(conn_idx);
                 }

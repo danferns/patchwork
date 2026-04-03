@@ -339,7 +339,7 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
         NodeCatalogEntry { label: "EQ", category: "Audio",
             factory: || NodeType::AudioEq { points: vec![[0.0, 0.5], [0.25, 0.5], [0.5, 0.5], [0.75, 0.5], [1.0, 0.5]] } },
         NodeCatalogEntry { label: "Speaker", category: "Audio",
-            factory: || NodeType::Speaker { active: true, volume: 0.8 } },
+            factory: || NodeType::Speaker { active: true, volume: 0.8, pan: 0.0, channel_offset: 0, device: String::new() } },
         NodeCatalogEntry { label: "Mixer", category: "Audio",
             factory: || NodeType::AudioMixer { channel_count: 2, gains: vec![0.8, 0.8] } },
         NodeCatalogEntry { label: "Audio Player", category: "Audio",
@@ -537,7 +537,7 @@ pub fn render_content(
         NodeType::AudioHighPass { cutoff } => audio_filter::render_hpf(ui, cutoff, node_id, values, connections, port_positions, dragging_from, pending_disconnects),
         NodeType::AudioGain { level } => audio_gain::render(ui, level, node_id, values, connections, port_positions, dragging_from, pending_disconnects),
         NodeType::AudioEq { points } => audio_eq::render(ui, node_id, points, port_positions, dragging_from, connections, pending_disconnects),
-        NodeType::Speaker { active, volume } => speaker::render(ui, active, volume, node_id, values, connections, audio_manager, port_positions, dragging_from, pending_disconnects),
+        NodeType::Speaker { active, volume, pan, channel_offset, device } => speaker::render(ui, active, volume, pan, channel_offset, device, node_id, values, connections, audio_manager, port_positions, dragging_from, pending_disconnects),
         NodeType::AudioMixer { channel_count, gains } =>
             audio_mixer::render(ui, channel_count, gains, node_id, values, connections, port_positions, dragging_from, pending_disconnects, audio_manager),
         NodeType::AudioSampler { .. } => audio_sampler::render(ui, node_id, node_type, values, connections, audio_manager, port_positions, dragging_from, pending_disconnects),

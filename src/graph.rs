@@ -643,6 +643,14 @@ pub enum NodeType {
         active: bool,
         #[serde(default = "default_point_eight")]
         volume: f32,
+        #[serde(default)]
+        pan: f32,
+        /// Hardware channel offset (0 = ch 1-2, 2 = ch 3-4, etc.)
+        #[serde(default)]
+        channel_offset: usize,
+        /// Output device name override. Empty = use primary device from AudioDevice node.
+        #[serde(default)]
+        device: String,
     },
     /// Audio Mixer: variable number of audio input channels, each with a gain fader.
     /// Per-channel: audio input + gain control input. One mixed audio output.
@@ -1111,7 +1119,7 @@ impl NodeBehavior for NodeType {
             NodeType::AudioHighPass { .. } => vec![PortDef::new("Audio", Audio), PortDef::new("Cutoff", Number)],
             NodeType::AudioGain { .. } => vec![PortDef::new("Audio", Audio), PortDef::new("Level", Number)],
             NodeType::AudioEq { .. } => vec![PortDef::new("Audio", Audio)],
-            NodeType::Speaker { .. } => vec![PortDef::new("L/Mono", Audio), PortDef::new("R", Audio), PortDef::new("Volume", Normalized)],
+            NodeType::Speaker { .. } => vec![PortDef::new("L/Mono", Audio), PortDef::new("R", Audio), PortDef::new("Volume", Normalized), PortDef::new("Pan", Number)],
             NodeType::AudioMixer { channel_count, .. } => {
                 // Per channel: Audio input + Gain control input
                 let mut ports = Vec::new();
@@ -1451,12 +1459,16 @@ impl Graph {
 
     pub fn add_node(&mut self, node_type: NodeType, pos: [f32; 2]) -> NodeId {
         let id = self.next_id; self.next_id += 1;
+        crate::system_log::log(format!("Added {} (id:{})", node_type.title(), id));
         self.nodes.insert(id, Node { id, node_type, pos });
         self.topo_dirty = true;
         self.audio_topology_dirty = true;
         id
     }
     pub fn remove_node(&mut self, id: NodeId) {
+        if let Some(node) = self.nodes.get(&id) {
+            crate::system_log::log(format!("Removed {} (id:{})", node.node_type.title(), id));
+        }
         self.nodes.remove(&id);
         self.connections.retain(|c| c.from_node != id && c.to_node != id);
         self.topo_dirty = true;

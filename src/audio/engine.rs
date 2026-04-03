@@ -55,7 +55,11 @@ pub enum AudioCommand {
 struct ProcessorSlot {
     processor: Box<dyn AudioProcessor>,
     /// This processor's output buffer (persists across callbacks).
+    /// For mono processors: `max_block_size` samples.
+    /// For stereo processors: `2 * max_block_size` samples (interleaved L, R).
     output_buffer: Vec<f32>,
+    /// Number of output channels (1 = mono, 2 = interleaved stereo).
+    output_channels: usize,
     /// Input connections: port index → source node ID.
     /// The engine reads from the source node's output_buffer.
     inputs: Vec<Option<NodeId>>,  // indexed by port
@@ -117,9 +121,11 @@ impl AudioEngine {
                     processor.set_shared_params(params.clone());
                     let param_count = processor.param_count();
                     let is_speaker = processor.kind() == ProcessorKind::Output;
+                    let output_channels = processor.output_channels();
                     self.slots.insert(node_id, ProcessorSlot {
                         processor,
-                        output_buffer: vec![0.0f32; self.max_block_size],
+                        output_buffer: vec![0.0f32; self.max_block_size * output_channels],
+                        output_channels,
                         inputs: Vec::new(),
                         is_speaker,
                         params,
@@ -261,46 +267,73 @@ impl AudioEngine {
                 } else {
                     &self.silence[..num_frames]
                 };
-                slot.processor.process_block(input, &mut slot.output_buffer[..num_frames], &ctx);
+                let out_len = num_frames * slot.output_channels;
+                slot.processor.process_block(input, &mut slot.output_buffer[..out_len], &ctx);
             }
         }
 
-        // 3. Mix active speakers to master output (stereo-aware)
-        // Speaker inputs: port 0 = L/Mono, port 1 = R (optional)
-        // If only L connected: duplicate to both channels
-        // If both connected: true stereo
+        // 3. Mix active speakers to master output
+        // Speaker reads L (port 0) and R (port 1) inputs separately.
+        // Params: [0] = volume, [1] = active (>0.5), [2] = pan (-1..+1), [3] = channel_offset (0,2,4,...)
+        // channel_offset routes output to specific hardware channel pair.
+        // e.g. offset=0 → ch 0-1, offset=2 → ch 2-3 (for multi-channel sound cards)
         let master_vol = self.master_volume.load();
         for &spk_id in &self.speaker_ids {
-            if let Some(slot) = self.slots.get(&spk_id) {
-                // Read volume from speaker's output buffer (processor already applied it)
-                let mono_buf = &slot.output_buffer;
+            // Read speaker params
+            let (l_source, r_source, volume, active, pan, ch_offset) = {
+                if let Some(slot) = self.slots.get(&spk_id) {
+                    let l = slot.inputs.get(0).and_then(|id| *id);
+                    let r = slot.inputs.get(1).and_then(|id| *id);
+                    let vol = if slot.params.len() > 0 { slot.params[0].load().clamp(0.0, 1.0) } else { 0.8 };
+                    let act = if slot.params.len() > 1 { slot.params[1].load() > 0.5 } else { true };
+                    let pan = if slot.params.len() > 2 { slot.params[2].load().clamp(-1.0, 1.0) } else { 0.0 };
+                    // Channel offset: round to even number (channel pairs)
+                    let offset = if slot.params.len() > 3 {
+                        let raw = slot.params[3].load() as usize;
+                        raw & !1  // round down to even
+                    } else { 0 };
+                    (l, r, vol, act, pan, offset)
+                } else {
+                    continue;
+                }
+            };
 
-                // Check if R channel source is connected (port 1)
-                let r_source = slot.inputs.get(1).and_then(|id| *id);
-                let r_buf = r_source.and_then(|rid| self.slots.get(&rid).map(|s| &s.output_buffer));
+            if !active { continue; }
+            // Skip if channel offset is beyond device capability
+            if ch_offset >= channels { continue; }
 
-                for frame in 0..num_frames {
-                    let l_sample = mono_buf[frame] * master_vol;
-                    if channels >= 2 {
-                        if let Some(r) = r_buf {
-                            // True stereo: L from port 0 (processed), R from port 1 source (raw)
-                            // Apply speaker volume to R channel too
-                            let vol = if slot.params.len() > 0 { slot.params[0].load().clamp(0.0, 1.0) } else { 1.0 };
-                            let r_sample = r[frame] * vol * master_vol;
-                            data[frame * channels] += l_sample;
-                            data[frame * channels + 1] += r_sample;
-                        } else {
-                            // Mono: duplicate L to both channels
-                            data[frame * channels] += l_sample;
-                            data[frame * channels + 1] += l_sample;
-                        }
-                        // Fill any extra channels with L
-                        for ch in 2..channels {
-                            data[frame * channels + ch] += l_sample;
-                        }
-                    } else {
-                        data[frame] += l_sample;
-                    }
+            // Get L and R source buffers (mono)
+            let l_buf = l_source.and_then(|id| self.slots.get(&id).map(|s| &s.output_buffer));
+            let r_buf = r_source.and_then(|id| self.slots.get(&id).map(|s| &s.output_buffer));
+
+            // Equal-power pan coefficients
+            let angle = (pan + 1.0) * std::f32::consts::FRAC_PI_4; // 0 to PI/2
+            let pan_l = angle.cos();
+            let pan_r = angle.sin();
+
+            for frame in 0..num_frames {
+                let l_in = l_buf.map(|b| b[frame]).unwrap_or(0.0);
+                let r_in = r_buf.map(|b| b[frame]).unwrap_or(0.0);
+
+                let (l_out, r_out) = if l_buf.is_some() && r_buf.is_some() {
+                    // True stereo: pan acts as balance
+                    (l_in * pan_l * volume, r_in * pan_r * volume)
+                } else if l_buf.is_some() {
+                    // Mono from L: pan positions in stereo field
+                    (l_in * pan_l * volume, l_in * pan_r * volume)
+                } else {
+                    // Only R (or nothing): R on right channel
+                    (0.0, r_in * volume)
+                };
+
+                let base = frame * channels + ch_offset;
+                if ch_offset + 1 < channels {
+                    // Stereo pair at channel offset
+                    data[base] += l_out * master_vol;
+                    data[base + 1] += r_out * master_vol;
+                } else if ch_offset < channels {
+                    // Only one channel available at this offset
+                    data[base] += (l_out + r_out) * 0.5 * master_vol;
                 }
             }
         }

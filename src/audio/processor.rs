@@ -75,4 +75,9 @@ pub trait AudioProcessor: Send {
     /// Called by the engine after the processor is added. Default: no-op.
     /// Used by ClapProcessor to write back GUI param changes.
     fn set_shared_params(&mut self, _params: std::sync::Arc<Vec<super::params::AtomicF32>>) {}
+
+    /// Number of output channels this processor produces.
+    /// Most processors produce 1 (mono). Speaker produces 2 (interleaved stereo).
+    /// The engine allocates `output_channels() * max_block_size` for the output buffer.
+    fn output_channels(&self) -> usize { 1 }
 }

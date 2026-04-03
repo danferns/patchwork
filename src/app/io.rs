@@ -401,6 +401,23 @@ impl super::PatchworkApp {
                 return;
             }
         }
+        // No Theme node found — apply default Patchwork theme so the app
+        // looks correct from the first frame without requiring a Theme node.
+        // Each session gets a random accent hue for visual variety.
+        let accent = self.session_accent;
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new("theme_accent"), accent));
+        nodes::theme::apply(
+            ctx,
+            true,                   // dark_mode
+            accent,                 // accent
+            14.0,                   // font_size
+            [20, 20, 20],           // bg_color
+            [220, 220, 220],        // text_color
+            [24, 24, 24],           // window_bg
+            240,                    // window_alpha
+            16.0,                   // rounding
+            4.0,                    // spacing
+        );
     }
 
     #[allow(dead_code)]

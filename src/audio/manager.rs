@@ -6,6 +6,18 @@ use crate::graph::NodeId;
 use super::buffers::{LiveInputBuffer, FilePlayerBuffer};
 use super::decode::{decode_file_thread, probe_file_duration};
 
+// ── Secondary Output (for per-speaker device routing) ────────────────────────
+
+/// A secondary CPAL output stream for routing speakers to non-primary devices.
+#[allow(dead_code)]
+struct SecondaryOutput {
+    stream: cpal::Stream,
+    /// Shared buffer: UI/engine writes interleaved stereo, CPAL callback reads.
+    buffer: Arc<std::sync::Mutex<Vec<f32>>>,
+    channels: usize,
+    sample_rate: f32,
+}
+
 // ── Audio Manager ────────────────────────────────────────────────────────────
 
 pub struct AudioManager {
@@ -48,6 +60,14 @@ pub struct AudioManager {
     pub analyzer_results: HashMap<NodeId, Arc<std::sync::Mutex<super::analysis::AudioAnalysis>>>,
     /// CLAP plugin GUI handles — stored here so we can close all GUIs before stopping DSP.
     pub clap_gui_handles: HashMap<NodeId, Arc<std::sync::Mutex<super::clap_host::ClapGuiHandle>>>,
+    /// Number of output channels on the current primary device.
+    pub output_channel_count: usize,
+    /// Cached channel counts per device name (for Speaker UI dropdowns).
+    pub device_channel_counts: HashMap<String, usize>,
+    /// Secondary output streams for speakers targeting non-primary devices.
+    /// Key = device name. The stream reads from a shared buffer filled by the engine.
+    #[allow(dead_code)]
+    secondary_streams: HashMap<String, SecondaryOutput>,
 }
 
 impl AudioManager {
@@ -73,6 +93,9 @@ impl AudioManager {
             engine_sample_rate: 44100.0, engine_needs_rebuild: false,
             analyzer_results: HashMap::new(),
             clap_gui_handles: HashMap::new(),
+            output_channel_count: 2,
+            device_channel_counts: HashMap::new(),
+            secondary_streams: HashMap::new(),
         }
     }
 
@@ -99,16 +122,29 @@ impl AudioManager {
             engine_sample_rate: 44100.0, engine_needs_rebuild: false,
             analyzer_results: HashMap::new(),
             clap_gui_handles: HashMap::new(),
+            output_channel_count: 2,
+            device_channel_counts: HashMap::new(),
+            secondary_streams: HashMap::new(),
         }
     }
 
-    /// Refresh cached device lists (call every ~60 frames, not every frame)
+    /// Refresh cached device lists and channel counts (call every ~60 frames, not every frame)
     #[allow(dead_code)]
     pub fn refresh_devices(&mut self) {
         let host = cpal::default_host();
-        self.cached_output_devices = host.output_devices()
-            .map(|devs| devs.filter_map(|d| d.name().ok()).collect())
-            .unwrap_or_default();
+        self.device_channel_counts.clear();
+        if let Ok(devs) = host.output_devices() {
+            let mut names = Vec::new();
+            for d in devs {
+                if let Ok(name) = d.name() {
+                    if let Ok(cfg) = d.default_output_config() {
+                        self.device_channel_counts.insert(name.clone(), cfg.channels() as usize);
+                    }
+                    names.push(name);
+                }
+            }
+            self.cached_output_devices = names;
+        }
         self.cached_input_devices = host.input_devices()
             .map(|devs| devs.filter_map(|d| d.name().ok()).collect())
             .unwrap_or_default();
@@ -144,6 +180,7 @@ impl AudioManager {
         let sample_rate = config.sample_rate().0 as f32;
         let channels = config.channels() as usize;
         self.engine_sample_rate = sample_rate;
+        self.output_channel_count = channels;
 
 
         // Create command channel for the new engine.
@@ -188,7 +225,13 @@ impl AudioManager {
     /// Stop audio output
     pub fn stop_output(&mut self) {
         self.close_all_guis(); // Close plugin GUIs before dropping the engine
-        self.stream = None;
+        // Pause the stream before dropping — CPAL's drop can have a slight delay,
+        // during which the audio callback may fire one more time.
+        if let Some(stream) = self.stream.take() {
+            use cpal::traits::StreamTrait;
+            let _ = stream.pause();
+            drop(stream);
+        }
         crate::system_log::log("DSP stopped");
         self.engine_tx = None;
         self.node_params.clear();
@@ -276,7 +319,7 @@ impl AudioManager {
                 Some((Box::new(p), 5))
             }
             NodeType::Speaker { volume, .. } => {
-                Some((Box::new(speaker::SpeakerProcessor::new(*volume)), 2))
+                Some((Box::new(speaker::SpeakerProcessor::new(*volume)), 4))
             }
             NodeType::AudioDelay { time_ms, feedback } => {
                 Some((Box::new(effects::DelayProcessor::new(*time_ms, *feedback)), 2))
@@ -300,8 +343,9 @@ impl AudioManager {
                 let bands = crate::audio::curve_to_eq_bands(points, self.engine_sample_rate);
                 Some((Box::new(effects::EqProcessor::new(bands, 0)), 0))
             }
-            NodeType::AudioMixer { channel_count, .. } => {
-                Some((Box::new(mixer::MixerProcessor::new()), *channel_count))
+            NodeType::AudioMixer { .. } => {
+                // Allocate max 8 param slots so adding channels doesn't require re-registration
+                Some((Box::new(mixer::MixerProcessor::new()), 8))
             }
             NodeType::AudioAnalyzer => {
                 let (proc, analysis) = analyzer::AnalyzerProcessor::new();

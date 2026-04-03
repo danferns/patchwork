@@ -134,6 +134,11 @@ mod menus;
 
 use undo::UndoHistory;
 
+/// Identity of a connection — survives array reindexing, node deletion, undo/redo.
+/// Using (from_node, from_port, to_node, to_port) instead of a Vec index
+/// prevents stale-index bugs where the index points to the wrong wire.
+type ConnectionId = (NodeId, usize, NodeId, usize);
+
 pub struct PatchworkApp {
     graph: Graph,
     port_positions: HashMap<(NodeId, usize, bool), egui::Pos2>,
@@ -151,8 +156,8 @@ pub struct PatchworkApp {
     osc: OscManager,
     // Selection & clipboard
     selected_nodes: std::collections::HashSet<NodeId>,
-    selected_connection: Option<usize>,
-    wire_menu_conn: Option<usize>,      // connection index for wire context menu
+    selected_connection: Option<ConnectionId>,
+    wire_menu_conn: Option<ConnectionId>,  // connection identity for wire context menu
     wire_menu_pos: egui::Pos2,
     // Box selection
     box_select_start: Option<egui::Pos2>,
@@ -198,6 +203,9 @@ pub struct PatchworkApp {
     click_wiring: bool,
     // Monotonic clock reference for wall-clock timing
     app_start_instant: std::time::Instant,
+    /// Random accent color for sessions without a Theme node.
+    /// Generated once on app start and on "New File". Gives each fresh project a unique hue.
+    session_accent: [u8; 3],
 }
 
 /// Results from background device enumeration thread
@@ -207,6 +215,8 @@ struct DeviceRefreshResult {
     serial: Vec<String>,
     audio_output: Vec<String>,
     audio_input: Vec<String>,
+    /// Channel count per output device name.
+    audio_output_channels: std::collections::HashMap<String, usize>,
 }
 
 impl PatchworkApp {
@@ -269,16 +279,26 @@ impl PatchworkApp {
                             .unwrap_or_default();
                         let serial = serialport::available_ports()
                             .unwrap_or_default().into_iter().map(|p| p.port_name).collect();
-                        let (audio_output, audio_input) = {
+                        let (audio_output, audio_input, audio_output_channels) = {
                             use cpal::traits::{HostTrait, DeviceTrait};
                             let host = cpal::default_host();
-                            let out = host.output_devices().map(|devs|
-                                devs.filter_map(|d| d.name().ok()).collect()).unwrap_or_default();
+                            let mut out_names = Vec::new();
+                            let mut out_channels = std::collections::HashMap::new();
+                            if let Ok(devs) = host.output_devices() {
+                                for d in devs {
+                                    if let Ok(name) = d.name() {
+                                        if let Ok(cfg) = d.default_output_config() {
+                                            out_channels.insert(name.clone(), cfg.channels() as usize);
+                                        }
+                                        out_names.push(name);
+                                    }
+                                }
+                            }
                             let inp = host.input_devices().map(|devs|
                                 devs.filter_map(|d| d.name().ok()).collect()).unwrap_or_default();
-                            (out, inp)
+                            (out_names, inp, out_channels)
                         };
-                        let _ = tx.send(DeviceRefreshResult { midi_in, midi_out, serial, audio_output, audio_input });
+                        let _ = tx.send(DeviceRefreshResult { midi_in, midi_out, serial, audio_output, audio_input, audio_output_channels });
                         std::thread::sleep(std::time::Duration::from_secs(5));
                     }
                 });
@@ -289,6 +309,7 @@ impl PatchworkApp {
             drag_undo_pushed: false,
             property_undo_pushed: false,
             click_wiring: false,
+            session_accent: crate::nodes::theme::random_accent(),
         };
         // Always start MCP server thread — auto-detects if stdin is a pipe (Claude Desktop)
         // vs terminal (normal launch). If stdin is a terminal, the thread exits immediately.
@@ -404,6 +425,7 @@ impl PatchworkApp {
         // Auto-register new audio nodes that don't have processors yet
         // (e.g., nodes added via palette after engine was started)
         if self.audio.engine_tx.is_some() {
+            let mut new_nodes: Vec<NodeId> = Vec::new();
             for (&nid, _node) in &self.graph.nodes {
                 if self.audio.has_processor(nid) { continue; }
                 // Rebuild just this node
@@ -412,6 +434,7 @@ impl PatchworkApp {
                     let proc_and_count = self.audio.create_processor_for_node(&node.node_type, nid);
                     if let Some((processor, param_count)) = proc_and_count {
                         self.audio.add_processor(nid, processor, param_count);
+                        new_nodes.push(nid);
                         // Set speaker state
                         if let NodeType::Speaker { active, .. } = &node.node_type {
                             self.audio.send_command(crate::audio::engine::AudioCommand::SetSpeaker {
@@ -421,9 +444,39 @@ impl PatchworkApp {
                     }
                 }
             }
+
+            // Re-sync connections involving newly registered processors.
+            // Without this, nodes added mid-session have processors but no wired
+            // connections — the connection was silently dropped because has_processor()
+            // returned false when the wire was created.
+            if !new_nodes.is_empty() {
+                for conn in &self.graph.connections {
+                    let involves_new = new_nodes.contains(&conn.from_node) || new_nodes.contains(&conn.to_node);
+                    if !involves_new { continue; }
+                    let from_audio = self.audio.node_params.contains_key(&conn.from_node);
+                    let to_audio = self.audio.node_params.contains_key(&conn.to_node);
+                    if !from_audio || !to_audio { continue; }
+                    // Skip mixer gain ports
+                    let is_mixer_gain_port = matches!(
+                        self.graph.nodes.get(&conn.to_node).map(|n| &n.node_type),
+                        Some(NodeType::AudioMixer { .. })
+                    ) && conn.to_port % 2 != 0;
+                    if is_mixer_gain_port { continue; }
+                    let engine_port = self.mixer_engine_port(conn.to_node, conn.to_port);
+                    self.audio.connect_audio(conn.from_node, conn.to_node, engine_port);
+                }
+            }
         }
 
         self.graph.audio_topology_dirty = false;
+    }
+
+    /// Find a connection's current index from its identity. Returns None if
+    /// the connection no longer exists (deleted, undo, etc.).
+    fn find_connection_index(&self, id: &ConnectionId) -> Option<usize> {
+        self.graph.connections.iter().position(|c| {
+            c.from_node == id.0 && c.from_port == id.1 && c.to_node == id.2 && c.to_port == id.3
+        })
     }
 
     /// Map a graph port index to an engine port index.
@@ -988,8 +1041,9 @@ impl PatchworkApp {
         // nodes can be resolved using the current frame's port values.
 
         // Push undo snapshot if any graph mutations are pending
+        // (palette_spawns push their own per-node undo snapshots below)
         if !nodes_to_delete.is_empty() || !pending_disconnects.is_empty()
-            || !pending_connections.is_empty() || !palette_spawns.is_empty() {
+            || !pending_connections.is_empty() {
             self.push_undo();
         }
         for id in nodes_to_delete {
@@ -1011,6 +1065,9 @@ impl PatchworkApp {
             self.graph.remove_connections_to_port(*nid, *port);
         }
         for &(fn_, fp, tn, tp) in &pending_connections {
+            let from_name = self.graph.nodes.get(&fn_).map(|n| n.node_type.title()).unwrap_or("?");
+            let to_name = self.graph.nodes.get(&tn).map(|n| n.node_type.title()).unwrap_or("?");
+            crate::system_log::log(format!("Connected {} (id:{}) → {} (id:{})", from_name, fn_, to_name, tn));
             self.graph.add_connection(fn_, fp, tn, tp);
             // Only send engine connect/disconnect for audio ports
             // For mixer nodes, skip gain control ports (odd: 1, 3, 5)
@@ -1026,7 +1083,9 @@ impl PatchworkApp {
             }
         }
         // Spawn nodes from Palette clicks (place at center of the current viewport)
+        // Each node addition gets its own undo snapshot so Ctrl+Z undoes one at a time.
         for (_palette_pos, nt) in palette_spawns {
+            self.push_undo();
             let screen_center = ctx.screen_rect().center();
             // egui logical coords → canvas: canvas_pos = egui_pos - offset/zoom
             let off_e = self.canvas_offset / self.canvas_zoom;
@@ -1153,6 +1212,7 @@ impl eframe::App for PatchworkApp {
             self.midi.set_port_lists(devices.midi_in, devices.midi_out);
             self.serial.set_port_list(devices.serial);
             self.audio.set_device_lists(devices.audio_output, devices.audio_input);
+            self.audio.device_channel_counts = devices.audio_output_channels;
         }
 
         let node_count = self.graph.nodes.len();

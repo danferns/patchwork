@@ -216,11 +216,20 @@ fn build_input_tensor(
         Ok(t) => t,
         Err(e) => {
             crate::system_log::error(format!("ML tensor creation failed: {}", e));
-            // Return a minimal 1x1 tensor as fallback
+            // Return a minimal 1x1 tensor as fallback — shape [1,3,1,1] with 3 zeros
+            // cannot fail since shape and data length match exactly.
             let fallback_shape = vec![1usize, 3, 1, 1];
             let fallback_data = vec![0.0f32; 3].into_boxed_slice();
-            let t = ort::value::Tensor::from_array((fallback_shape, fallback_data)).expect("fallback tensor");
-            return (t, boxed);
+            match ort::value::Tensor::from_array((fallback_shape, fallback_data)) {
+                Ok(t) => return (t, boxed),
+                Err(e2) => {
+                    // ORT runtime is fundamentally broken — create the simplest possible tensor
+                    crate::system_log::error(format!("ML fallback tensor also failed: {}", e2));
+                    let t = ort::value::Tensor::from_array(([1usize, 1, 1, 1], vec![0.0f32].into_boxed_slice()))
+                        .expect("1-element tensor must succeed");
+                    return (t, boxed);
+                }
+            }
         }
     };
     (tensor, boxed)

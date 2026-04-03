@@ -159,6 +159,7 @@ impl super::PatchworkApp {
             self.project_path = None;
             self.pinned_nodes.clear();
             self.undo_history.clear();
+            self.session_accent = crate::nodes::theme::random_accent();
             self.spawn_default_nodes();
         }
         if load_project { self.load_project(); }

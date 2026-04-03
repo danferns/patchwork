@@ -283,6 +283,10 @@ impl super::PatchworkApp {
                     }
                     if let Some((_, tex)) = cached.as_ref() {
                         // Draw image covering the full canvas, maintaining aspect ratio
+                        // Guard against zero dimensions (corrupted image or degenerate rect)
+                        if img.width == 0 || img.height == 0 || rect.width() < 1.0 || rect.height() < 1.0 {
+                            return;
+                        }
                         let img_aspect = img.width as f32 / img.height as f32;
                         let rect_aspect = rect.width() / rect.height();
                         let draw_rect = if img_aspect > rect_aspect {
@@ -322,7 +326,7 @@ impl super::PatchworkApp {
             // Grid style + color from Theme
             let (gc, gs) = self.graph.nodes.values()
                 .find_map(|n| if let NodeType::Theme { grid_color, grid_style, .. } = &n.node_type { Some((*grid_color, *grid_style)) } else { None })
-                .unwrap_or(([12, 12, 12], 2)); // default: dotted
+                .unwrap_or(([28, 28, 28], 2)); // default: dotted, matches Theme node defaults
             let col = egui::Color32::from_rgba_premultiplied(gc[0], gc[1], gc[2], 35);
             let off = self.canvas_offset / zoom;
 
@@ -468,7 +472,8 @@ impl super::PatchworkApp {
             let from = self.port_positions.get(&(conn.from_node, conn.from_port, false));
             let to = self.port_positions.get(&(conn.to_node, conn.to_port, true));
             if let (Some(&a), Some(&b)) = (from, to) {
-                let is_selected = self.selected_connection == Some(idx);
+                let conn_id = (conn.from_node, conn.from_port, conn.to_node, conn.to_port);
+                let is_selected = self.selected_connection.as_ref() == Some(&conn_id);
                 let is_hovered = pointer.map(|p| point_near_bezier(p, a, b, 10.0)).unwrap_or(false);
                 if is_hovered { hovered_conn = Some(idx); }
 
@@ -556,11 +561,14 @@ impl super::PatchworkApp {
                     self.port_positions.values().any(|&pp| pp.distance(p) < PORT_INTERACT)
                 }).unwrap_or(false);
                 if !near_port {
-                    self.selected_connection = Some(idx);
-                    self.selected_nodes.clear();
-                    // Open wire context menu
-                    self.wire_menu_conn = Some(idx);
-                    self.wire_menu_pos = pointer.unwrap_or(egui::Pos2::ZERO);
+                    if let Some(conn) = self.graph.connections.get(idx) {
+                        let cid = (conn.from_node, conn.from_port, conn.to_node, conn.to_port);
+                        self.selected_connection = Some(cid);
+                        self.selected_nodes.clear();
+                        // Open wire context menu
+                        self.wire_menu_conn = Some(cid);
+                        self.wire_menu_pos = pointer.unwrap_or(egui::Pos2::ZERO);
+                    }
                 }
             }
         }
@@ -571,8 +579,9 @@ impl super::PatchworkApp {
         }
 
         // ── Wire context menu (label + delete) ───────────────────────────
-        if let Some(conn_idx) = self.wire_menu_conn {
-            if conn_idx < self.graph.connections.len() {
+        if let Some(conn_id) = self.wire_menu_conn {
+            // Re-resolve identity to current index each frame — survives reindexing
+            if let Some(conn_idx) = self.find_connection_index(&conn_id) {
                 let orig_style = self.apply_inverse_zoom_style(ctx);
                 let mut keep_open = true;
                 let pos = self.wire_menu_pos;
@@ -624,6 +633,7 @@ impl super::PatchworkApp {
                 }
                 ctx.set_style(orig_style);
             } else {
+                // Connection no longer exists (deleted, undo, etc.) — close menu
                 self.wire_menu_conn = None;
             }
         }

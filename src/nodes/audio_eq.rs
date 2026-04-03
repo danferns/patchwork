@@ -160,7 +160,9 @@ pub fn render(
                 }
             }
             if min_dist < 20.0 {
-                ui.ctx().data_mut(|d| d.insert_temp(drag_id, closest.unwrap()));
+                if let Some(idx) = closest {
+                    ui.ctx().data_mut(|d| d.insert_temp(drag_id, idx));
+                }
             } else {
                 // Add new point at click position
                 let nx = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);

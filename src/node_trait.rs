@@ -85,8 +85,40 @@ pub struct RenderContext<'a> {
 }
 
 /// Registry for deserializing trait-based nodes from saved projects.
+/// Populated on first access with all Dynamic node type factories.
 pub static NODE_REGISTRY: std::sync::LazyLock<std::sync::Mutex<NodeRegistryInner>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(NodeRegistryInner::new()));
+    std::sync::LazyLock::new(|| {
+        let mut r = NodeRegistryInner::new();
+        // Register all Dynamic node types so clone/deserialize can reconstruct them
+        crate::nodes::add_node::register(&mut r);
+        crate::nodes::multiply_node::register(&mut r);
+        crate::nodes::time_node::register(&mut r);
+        crate::nodes::noise_node::register(&mut r);
+        crate::nodes::display_node::register(&mut r);
+        crate::nodes::color_node::register(&mut r);
+        crate::nodes::comment_node::register(&mut r);
+        crate::nodes::timer_node::register(&mut r);
+        crate::nodes::gate_node::register(&mut r);
+        crate::nodes::sample_hold_node::register(&mut r);
+        crate::nodes::key_input_node::register(&mut r);
+        crate::nodes::mouse_tracker_node::register(&mut r);
+        crate::nodes::map_range_node::register(&mut r);
+        crate::nodes::string_format_node::register(&mut r);
+        crate::nodes::json_extract_node::register(&mut r);
+        crate::nodes::text_editor_node::register(&mut r);
+        crate::nodes::draw_node::register(&mut r);
+        crate::nodes::visual_output_node::register(&mut r);
+        crate::nodes::file_node::register(&mut r);
+        crate::nodes::file_menu_node::register(&mut r);
+        crate::nodes::folder_browser_node::register(&mut r);
+        crate::nodes::html_viewer_node::register(&mut r);
+        crate::nodes::console_node::register(&mut r);
+        crate::nodes::monitor_node::register(&mut r);
+        crate::nodes::zoom_control_node::register(&mut r);
+        crate::nodes::midi_note_node::register(&mut r);
+        crate::nodes::crop_node::register(&mut r);
+        std::sync::Mutex::new(r)
+    });
 
 pub struct NodeRegistryInner {
     factories: HashMap<String, Box<dyn Fn(&Value) -> Box<dyn NodeBehavior> + Send + Sync>>,

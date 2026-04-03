@@ -530,9 +530,15 @@ pub fn random_accent() -> [u8; 3] { random_accent_color() }
 
 fn random_accent_color() -> [u8; 3] {
     use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    // Counter ensures consecutive calls in the same process get different hues,
+    // even if nanosecond timestamps are close. Golden ratio spacing (137.5°)
+    // maximizes perceptual distance between sequential hues.
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
     let seed = SystemTime::now().duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos()).unwrap_or(0);
-    let hue = (seed % 360) as f32; // 0–359 degrees
+    let hue = ((seed + count as u128 * 137) % 360) as f32; // golden-angle spacing
     let s = 0.7_f32;  // saturation
     let l = 0.65_f32; // lightness
     // HSL to RGB
