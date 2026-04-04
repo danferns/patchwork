@@ -1,5 +1,18 @@
 use super::*;
 
+/// Check if two port kinds are compatible for the wire+Tab filtered menu.
+fn port_kinds_compatible(a: PortKind, b: PortKind) -> bool {
+    use PortKind::*;
+    if a == b { return true; }
+    // Number-like types are interchangeable
+    let number_like = |k: PortKind| matches!(k, Number | Normalized | Trigger | Gate | Color);
+    if number_like(a) && number_like(b) { return true; }
+    // Generic matches number-like and text, but NOT image or audio
+    if a == Generic { return number_like(b) || b == Text; }
+    if b == Generic { return number_like(a) || a == Text; }
+    false
+}
+
 impl super::PatchworkApp {
     /// Apply inverse-zoom style so menus appear at native screen size
     pub(super) fn apply_inverse_zoom_style(&self, ctx: &egui::Context) -> std::sync::Arc<egui::Style> {
@@ -57,20 +70,22 @@ impl super::PatchworkApp {
 
                 let query = self.node_menu_search.to_lowercase();
                 let catalog = nodes::catalog();
+                let wire_ctx = self.wire_menu_context;
+
+                // Show filter hint if opened via Tab
+                if wire_ctx.is_some() {
+                    ui.label(egui::RichText::new("⚡ Compatible nodes").small().color(accent));
+                    ui.separator();
+                }
 
                 let mut last_cat = "";
                 let mut any_shown = false;
 
-                // Place new node at the original double-click position.
-                // pointer_latest_pos() returns egui logical coords.
-                // Rendering: egui_pos = canvas_pos + offset/zoom
-                // Inverse:   canvas_pos = egui_pos - offset/zoom
                 let off_e = self.canvas_offset / self.canvas_zoom;
                 let spawn_x = self.node_menu_pos.x - off_e.x;
                 let mut spawn_y_base = self.node_menu_pos.y - off_e.y;
 
                 for entry in &catalog {
-                    // Hide system nodes (auto-created, not user-addable)
                     if entry.category == "System" { continue; }
 
                     if !query.is_empty()
@@ -78,6 +93,16 @@ impl super::PatchworkApp {
                         && !entry.category.to_lowercase().contains(&query)
                     {
                         continue;
+                    }
+
+                    // Filter by port compatibility if opened via Tab+wire
+                    if let Some((_src_nid, _src_port, src_is_output, src_kind)) = wire_ctx {
+                        let candidate = (entry.factory)();
+                        // If dragging from output → check candidate's inputs for compatible kind
+                        // If dragging from input → check candidate's outputs
+                        let target_ports = if src_is_output { candidate.inputs() } else { candidate.outputs() };
+                        let has_compatible = target_ports.iter().any(|p| port_kinds_compatible(src_kind, p.kind));
+                        if !has_compatible { continue; }
                     }
 
                     // Category header
@@ -91,7 +116,6 @@ impl super::PatchworkApp {
                         last_cat = entry.category;
                     }
 
-                    // Each node as a small styled button
                     let btn = ui.add_sized(
                         [ui.available_width(), 24.0],
                         egui::Button::new(egui::RichText::new(entry.label).size(13.0))
@@ -100,14 +124,34 @@ impl super::PatchworkApp {
 
                     if btn.clicked() {
                         self.push_undo();
-                        self.graph.add_node((entry.factory)(), [spawn_x, spawn_y_base]);
+                        let nt = (entry.factory)();
+
+                        // Find compatible port before consuming nt
+                        let target_port_idx = if let Some((_, _, src_is_output, src_kind)) = wire_ctx {
+                            let target_ports = if src_is_output { nt.inputs() } else { nt.outputs() };
+                            target_ports.iter().position(|p| port_kinds_compatible(src_kind, p.kind))
+                        } else { None };
+
+                        let new_id = self.graph.add_node(nt, [spawn_x, spawn_y_base]);
+
+                        // Auto-connect if opened via Tab+wire
+                        if let Some((src_nid, src_port, src_is_output, _)) = wire_ctx {
+                            if let Some(tp) = target_port_idx {
+                                if src_is_output {
+                                    self.graph.add_connection(src_nid, src_port, new_id, tp);
+                                } else {
+                                    self.graph.add_connection(new_id, tp, src_nid, src_port);
+                                }
+                            }
+                            self.dragging_from = None;
+                            self.wire_menu_context = None;
+                        }
+
                         spawn_y_base += 40.0;
                         keep_open = false;
                     }
 
-                    // Tooltip with category
                     btn.on_hover_text(format!("Add {} node", entry.label));
-
                     any_shown = true;
                 }
 
@@ -137,6 +181,7 @@ impl super::PatchworkApp {
         if !keep_open {
             self.show_node_menu = false;
             self.node_menu_search.clear();
+            self.wire_menu_context = None;
         }
         ctx.set_style(orig_style);
     }

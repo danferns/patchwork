@@ -2,7 +2,7 @@
 name = "patchwork"
 version = "0.0.3"
 edition = "2024"
-license = "MIT"
+license = "GPL-3.0"
 authors = ["Allwin Williams / OpenBlocks"]
 description = "A node-based visual programming environment in Rust"
 

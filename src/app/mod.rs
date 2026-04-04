@@ -147,6 +147,9 @@ pub struct PatchworkApp {
     show_node_menu: bool,
     node_menu_pos: egui::Pos2,
     node_menu_search: String,
+    /// When set, the node menu was opened via Tab while dragging a wire.
+    /// Contains (source_node, source_port, is_output, port_kind) for filtering + auto-connect.
+    wire_menu_context: Option<(NodeId, usize, bool, PortKind)>,
     project_path: Option<String>,
     midi: MidiManager,
     serial: SerialManager,
@@ -236,6 +239,7 @@ impl PatchworkApp {
             show_node_menu: false,
             node_menu_pos: egui::Pos2::ZERO,
             node_menu_search: String::new(),
+            wire_menu_context: None,
             project_path: None,
             midi: MidiManager::new(),
             serial: SerialManager::new(),
@@ -1346,6 +1350,35 @@ impl eframe::App for PatchworkApp {
             }
         }
 
+        // Make wgpu render state available to image processing nodes via egui temp data
+        if let Some(rs) = &self.wgpu_render_state {
+            ctx.data_mut(|d| d.insert_temp(egui::Id::new("wgpu_render_state"), rs.clone()));
+        }
+
+        // Fast image content hash — samples ~32 pixels spread across the image.
+        // Detects real content changes without hashing the full pixel buffer.
+        let img_content_hash = |img: &ImageData| -> u64 {
+            let mut h: u64 = (img.width as u64).wrapping_mul(31).wrapping_add(img.height as u64);
+            let len = img.pixels.len();
+            if len > 0 {
+                let step = (len / 128).max(1);
+                for i in (0..len).step_by(step).take(32) {
+                    h = h.wrapping_mul(31).wrapping_add(img.pixels[i] as u64);
+                }
+            }
+            h
+        };
+
+        // Inject WGSL Viewer Image output BEFORE image evaluation loop
+        // so downstream image nodes (Effects, Style, Blend) can see it.
+        for (&id, node) in &self.graph.nodes {
+            if matches!(node.node_type, NodeType::WgslViewer { .. }) {
+                if let Some(img) = ctx.data_mut(|d| d.get_temp::<std::sync::Arc<ImageData>>(egui::Id::new(("wgsl_image_output", id)))) {
+                    values.insert((id, 0), PortValue::Image(img));
+                }
+            }
+        }
+
         // Evaluate image nodes (with caching — only reprocess when inputs change)
         // Run 2 passes so downstream nodes (e.g., Image receiver) see upstream results (e.g., Effects output)
         for _img_pass in 0..2 {
@@ -1355,14 +1388,14 @@ impl eframe::App for PatchworkApp {
 
                 // Trait-based image nodes (Transform, ImageStyle, ColorChannel, Crop, etc.)
                 // need re-evaluation here because image sources weren't populated during graph.evaluate().
-                // Cached: only reprocess when inputs (image pointer + param state) change.
+                // Cached: only reprocess when inputs (image content + param state) change.
                 let is_dynamic = matches!(self.graph.nodes.get(&id).map(|n| &n.node_type), Some(NodeType::Dynamic { .. }));
                 if is_dynamic && inputs.iter().any(|v| matches!(v, PortValue::Image(_))) {
-                    // Build cache key from image pointer(s) + node state hash
+                    // Build cache key from image content + params + node state
                     let mut cache_key: u64 = 0;
                     for inp in &inputs {
                         match inp {
-                            PortValue::Image(img) => cache_key ^= std::sync::Arc::as_ptr(img) as u64,
+                            PortValue::Image(img) => cache_key = cache_key.wrapping_mul(31).wrapping_add(img_content_hash(img)),
                             PortValue::Float(f) => cache_key = cache_key.wrapping_mul(31).wrapping_add(f.to_bits() as u64),
                             _ => {}
                         }
@@ -1387,10 +1420,39 @@ impl eframe::App for PatchworkApp {
                             continue;
                         }
                     }
-                    // Cache miss — reprocess
+                    // Cache miss — reprocess (GPU path for ImageStyleNode, CPU for others)
                     if let Some(mut node_mut) = self.graph.nodes.remove(&id) {
                         if let NodeType::Dynamic { ref mut inner } = node_mut.node_type {
-                            let results = inner.node.evaluate(&inputs);
+                            let tag = inner.node.type_tag().to_string();
+                            let rs = self.wgpu_render_state.clone();
+
+                            // Try GPU path for supported nodes
+                            let gpu_results: Option<Vec<(usize, PortValue)>> = match tag.as_str() {
+                                "image_style" => {
+                                    if let (Some(PortValue::Image(img)), Some(rs)) = (inputs.first(), &rs) {
+                                        let state = inner.node.save_state();
+                                        serde_json::from_value::<nodes::image_style_node::ImageStyleNode>(state).ok()
+                                            .and_then(|sn| sn.process_gpu(img, id, rs))
+                                            .map(|img| vec![(0, PortValue::Image(img))])
+                                    } else { None }
+                                }
+                                "color_channel" => {
+                                    if let (Some(PortValue::Image(img)), Some(rs)) = (inputs.first(), &rs) {
+                                        let state = inner.node.save_state();
+                                        serde_json::from_value::<nodes::color_channel_node::ColorChannelNode>(state).ok()
+                                            .and_then(|cn| cn.process_gpu(img, id, rs))
+                                            .map(|(c, r, g, b)| vec![
+                                                (0, PortValue::Image(c)),
+                                                (1, PortValue::Image(r)),
+                                                (2, PortValue::Image(g)),
+                                                (3, PortValue::Image(b)),
+                                            ])
+                                    } else { None }
+                                }
+                                _ => None,
+                            };
+
+                            let results = gpu_results.unwrap_or_else(|| inner.node.evaluate(&inputs));
                             for &(port, ref val) in &results {
                                 values.insert((id, port), val.clone());
                             }
@@ -1415,12 +1477,11 @@ impl eframe::App for PatchworkApp {
                     }
                     NodeType::ImageEffects { brightness, contrast, saturation, hue, exposure, gamma } => {
                         if let Some(PortValue::Image(img)) = inputs.first() {
-                            // Cache key: param hash + image pointer
+                            // Cache key: param hash + image content hash
                             let param_hash = ((*brightness * 1000.0) as u64) ^ ((*contrast * 1000.0) as u64) << 8
                                 ^ ((*saturation * 1000.0) as u64) << 16 ^ ((*hue * 10.0) as u64) << 24
                                 ^ ((*exposure * 1000.0) as u64) << 32 ^ ((*gamma * 1000.0) as u64) << 40;
-                            let img_ptr = std::sync::Arc::as_ptr(img) as u64;
-                            let cache_key = param_hash ^ img_ptr;
+                            let cache_key = param_hash ^ img_content_hash(img);
                             let cache_id = egui::Id::new(("img_fx_cache", id));
                             let cached: Option<(u64, std::sync::Arc<ImageData>)> = ctx.data_mut(|d| d.get_temp(cache_id));
                             if let Some((prev_key, prev_result)) = cached {
@@ -1429,7 +1490,13 @@ impl eframe::App for PatchworkApp {
                                     continue;
                                 }
                             }
-                            let result = nodes::image_effects::process(img, *brightness, *contrast, *saturation, *hue, *exposure, *gamma);
+                            // GPU path (fast), falling back to CPU
+                            let result = if let Some(rs) = &self.wgpu_render_state {
+                                nodes::image_effects::process_gpu(img, *brightness, *contrast, *saturation, *hue, *exposure, *gamma, id, rs)
+                                    .unwrap_or_else(|| nodes::image_effects::process(img, *brightness, *contrast, *saturation, *hue, *exposure, *gamma))
+                            } else {
+                                nodes::image_effects::process(img, *brightness, *contrast, *saturation, *hue, *exposure, *gamma)
+                            };
                             ctx.data_mut(|d| d.insert_temp(cache_id, (cache_key, result.clone())));
                             values.insert((id, 0), PortValue::Image(result));
                         }
@@ -1439,7 +1506,7 @@ impl eframe::App for PatchworkApp {
                         let a = inputs.first().and_then(|v| v.as_image());
                         let b = inputs.get(1).and_then(|v| v.as_image());
                         if let (Some(a), Some(b)) = (a, b) {
-                            let cache_key = (std::sync::Arc::as_ptr(a) as u64) ^ (std::sync::Arc::as_ptr(b) as u64)
+                            let cache_key = img_content_hash(a) ^ img_content_hash(b).wrapping_mul(7)
                                 ^ (*mode as u64) ^ ((*mix * 1000.0) as u64) << 8;
                             let cache_id = egui::Id::new(("blend_cache", id));
                             let cached: Option<(u64, std::sync::Arc<ImageData>)> = ctx.data_mut(|d| d.get_temp(cache_id));
@@ -1449,7 +1516,12 @@ impl eframe::App for PatchworkApp {
                                     continue;
                                 }
                             }
-                            let result = nodes::blend::process(a, b, *mode, *mix);
+                            let result = if let Some(rs) = &self.wgpu_render_state {
+                                nodes::blend::process_gpu(a, b, *mode, *mix, id, rs)
+                                    .unwrap_or_else(|| nodes::blend::process(a, b, *mode, *mix))
+                            } else {
+                                nodes::blend::process(a, b, *mode, *mix)
+                            };
                             ctx.data_mut(|d| d.insert_temp(cache_id, (cache_key, result.clone())));
                             values.insert((id, 0), PortValue::Image(result));
                         }
@@ -1483,9 +1555,15 @@ impl eframe::App for PatchworkApp {
                     // Noise migrated to trait-based NoiseNode (evaluated in graph.evaluate)
                     NodeType::ColorCurves { master, red, green, blue, .. } => {
                         if let Some(PortValue::Image(img)) = inputs.first() {
-                            let img_ptr = std::sync::Arc::as_ptr(img) as u64;
-                            let curve_hash = master.len() as u64 ^ red.len() as u64 ^ green.len() as u64 ^ blue.len() as u64;
-                            let cache_key = img_ptr ^ curve_hash;
+                            // Hash curve points (not just lengths) for accurate cache invalidation
+                            let mut curve_hash: u64 = 0;
+                            for pts in [master.as_slice(), red.as_slice(), green.as_slice(), blue.as_slice()] {
+                                for p in pts {
+                                    curve_hash = curve_hash.wrapping_mul(31).wrapping_add(p[0].to_bits() as u64);
+                                    curve_hash = curve_hash.wrapping_mul(31).wrapping_add(p[1].to_bits() as u64);
+                                }
+                            }
+                            let cache_key = img_content_hash(img) ^ curve_hash;
                             let cache_id = egui::Id::new(("cc_cache", id));
                             let cached: Option<(u64, std::sync::Arc<ImageData>)> = ctx.data_mut(|d| d.get_temp(cache_id));
                             if let Some((prev_key, prev_result)) = cached {
@@ -1494,7 +1572,12 @@ impl eframe::App for PatchworkApp {
                                     continue;
                                 }
                             }
-                            let result = nodes::color_curves::process(img, master, red, green, blue);
+                            let result = if let Some(rs) = &self.wgpu_render_state {
+                                nodes::color_curves::process_gpu(img, master, red, green, blue, id, rs)
+                                    .unwrap_or_else(|| nodes::color_curves::process(img, master, red, green, blue))
+                            } else {
+                                nodes::color_curves::process(img, master, red, green, blue)
+                            };
                             ctx.data_mut(|d| d.insert_temp(cache_id, (cache_key, result.clone())));
                             values.insert((id, 0), PortValue::Image(result));
                         }
@@ -1574,14 +1657,7 @@ impl eframe::App for PatchworkApp {
             }
         }
 
-        // Inject WGSL Viewer Image output (from GPU readback stored in egui temp data)
-        for (&id, node) in &self.graph.nodes {
-            if matches!(node.node_type, NodeType::WgslViewer { .. }) {
-                if let Some(img) = ctx.data_mut(|d| d.get_temp::<std::sync::Arc<ImageData>>(egui::Id::new(("wgsl_image_output", id)))) {
-                    values.insert((id, 0), PortValue::Image(img));
-                }
-            }
-        }
+        // WGSL Viewer image output already injected before the image evaluation loop above.
 
         // Sync OB Hub detected_devices from ObManager + auto-connect saved ports
         {

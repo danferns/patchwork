@@ -255,13 +255,30 @@ impl super::PatchworkApp {
                 self.box_select_end = None;
             }
         }
+        // Tab while dragging wire → open filtered node menu for auto-connect
+        if self.dragging_from.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
+            if let Some((nid, port, is_output)) = self.dragging_from {
+                // Get the port kind for filtering
+                let port_kind = self.graph.nodes.get(&nid).and_then(|node| {
+                    let defs = if is_output { node.node_type.outputs() } else { node.node_type.inputs() };
+                    defs.get(port).map(|d| d.kind)
+                }).unwrap_or(PortKind::Generic);
+
+                self.wire_menu_context = Some((nid, port, is_output, port_kind));
+                self.show_node_menu = true;
+                self.node_menu_pos = ctx.pointer_latest_pos().unwrap_or(egui::Pos2::ZERO);
+                self.node_menu_search.clear();
+            }
+        }
         if self.show_node_menu && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.show_node_menu = false;
             self.node_menu_search.clear();
+            self.wire_menu_context = None;
         }
         if self.show_node_menu && ctx.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary)) {
             self.show_node_menu = false;
             self.node_menu_search.clear();
+            self.wire_menu_context = None;
         }
         if self.show_context_menu && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.show_context_menu = false;

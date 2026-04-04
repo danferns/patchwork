@@ -414,7 +414,7 @@ fn create_blend_pipeline(device: &wgpu::Device, target_format: wgpu::TextureForm
     GpuBlendResources { pipeline, display_pipeline, display_bind_group_layout, bind_group_layout, sampler, uniform_buffer }
 }
 
-fn upload_texture(device: &wgpu::Device, queue: &wgpu::Queue, img: &ImageData, label: &str) -> wgpu::Texture {
+pub fn upload_texture(device: &wgpu::Device, queue: &wgpu::Queue, img: &ImageData, label: &str) -> wgpu::Texture {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d { width: img.width, height: img.height, depth_or_array_layers: 1 },

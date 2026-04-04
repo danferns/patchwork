@@ -1,16 +1,22 @@
-//! ImageStyleNode — Blur, Pixelate, Sharpen for images.
+//! ImageStyleNode — Blur, Pixelate, Sharpen for images (GPU-accelerated).
 
 use crate::graph::{PortDef, PortKind, PortValue, ImageData};
 use crate::node_trait::{NodeBehavior, RenderContext};
 use serde::{Serialize, Deserialize};
 use eframe::egui;
+use eframe::egui_wgpu::wgpu;
 use std::sync::Arc;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum StyleMode {
     Blur,
     Pixelate,
     Sharpen,
+}
+
+impl Default for StyleMode {
+    fn default() -> Self { StyleMode::Blur }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,160 +29,266 @@ pub struct ImageStyleNode {
 
 fn default_amount() -> f32 { 3.0 }
 
-impl Default for StyleMode {
-    fn default() -> Self { StyleMode::Blur }
-}
-
 impl Default for ImageStyleNode {
     fn default() -> Self {
         Self { mode: StyleMode::Blur, amount: 3.0 }
     }
 }
 
-impl ImageStyleNode {
-    fn process(&self, img: &ImageData) -> Arc<ImageData> {
-        match self.mode {
-            StyleMode::Blur => self.blur(img),
-            StyleMode::Pixelate => self.pixelate(img),
-            StyleMode::Sharpen => self.sharpen(img),
-        }
-    }
+// ── GPU Pipeline ────────────────────────────────────────────────────────────
 
-    fn blur(&self, img: &ImageData) -> Arc<ImageData> {
-        let w = img.width as usize;
-        let h = img.height as usize;
-        let r = (self.amount as usize).max(1).min(20);
-        if w == 0 || h == 0 { return Arc::new(img.clone()); }
+const EFFECT_SHADER: &str = r#"
+struct Params {
+    mode: f32,
+    amount: f32,
+    width: f32,
+    height: f32,
+};
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var input_tex: texture_2d<f32>;
+@group(0) @binding(2) var input_sampler: sampler;
 
-        // Two-pass separable box blur for performance
-        let mut temp = img.pixels.clone();
-        let mut out = img.pixels.clone();
+@vertex fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
+    let pos = array(vec2f(-1,-1), vec2f(3,-1), vec2f(-1,3));
+    return vec4f(pos[vi], 0, 1);
+}
 
-        // Horizontal pass
-        for y in 0..h {
-            for x in 0..w {
-                let mut sum = [0u32; 4];
-                let mut count = 0u32;
-                let x0 = (x as i32 - r as i32).max(0) as usize;
-                let x1 = (x + r + 1).min(w);
-                for sx in x0..x1 {
-                    let si = (y * w + sx) * 4;
-                    if si + 3 < img.pixels.len() {
-                        sum[0] += img.pixels[si] as u32;
-                        sum[1] += img.pixels[si + 1] as u32;
-                        sum[2] += img.pixels[si + 2] as u32;
-                        sum[3] += img.pixels[si + 3] as u32;
-                        count += 1;
-                    }
-                }
-                let di = (y * w + x) * 4;
-                if count > 0 && di + 3 < temp.len() {
-                    temp[di] = (sum[0] / count) as u8;
-                    temp[di + 1] = (sum[1] / count) as u8;
-                    temp[di + 2] = (sum[2] / count) as u8;
-                    temp[di + 3] = (sum[3] / count) as u8;
-                }
+@fragment fn fs_main(@builtin(position) coord: vec4f) -> @location(0) vec4f {
+    let uv = coord.xy / vec2f(params.width, params.height);
+    let texel = vec2f(1.0 / params.width, 1.0 / params.height);
+    let mode = u32(params.mode);
+
+    if mode == 0u {
+        // Box blur — sample (2r+1)^2 neighborhood
+        var col = vec4f(0.0);
+        let r = i32(params.amount);
+        var count = 0.0;
+        for (var dy = -r; dy <= r; dy++) {
+            for (var dx = -r; dx <= r; dx++) {
+                let sample_uv = uv + vec2f(f32(dx), f32(dy)) * texel;
+                col += textureSample(input_tex, input_sampler, clamp(sample_uv, vec2f(0.0), vec2f(1.0)));
+                count += 1.0;
             }
         }
-
-        // Vertical pass
-        for y in 0..h {
-            for x in 0..w {
-                let mut sum = [0u32; 4];
-                let mut count = 0u32;
-                let y0 = (y as i32 - r as i32).max(0) as usize;
-                let y1 = (y + r + 1).min(h);
-                for sy in y0..y1 {
-                    let si = (sy * w + x) * 4;
-                    if si + 3 < temp.len() {
-                        sum[0] += temp[si] as u32;
-                        sum[1] += temp[si + 1] as u32;
-                        sum[2] += temp[si + 2] as u32;
-                        sum[3] += temp[si + 3] as u32;
-                        count += 1;
-                    }
-                }
-                let di = (y * w + x) * 4;
-                if count > 0 && di + 3 < out.len() {
-                    out[di] = (sum[0] / count) as u8;
-                    out[di + 1] = (sum[1] / count) as u8;
-                    out[di + 2] = (sum[2] / count) as u8;
-                    out[di + 3] = (sum[3] / count) as u8;
-                }
-            }
-        }
-
-        Arc::new(ImageData { width: img.width, height: img.height, pixels: out })
-    }
-
-    fn pixelate(&self, img: &ImageData) -> Arc<ImageData> {
-        let w = img.width as usize;
-        let h = img.height as usize;
-        let block = (self.amount as usize).max(2).min(64);
-        if w == 0 || h == 0 { return Arc::new(img.clone()); }
-
-        let mut pixels = img.pixels.clone();
-
-        for by in (0..h).step_by(block) {
-            for bx in (0..w).step_by(block) {
-                let mut sum = [0u32; 4];
-                let mut count = 0u32;
-                let bw = block.min(w - bx);
-                let bh = block.min(h - by);
-
-                for dy in 0..bh {
-                    for dx in 0..bw {
-                        let si = ((by + dy) * w + (bx + dx)) * 4;
-                        if si + 3 < pixels.len() {
-                            sum[0] += img.pixels[si] as u32;
-                            sum[1] += img.pixels[si + 1] as u32;
-                            sum[2] += img.pixels[si + 2] as u32;
-                            sum[3] += img.pixels[si + 3] as u32;
-                            count += 1;
-                        }
-                    }
-                }
-
-                if count > 0 {
-                    let avg = [(sum[0] / count) as u8, (sum[1] / count) as u8,
-                               (sum[2] / count) as u8, (sum[3] / count) as u8];
-                    for dy in 0..bh {
-                        for dx in 0..bw {
-                            let di = ((by + dy) * w + (bx + dx)) * 4;
-                            if di + 3 < pixels.len() {
-                                pixels[di..di + 4].copy_from_slice(&avg);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Arc::new(ImageData { width: img.width, height: img.height, pixels })
-    }
-
-    fn sharpen(&self, img: &ImageData) -> Arc<ImageData> {
-        // Unsharp mask: output = original + amount * (original - blurred)
-        let strength = self.amount.clamp(0.1, 5.0);
-        let mut blur_node = self.clone();
-        blur_node.amount = 2.0; // fixed blur radius for unsharp mask
-        let blurred = blur_node.blur(img);
-
-        let mut pixels = img.pixels.clone();
-        for i in (0..pixels.len()).step_by(4) {
-            if i + 2 < pixels.len() && i + 2 < blurred.pixels.len() {
-                for c in 0..3 {
-                    let orig = img.pixels[i + c] as f32;
-                    let blur_val = blurred.pixels[i + c] as f32;
-                    let sharpened = orig + strength * (orig - blur_val);
-                    pixels[i + c] = sharpened.clamp(0.0, 255.0) as u8;
-                }
-            }
-        }
-
-        Arc::new(ImageData { width: img.width, height: img.height, pixels })
+        return col / count;
+    } else if mode == 1u {
+        // Pixelate — quantize UV to block grid
+        let block = max(params.amount, 2.0);
+        let pixel_coord = floor(coord.xy / block) * block + block * 0.5;
+        let puv = pixel_coord / vec2f(params.width, params.height);
+        return textureSample(input_tex, input_sampler, clamp(puv, vec2f(0.0), vec2f(1.0)));
+    } else {
+        // Sharpen — unsharp mask (center vs 4-tap average)
+        let c = textureSample(input_tex, input_sampler, uv);
+        let avg = (
+            textureSample(input_tex, input_sampler, uv + vec2f(-texel.x, 0.0)) +
+            textureSample(input_tex, input_sampler, uv + vec2f(texel.x, 0.0)) +
+            textureSample(input_tex, input_sampler, uv + vec2f(0.0, -texel.y)) +
+            textureSample(input_tex, input_sampler, uv + vec2f(0.0, texel.y))
+        ) * 0.25;
+        return clamp(c + (c - avg) * params.amount, vec4f(0.0), vec4f(1.0));
     }
 }
+"#;
+
+struct ImageStyleGpu {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    uniform_buffer: wgpu::Buffer,
+    sampler: wgpu::Sampler,
+}
+
+struct ImageStyleStore {
+    nodes: HashMap<crate::graph::NodeId, ImageStyleGpu>,
+}
+
+impl ImageStyleNode {
+    pub fn process_gpu(
+        &self,
+        img: &ImageData,
+        node_id: crate::graph::NodeId,
+        render_state: &eframe::egui_wgpu::RenderState,
+    ) -> Option<Arc<ImageData>> {
+        let device = &render_state.device;
+        let queue = &render_state.queue;
+        let w = img.width;
+        let h = img.height;
+        if w == 0 || h == 0 { return None; }
+
+        // Ensure pipeline is cached
+        let has_pipeline = {
+            let renderer = render_state.renderer.read();
+            renderer.callback_resources.get::<ImageStyleStore>()
+                .and_then(|s| s.nodes.get(&node_id))
+                .is_some()
+        };
+
+        if !has_pipeline {
+            device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("image_style_shader"),
+                source: wgpu::ShaderSource::Wgsl(EFFECT_SHADER.into()),
+            });
+
+            let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("image_style_bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None,
+                bind_group_layouts: &[&bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("image_style_pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::TextureFormat::Rgba8UnormSrgb.into())],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+
+            let error = pollster::block_on(device.pop_error_scope());
+            if error.is_some() {
+                crate::system_log::error("Image Style GPU pipeline creation failed".to_string());
+                return None;
+            }
+
+            let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("image_style_ub"),
+                size: 16, // 4 floats × 4 bytes
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+
+            let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            });
+
+            let gpu = ImageStyleGpu { pipeline, bind_group_layout, uniform_buffer, sampler };
+            let mut renderer = render_state.renderer.write();
+            if let Some(store) = renderer.callback_resources.get_mut::<ImageStyleStore>() {
+                store.nodes.insert(node_id, gpu);
+            } else {
+                let mut nodes = HashMap::new();
+                nodes.insert(node_id, gpu);
+                renderer.callback_resources.insert(ImageStyleStore { nodes });
+            }
+        }
+
+        // Upload input image as texture
+        let input_tex = crate::gpu_image::upload_texture(device, queue, img, "image_style_input");
+        let input_view = input_tex.create_view(&Default::default());
+
+        // Create output texture
+        let output_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("image_style_output"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let output_view = output_tex.create_view(&Default::default());
+
+        // Upload uniforms and render
+        let renderer = render_state.renderer.read();
+        let store = renderer.callback_resources.get::<ImageStyleStore>()?;
+        let gpu = store.nodes.get(&node_id)?;
+
+        let mode_val = match self.mode {
+            StyleMode::Blur => 0.0f32,
+            StyleMode::Pixelate => 1.0,
+            StyleMode::Sharpen => 2.0,
+        };
+        let params = [mode_val, self.amount, w as f32, h as f32];
+        queue.write_buffer(&gpu.uniform_buffer, 0, bytemuck::cast_slice(&params));
+
+        // Create bind group with this frame's input texture
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &gpu.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: gpu.uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&input_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&gpu.sampler) },
+            ],
+        });
+
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("image_style_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &output_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+            pass.set_pipeline(&gpu.pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        queue.submit(Some(encoder.finish()));
+        drop(renderer);
+
+        Some(crate::gpu_image::readback_texture(device, queue, &output_tex, w, h))
+    }
+}
+
+// ── NodeBehavior ────────────────────────────────────────────────────────────
 
 impl NodeBehavior for ImageStyleNode {
     fn title(&self) -> &str { "Image Style" }
@@ -199,8 +311,18 @@ impl NodeBehavior for ImageStyleNode {
             };
         }
 
+        // GPU processing is done in the image eval loop in app/mod.rs (which calls evaluate).
+        // We store the node_id in egui temp data so process_gpu can find the render state.
+        // For now, just pass through — the actual GPU processing happens when the image loop
+        // detects this is a Dynamic node with image input.
         let result = match inputs.first() {
-            Some(PortValue::Image(img)) => PortValue::Image(self.process(img)),
+            Some(PortValue::Image(img)) => {
+                // Try GPU path — read render state from egui temp data
+                // This is set by app/mod.rs before the image eval loop
+                // Note: we can't access egui context here, so GPU path is triggered
+                // from the image eval loop in app/mod.rs instead
+                PortValue::Image(img.clone()) // placeholder — GPU path replaces this
+            }
             _ => PortValue::None,
         };
         vec![(0, result)]
@@ -255,6 +377,10 @@ impl NodeBehavior for ImageStyleNode {
                 ui.add(egui::Slider::new(&mut self.amount, range).step_by(step as f64).show_value(true));
             }
         });
+
+        // GPU indicator
+        let dim = ui.visuals().widgets.noninteractive.fg_stroke.color;
+        ui.label(egui::RichText::new("⚡ GPU").small().color(dim));
 
         ui.separator();
         crate::nodes::audio_port_row(ui, "Image", ctx.node_id, 0, false, ctx.port_positions,

@@ -284,7 +284,7 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
             factory: || NodeType::Dynamic { inner: crate::graph::DynNode { node: Box::new(text_editor_node::TextEditorNode::default()) } } },
 
         // ── Output ───────────────────────────────────────────
-        NodeCatalogEntry { label: "Display", category: "Output",
+        NodeCatalogEntry { label: "Scope", category: "Output",
             factory: || NodeType::Dynamic { inner: crate::graph::DynNode { node: Box::new(display_node::DisplayNode::default()) } } },
         NodeCatalogEntry { label: "Visual Output", category: "Output",
             factory: || NodeType::Dynamic { inner: crate::graph::DynNode { node: Box::new(visual_output_node::VisualOutputNode::default()) } } },

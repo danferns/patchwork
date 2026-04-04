@@ -1,6 +1,7 @@
 use crate::graph::*;
 use crate::nodes::curve::evaluate_curve;
 use eframe::egui;
+use eframe::egui_wgpu::wgpu;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -199,4 +200,239 @@ pub fn process(img: &ImageData, master: &[[f32; 2]], red: &[[f32; 2]], green: &[
         i += 4;
     }
     Arc::new(ImageData::new(img.width, img.height, pixels))
+}
+
+// ── GPU-accelerated color curves ────────────────────────────────────────────
+
+const CURVES_SHADER: &str = r#"
+struct Params {
+    width: f32,
+    height: f32,
+    _pad0: f32,
+    _pad1: f32,
+};
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var input_tex: texture_2d<f32>;
+@group(0) @binding(2) var lut_tex: texture_2d<f32>;
+@group(0) @binding(3) var tex_sampler: sampler;
+
+@vertex fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
+    let pos = array(vec2f(-1,-1), vec2f(3,-1), vec2f(-1,3));
+    return vec4f(pos[vi], 0, 1);
+}
+
+@fragment fn fs_main(@builtin(position) coord: vec4f) -> @location(0) vec4f {
+    let uv = coord.xy / vec2f(params.width, params.height);
+    let c = textureSample(input_tex, tex_sampler, uv);
+
+    // LUT texture: 256 wide, 4 rows (0=master, 1=red, 2=green, 3=blue)
+    // Sample channel LUT first, then master LUT
+    let r_curved = textureSample(lut_tex, tex_sampler, vec2f(c.r, 0.375)).r;  // row 1 (red)
+    let g_curved = textureSample(lut_tex, tex_sampler, vec2f(c.g, 0.625)).r;  // row 2 (green)
+    let b_curved = textureSample(lut_tex, tex_sampler, vec2f(c.b, 0.875)).r;  // row 3 (blue)
+
+    // Then apply master curve
+    let r_final = textureSample(lut_tex, tex_sampler, vec2f(r_curved, 0.125)).r;  // row 0 (master)
+    let g_final = textureSample(lut_tex, tex_sampler, vec2f(g_curved, 0.125)).r;
+    let b_final = textureSample(lut_tex, tex_sampler, vec2f(b_curved, 0.125)).r;
+
+    return vec4f(clamp(r_final, 0.0, 1.0), clamp(g_final, 0.0, 1.0), clamp(b_final, 0.0, 1.0), c.a);
+}
+"#;
+
+struct CurvesGpu {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    uniform_buffer: wgpu::Buffer,
+    sampler: wgpu::Sampler,
+}
+
+struct CurvesGpuStore {
+    nodes: HashMap<NodeId, CurvesGpu>,
+}
+
+/// Build a 256×4 RGBA LUT texture from the four curve arrays.
+/// Row 0 = master, row 1 = red, row 2 = green, row 3 = blue.
+fn build_lut_texture(
+    device: &wgpu::Device, queue: &wgpu::Queue,
+    master: &[[f32; 2]], red: &[[f32; 2]], green: &[[f32; 2]], blue: &[[f32; 2]],
+) -> wgpu::Texture {
+    let w = 256u32;
+    let h = 4u32;
+    let mut pixels = vec![0u8; (w * h * 4) as usize];
+
+    let curves: [&[[f32; 2]]; 4] = [master, red, green, blue];
+    for (row, curve) in curves.iter().enumerate() {
+        for x in 0..w {
+            let t = x as f32 / 255.0;
+            let v = evaluate_curve(curve, t);
+            let byte = (v.clamp(0.0, 1.0) * 255.0) as u8;
+            let idx = ((row as u32 * w + x) * 4) as usize;
+            pixels[idx] = byte;
+            pixels[idx + 1] = byte;
+            pixels[idx + 2] = byte;
+            pixels[idx + 3] = 255;
+        }
+    }
+
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("curves_lut"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1, sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+        &pixels,
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+
+    texture
+}
+
+pub fn process_gpu(
+    img: &ImageData,
+    master: &[[f32; 2]], red: &[[f32; 2]], green: &[[f32; 2]], blue: &[[f32; 2]],
+    node_id: NodeId,
+    render_state: &eframe::egui_wgpu::RenderState,
+) -> Option<Arc<ImageData>> {
+    let device = &render_state.device;
+    let queue = &render_state.queue;
+    let w = img.width;
+    let h = img.height;
+    if w == 0 || h == 0 { return None; }
+
+    let has_pipeline = {
+        let renderer = render_state.renderer.read();
+        renderer.callback_resources.get::<CurvesGpuStore>()
+            .and_then(|s| s.nodes.get(&node_id))
+            .is_some()
+    };
+
+    if !has_pipeline {
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("curves_shader"),
+            source: wgpu::ShaderSource::Wgsl(CURVES_SHADER.into()),
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("curves_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None, bind_group_layouts: &[&bind_group_layout], push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("curves_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_main"), buffers: &[], compilation_options: wgpu::PipelineCompilationOptions::default() },
+            fragment: Some(wgpu::FragmentState { module: &shader, entry_point: Some("fs_main"), targets: &[Some(wgpu::TextureFormat::Rgba8UnormSrgb.into())], compilation_options: wgpu::PipelineCompilationOptions::default() }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None, multisample: wgpu::MultisampleState::default(), multiview: None, cache: None,
+        });
+
+        let error = pollster::block_on(device.pop_error_scope());
+        if error.is_some() { return None; }
+
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("curves_ub"), size: 16, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+        });
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default()
+        });
+
+        let gpu = CurvesGpu { pipeline, bind_group_layout, uniform_buffer, sampler };
+        let mut renderer = render_state.renderer.write();
+        if let Some(store) = renderer.callback_resources.get_mut::<CurvesGpuStore>() {
+            store.nodes.insert(node_id, gpu);
+        } else {
+            let mut nodes = HashMap::new();
+            nodes.insert(node_id, gpu);
+            renderer.callback_resources.insert(CurvesGpuStore { nodes });
+        }
+    }
+
+    // Upload input image + LUT
+    let input_tex = crate::gpu_image::upload_texture(device, queue, img, "curves_input");
+    let input_view = input_tex.create_view(&Default::default());
+    let lut_tex = build_lut_texture(device, queue, master, red, green, blue);
+    let lut_view = lut_tex.create_view(&Default::default());
+
+    // Output texture
+    let output_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("curves_output"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let output_view = output_tex.create_view(&Default::default());
+
+    let renderer = render_state.renderer.read();
+    let store = renderer.callback_resources.get::<CurvesGpuStore>()?;
+    let gpu = store.nodes.get(&node_id)?;
+
+    let params = [w as f32, h as f32, 0.0f32, 0.0f32];
+    queue.write_buffer(&gpu.uniform_buffer, 0, bytemuck::cast_slice(&params));
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None, layout: &gpu.bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: gpu.uniform_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&input_view) },
+            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&lut_view) },
+            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&gpu.sampler) },
+        ],
+    });
+
+    let mut encoder = device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("curves_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &output_view, resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: None, ..Default::default()
+        });
+        pass.set_pipeline(&gpu.pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+    queue.submit(Some(encoder.finish()));
+    drop(renderer);
+
+    Some(crate::gpu_image::readback_texture(device, queue, &output_tex, w, h))
 }
