@@ -659,6 +659,7 @@ impl AudioManager {
         self.sampler_buffers.remove(&node_id);
         self.sampler_input_sources.remove(&node_id);
         self.analyzer_results.remove(&node_id);
+        self.clap_gui_handles.remove(&node_id);
     }
 
 }

@@ -197,17 +197,13 @@ impl NodeBehavior for MonitorNode {
             else if fps >= 30.0 { egui::Color32::from_rgb(200, 200, 80) }
             else { egui::Color32::from_rgb(255, 80, 80) };
 
-        ui.horizontal(|ui| {
+        right_port_row(ui, ctx, 0, |ui| {
             ui.label(egui::RichText::new("FPS").small());
             ui.label(egui::RichText::new(format!("{:.0}", fps)).strong().color(fps_color));
-            crate::nodes::inline_port_circle(ui, ctx.node_id, 0, false, ctx.connections,
-                ctx.port_positions, ctx.dragging_from, ctx.pending_disconnects, PortKind::Number);
         });
-        ui.horizontal(|ui| {
+        right_port_row(ui, ctx, 1, |ui| {
             ui.label(egui::RichText::new("Frame").small());
             ui.label(egui::RichText::new(format!("{:.1}ms", frame_ms)).small().color(dim));
-            crate::nodes::inline_port_circle(ui, ctx.node_id, 1, false, ctx.connections,
-                ctx.port_positions, ctx.dragging_from, ctx.pending_disconnects, PortKind::Number);
         });
         draw_sparkline(ui, &self.fps_history, fps_color, 0.0, 120.0);
 
@@ -219,11 +215,9 @@ impl NodeBehavior for MonitorNode {
             else if m.cpu_usage < 80.0 { egui::Color32::from_rgb(200, 200, 80) }
             else { egui::Color32::from_rgb(255, 80, 80) };
 
-        ui.horizontal(|ui| {
+        right_port_row(ui, ctx, 2, |ui| {
             ui.label(egui::RichText::new("CPU").small());
             ui.label(egui::RichText::new(format!("{:.0}%", m.cpu_usage)).strong().color(cpu_color));
-            crate::nodes::inline_port_circle(ui, ctx.node_id, 2, false, ctx.connections,
-                ctx.port_positions, ctx.dragging_from, ctx.pending_disconnects, PortKind::Number);
             ui.label(egui::RichText::new(format!("({}c)", m.cpu_per_core.len())).small().color(dim));
         });
 
@@ -249,11 +243,9 @@ impl NodeBehavior for MonitorNode {
         }
 
         // RAM
-        ui.horizontal(|ui| {
+        right_port_row(ui, ctx, 3, |ui| {
             ui.label(egui::RichText::new("RAM").small());
             ui.label(egui::RichText::new(format!("{:.0}%", m.mem_percent)).strong().color(egui::Color32::from_rgb(200, 120, 255)));
-            crate::nodes::inline_port_circle(ui, ctx.node_id, 3, false, ctx.connections,
-                ctx.port_positions, ctx.dragging_from, ctx.pending_disconnects, PortKind::Number);
             ui.label(egui::RichText::new(format!("{:.1}/{:.0}G", m.mem_used_gb, m.mem_total_gb)).small().color(dim));
         });
 
@@ -268,30 +260,43 @@ impl NodeBehavior for MonitorNode {
         // ── Patchwork ────────────────────────────────────────────
         ui.label(egui::RichText::new("Patchwork").small().strong().color(dim));
 
-        ui.horizontal(|ui| {
+        right_port_row(ui, ctx, 6, |ui| {
             ui.label(egui::RichText::new("CPU").small());
             ui.label(egui::RichText::new(format!("{:.1}%", m.process_cpu)).small());
-            crate::nodes::inline_port_circle(ui, ctx.node_id, 6, false, ctx.connections,
-                ctx.port_positions, ctx.dragging_from, ctx.pending_disconnects, PortKind::Number);
         });
-        ui.horizontal(|ui| {
+        right_port_row(ui, ctx, 4, |ui| {
             ui.label(egui::RichText::new("RAM").small());
             ui.label(egui::RichText::new(format!("{:.0}MB", m.process_mem_mb)).small().color(egui::Color32::from_rgb(255, 180, 80)));
-            crate::nodes::inline_port_circle(ui, ctx.node_id, 4, false, ctx.connections,
-                ctx.port_positions, ctx.dragging_from, ctx.pending_disconnects, PortKind::Number);
         });
 
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(format!("{} nodes", self.node_count)).small().color(dim));
             crate::nodes::inline_port_circle(ui, ctx.node_id, 5, false, ctx.connections,
                 ctx.port_positions, ctx.dragging_from, ctx.pending_disconnects, PortKind::Number);
-            ui.label(egui::RichText::new(format!("  {} wires", self.connection_count)).small().color(dim));
+            ui.label(egui::RichText::new(format!("{} wires", self.connection_count)).small().color(dim));
             crate::nodes::inline_port_circle(ui, ctx.node_id, 7, false, ctx.connections,
                 ctx.port_positions, ctx.dragging_from, ctx.pending_disconnects, PortKind::Number);
         });
 
         ui.ctx().request_repaint();
     }
+}
+
+/// Render a row with labels on the left and an output port circle right-aligned.
+fn right_port_row(
+    ui: &mut eframe::egui::Ui,
+    ctx: &mut crate::node_trait::RenderContext,
+    port: usize,
+    labels: impl FnOnce(&mut eframe::egui::Ui),
+) {
+    use eframe::egui;
+    ui.horizontal(|ui| {
+        labels(ui);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            crate::nodes::inline_port_circle(ui, ctx.node_id, port, false, ctx.connections,
+                ctx.port_positions, ctx.dragging_from, ctx.pending_disconnects, PortKind::Number);
+        });
+    });
 }
 
 fn draw_sparkline(ui: &mut eframe::egui::Ui, data: &VecDeque<f32>, color: eframe::egui::Color32, min: f32, max: f32) {

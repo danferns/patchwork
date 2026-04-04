@@ -168,7 +168,9 @@ impl super::PatchworkApp {
         // Zoom control
         let zoom_action: Option<f32> = ctx.data_mut(|d| d.get_temp(egui::Id::new("zoom_action")));
         if let Some(new_zoom) = zoom_action {
-            self.canvas_zoom = new_zoom.clamp(0.1, 5.0);
+            let z = new_zoom.clamp(0.1, 5.0);
+            self.canvas_zoom = z;
+            self.target_zoom = z;
             ctx.data_mut(|d| d.remove::<f32>(egui::Id::new("zoom_action")));
         }
 

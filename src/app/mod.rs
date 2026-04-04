@@ -206,6 +206,10 @@ pub struct PatchworkApp {
     /// Random accent color for sessions without a Theme node.
     /// Generated once on app start and on "New File". Gives each fresh project a unique hue.
     session_accent: [u8; 3],
+    /// Target zoom for smooth interpolation. Input sets this, canvas_zoom lerps toward it.
+    target_zoom: f32,
+    /// Pointer position (screen coords) for zoom anchor during smooth interpolation.
+    zoom_anchor_screen: Option<egui::Vec2>,
 }
 
 /// Results from background device enumeration thread
@@ -310,6 +314,8 @@ impl PatchworkApp {
             property_undo_pushed: false,
             click_wiring: false,
             session_accent: crate::nodes::theme::random_accent(),
+            target_zoom: 1.0,
+            zoom_anchor_screen: None,
         };
         // Always start MCP server thread — auto-detects if stdin is a pipe (Claude Desktop)
         // vs terminal (normal launch). If stdin is a terminal, the thread exits immediately.
@@ -535,7 +541,7 @@ impl PatchworkApp {
 
         // With set_zoom_factor, normal nodes scale automatically via GPU.
         // We only need the original style to restore after pinned nodes' inverse-zoom.
-        let original_style = ctx.style();
+        let _original_style = ctx.style();
 
         for node_id in node_ids {
             let is_pinned = self.pinned_nodes.contains(&node_id);
@@ -559,18 +565,16 @@ impl PatchworkApp {
 
             let _open = true;
             let inline = node.node_type.inline_ports();
-            // With set_zoom_factor: logical = screen / zoom.
+            // set_zoom_factor(zoom) is active for the whole frame.
             // Normal: egui_pos = canvas_pos + offset/zoom
-            // Pinned: egui_pos = screen_pos / zoom (fixed screen position)
+            // Pinned: egui_pos = screen_pos / zoom (fixed screen position, divided to get logical)
             let offset_egui = offset / zoom;
+            let inv = 1.0 / zoom;
             let (egui_x, egui_y) = if is_pinned {
                 (node.pos[0] / zoom, node.pos[1] / zoom)
             } else {
                 (node.pos[0] + offset_egui.x, node.pos[1] + offset_egui.y)
             };
-            // Pinned: inverse zoom on sizes so they appear at native screen size.
-            // Zoom-bucketed ID resets egui's cached window size on zoom changes.
-            let inv = 1.0 / zoom;
             // Use trait method for min_width if available, else defaults
             let node_width = if let Some(w) = node.node_type.min_width() {
                 w
@@ -594,9 +598,11 @@ impl PatchworkApp {
             let node_icon = crate::icons::node_icon(node.node_type.title());
             let title_with_icon = format!("{} {}", node_icon, title);
             let title_rt = egui::RichText::new(&title_with_icon).color(accent).strong().size(title_size);
-            // Pinned windows use zoom-bucketed ID to reset cached size on zoom change
+            // Pinned windows use zoom-bucketed ID to reset egui's cached window size on zoom change
             let zoom_bucket = if is_pinned { (zoom * 10.0).round() as i32 } else { 0 };
             // Apply inverse-zoom style for pinned nodes
+            // Inverse-zoom style for pinned nodes: cancel out set_zoom_factor so they
+            // appear at native screen size regardless of canvas zoom level.
             if is_pinned {
                 let mut style = ctx.style().as_ref().clone();
                 for (_, font_id) in style.text_styles.iter_mut() {
@@ -606,6 +612,33 @@ impl PatchworkApp {
                 style.spacing.button_padding *= inv;
                 style.spacing.interact_size *= inv;
                 style.spacing.window_margin *= inv;
+                style.spacing.indent *= inv;
+                style.spacing.icon_width *= inv;
+                style.spacing.icon_width_inner *= inv;
+                style.spacing.icon_spacing *= inv;
+                style.spacing.slider_width *= inv;
+                style.spacing.combo_width *= inv;
+                style.spacing.scroll.bar_width *= inv;
+                style.spacing.scroll.bar_inner_margin *= inv;
+                style.spacing.scroll.bar_outer_margin *= inv;
+                let scale_cr = |r: &mut egui::CornerRadius| {
+                    r.nw = (r.nw as f32 * inv).round().max(1.0) as u8;
+                    r.ne = (r.ne as f32 * inv).round().max(1.0) as u8;
+                    r.sw = (r.sw as f32 * inv).round().max(1.0) as u8;
+                    r.se = (r.se as f32 * inv).round().max(1.0) as u8;
+                };
+                let scale_stroke = |s: &mut egui::Stroke| { s.width *= inv; };
+                scale_cr(&mut style.visuals.window_corner_radius);
+                scale_stroke(&mut style.visuals.window_stroke);
+                style.visuals.window_shadow.blur = (style.visuals.window_shadow.blur as f32 * inv).round() as u8;
+                style.visuals.window_shadow.spread = (style.visuals.window_shadow.spread as f32 * inv).round() as u8;
+                for ws in [&mut style.visuals.widgets.noninteractive, &mut style.visuals.widgets.inactive,
+                           &mut style.visuals.widgets.hovered, &mut style.visuals.widgets.active] {
+                    scale_cr(&mut ws.corner_radius);
+                    scale_stroke(&mut ws.bg_stroke);
+                    scale_stroke(&mut ws.fg_stroke);
+                }
+                style.visuals.resize_corner_size *= inv;
                 ctx.set_style(std::sync::Arc::new(style));
             }
             let is_custom_render = node.node_type.custom_render();
@@ -765,14 +798,14 @@ impl PatchworkApp {
                     }
                 });
 
-            // Restore original style after pinned window's inverse-zoom style
+            // Restore original style after pinned window's inverse-zoom
             if is_pinned {
-                ctx.set_style(original_style.clone());
+                ctx.set_style(_original_style.clone());
             }
 
             if let Some(r) = &resp {
                 if is_pinned {
-                    // Pinned: drag delta is logical (screen/zoom), store screen pos
+                    // Pinned: drag delta is in logical (screen/zoom), store as screen pixels
                     if r.response.dragged() {
                         let delta = r.response.drag_delta();
                         node.pos[0] += delta.x * zoom;
@@ -1047,10 +1080,16 @@ impl PatchworkApp {
             self.push_undo();
         }
         for id in nodes_to_delete {
+            // Clear opt-drag state if the source or duplicated node is being deleted
+            if self.opt_drag_source == Some(id) { self.opt_drag_source = None; }
+            if self.opt_drag_created == Some(id) { self.opt_drag_created = None; }
             self.audio.remove_processor(id); // Remove from engine before graph
             self.midi.cleanup_node(id); self.serial.cleanup_node(id); self.osc.cleanup_node(id);
             self.ob.cleanup_node(id); self.audio.cleanup_node(id); crate::nodes::video_player::cleanup_node(id);
             self.graph.remove_node(id);
+            // Clean up UI state for deleted node
+            self.node_rects.remove(&id);
+            self.port_positions.retain(|&(nid, _, _), _| nid != id);
         }
         for (nid, port) in &pending_disconnects {
             // Skip mixer gain ports — they're graph-layer, not engine connections

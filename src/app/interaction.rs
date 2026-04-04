@@ -41,33 +41,47 @@ impl super::PatchworkApp {
         }
 
         // Zoom
-        let min_zoom: f32 = 0.08;
-        let max_zoom: f32 = 4.0;
+        let min_zoom: f32 = 0.25;
+        let max_zoom: f32 = 2.5;
 
-        // Pinch-to-zoom — pointer is logical, convert to screen
+        // Pinch-to-zoom — set target, smooth interpolation handles the rest
         let pinch = ctx.input(|i| i.zoom_delta());
         if (pinch - 1.0).abs() > 0.001 {
-            let old_zoom = self.canvas_zoom;
-            self.canvas_zoom = (self.canvas_zoom * pinch).clamp(min_zoom, max_zoom);
+            self.target_zoom = (self.target_zoom * pinch).clamp(min_zoom, max_zoom);
             if let Some(pointer) = ctx.pointer_latest_pos() {
-                let screen_ptr = pointer.to_vec2() * old_zoom;
-                let ratio = self.canvas_zoom / old_zoom;
-                self.canvas_offset = screen_ptr - (screen_ptr - self.canvas_offset) * ratio;
+                self.zoom_anchor_screen = Some(pointer.to_vec2() * self.canvas_zoom);
             }
         }
 
-        // Cmd+scroll → zoom
+        // Cmd+scroll → zoom (multiplicative for uniform feel at all zoom levels)
         if modifiers.command && !on_node {
             let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
             if scroll.abs() > 0.5 {
-                let old_zoom = self.canvas_zoom;
-                self.canvas_zoom = (self.canvas_zoom + scroll * 0.003).clamp(min_zoom, max_zoom);
+                let factor = (scroll * 0.005).exp();
+                self.target_zoom = (self.target_zoom * factor).clamp(min_zoom, max_zoom);
                 if let Some(pointer) = ctx.pointer_latest_pos() {
-                    let screen_ptr = pointer.to_vec2() * old_zoom;
-                    let ratio = self.canvas_zoom / old_zoom;
-                    self.canvas_offset = screen_ptr - (screen_ptr - self.canvas_offset) * ratio;
+                    self.zoom_anchor_screen = Some(pointer.to_vec2() * self.canvas_zoom);
                 }
             }
+        }
+
+        // Smooth zoom interpolation — lerp canvas_zoom toward target_zoom
+        let zoom_diff = self.target_zoom - self.canvas_zoom;
+        if zoom_diff.abs() > 0.001 {
+            let old_zoom = self.canvas_zoom;
+            self.canvas_zoom += zoom_diff * 0.3; // ease-out over ~4 frames
+            // Snap when very close to avoid perpetual micro-adjustments
+            if (self.target_zoom - self.canvas_zoom).abs() < 0.002 {
+                self.canvas_zoom = self.target_zoom;
+            }
+            // Maintain zoom anchor: keep the same canvas point under cursor
+            if let Some(screen_ptr) = self.zoom_anchor_screen {
+                let ratio = self.canvas_zoom / old_zoom;
+                self.canvas_offset = screen_ptr - (screen_ptr - self.canvas_offset) * ratio;
+            }
+            ctx.request_repaint(); // keep animating until settled
+        } else {
+            self.zoom_anchor_screen = None;
         }
 
         // Clamp pan boundary
@@ -96,6 +110,7 @@ impl super::PatchworkApp {
         if (modifiers.mac_cmd || modifiers.ctrl) && ctx.input(|i| i.key_pressed(egui::Key::Num0)) {
             self.canvas_offset = egui::Vec2::ZERO;
             self.canvas_zoom = 1.0;
+            self.target_zoom = 1.0;
         }
         if (modifiers.mac_cmd || modifiers.ctrl) && ctx.input(|i| i.key_pressed(egui::Key::Num1)) {
             self.fit_all_nodes(ctx);
@@ -203,7 +218,11 @@ impl super::PatchworkApp {
         }
 
         if let Some(_start) = self.box_select_start {
-            if primary_down {
+            // Escape cancels box selection without changing selection
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.box_select_start = None;
+                self.box_select_end = None;
+            } else if primary_down {
                 if let Some(pos) = ctx.pointer_latest_pos() {
                     self.box_select_end = Some(pos);
                 }

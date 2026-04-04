@@ -9,6 +9,10 @@ pub fn render(
     search: &mut String,
     _node_id: NodeId,
 ) {
+    // When pinned, the node renders under set_zoom_factor(zoom) with inverse-zoom style.
+    // Hardcoded sizes (scroll height, card height) need manual compensation.
+    let zoom = ui.ctx().zoom_factor();
+    let inv = 1.0 / zoom;
     // ── File actions (always accessible) ──
     ui.horizontal(|ui| {
         if ui.button("\u{2795} New").clicked() {
@@ -37,7 +41,7 @@ pub fn render(
     let cat = catalog();
 
     // Scrollable list with max height
-    egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
+    egui::ScrollArea::vertical().max_height(400.0 * inv).show(ui, |ui| {
         let mut last_cat = "";
         let mut any_shown = false;
 
@@ -59,7 +63,7 @@ pub fn render(
                 let cat_icon = icons::category_icon(entry.category);
                 let dim = ui.visuals().widgets.noninteractive.fg_stroke.color;
                 ui.horizontal(|ui| {
-                    ui.label(icons::icon_colored(cat_icon, 12.0, dim));
+                    ui.label(icons::icon_colored(cat_icon, 12.0 * inv, dim));
                     ui.label(egui::RichText::new(entry.category).small().strong().color(dim));
                 });
                 ui.add_space(2.0);
@@ -75,7 +79,7 @@ pub fn render(
             let n_inputs = { let nt = (entry.factory)(); nt.inputs().len() };
             let n_outputs = { let nt = (entry.factory)(); nt.outputs().len() };
 
-            let clicked = render_node_card(ui, entry.label, color_hint, n_inputs, n_outputs);
+            let clicked = render_node_card(ui, entry.label, color_hint, n_inputs, n_outputs, inv);
 
             if clicked {
                 let nt = (entry.factory)();
@@ -104,11 +108,12 @@ fn render_node_card(
     accent: egui::Color32,
     n_inputs: usize,
     n_outputs: usize,
+    inv: f32,
 ) -> bool {
     let card_width = ui.available_width();
-    let card_height = 28.0;
-    let port_r = 3.0;
-    let port_margin = 6.0;
+    let card_height = 28.0 * inv;
+    let port_r = 3.0 * inv;
+    let port_margin = 6.0 * inv;
 
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(card_width, card_height),
@@ -130,14 +135,15 @@ fn render_node_card(
         let port_output_color = vis.hyperlink_color; // accent-derived
 
         // Card background
-        painter.rect_filled(rect, 4.0, card_bg);
+        painter.rect_filled(rect, (4.0 * inv).round().max(1.0), card_bg);
 
         // Accent bar on left
         let accent_rect = egui::Rect::from_min_size(
             rect.min,
-            egui::vec2(3.0, card_height),
+            egui::vec2(3.0 * inv, card_height),
         );
-        painter.rect_filled(accent_rect, egui::CornerRadius { nw: 4, sw: 4, ne: 0, se: 0 }, accent);
+        let cr = (4.0 * inv).round().max(1.0) as u8;
+        painter.rect_filled(accent_rect, egui::CornerRadius { nw: cr, sw: cr, ne: 0, se: 0 }, accent);
 
         // Input port dots (left side)
         if n_inputs > 0 {
@@ -167,15 +173,15 @@ fn render_node_card(
 
         // Icon + label
         let node_icon = icons::node_icon(label);
-        let icon_x = rect.left() + 14.0;
-        let text_x = icon_x + 18.0;
+        let icon_x = rect.left() + 14.0 * inv;
+        let text_x = icon_x + 18.0 * inv;
         let cy = rect.center().y;
 
         painter.text(
             egui::pos2(icon_x, cy),
             egui::Align2::LEFT_CENTER,
             node_icon,
-            egui::FontId::proportional(14.0),
+            egui::FontId::proportional(14.0 * inv),
             accent,
         );
 
@@ -183,7 +189,7 @@ fn render_node_card(
             egui::pos2(text_x, cy),
             egui::Align2::LEFT_CENTER,
             label,
-            egui::FontId::proportional(12.0),
+            egui::FontId::proportional(12.0 * inv),
             text_color,
         );
     }
