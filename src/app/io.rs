@@ -1,5 +1,97 @@
 use super::*;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+
+/// Convert an absolute asset path to relative (relative to project directory).
+fn make_relative(abs_path: &str, project_dir: &str) -> String {
+    if abs_path.is_empty() { return String::new(); }
+    let abs = Path::new(abs_path);
+    let dir = Path::new(project_dir);
+    if let Ok(rel) = abs.strip_prefix(dir) {
+        rel.display().to_string()
+    } else {
+        // Not under project dir — keep absolute
+        abs_path.to_string()
+    }
+}
+
+/// Convert a relative asset path to absolute (resolved against project directory).
+fn make_absolute(rel_path: &str, project_dir: &str) -> String {
+    if rel_path.is_empty() { return String::new(); }
+    let p = Path::new(rel_path);
+    if p.is_absolute() {
+        return rel_path.to_string(); // already absolute
+    }
+    let dir = Path::new(project_dir);
+    dir.join(p).display().to_string()
+}
+
+/// Convert all asset paths in a graph to relative (for saving).
+fn relativize_paths(graph: &mut Graph, project_dir: &str) {
+    for node in graph.nodes.values_mut() {
+        match &mut node.node_type {
+            NodeType::ImageNode { path, save_path, .. } => {
+                *path = make_relative(path, project_dir);
+                *save_path = make_relative(save_path, project_dir);
+            }
+            NodeType::AudioPlayer { file_path, .. } => {
+                *file_path = make_relative(file_path, project_dir);
+            }
+            NodeType::VideoPlayer { path, .. } => {
+                *path = make_relative(path, project_dir);
+            }
+            NodeType::ClapPlugin { plugin_path, .. } => {
+                *plugin_path = make_relative(plugin_path, project_dir);
+            }
+            NodeType::MlModel { model_path, labels_path, .. } => {
+                *model_path = make_relative(model_path, project_dir);
+                *labels_path = make_relative(labels_path, project_dir);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Convert all asset paths in a graph to absolute (after loading).
+fn absolutize_paths(graph: &mut Graph, project_dir: &str) {
+    for node in graph.nodes.values_mut() {
+        match &mut node.node_type {
+            NodeType::ImageNode { path, save_path, .. } => {
+                *path = make_absolute(path, project_dir);
+                *save_path = make_absolute(save_path, project_dir);
+            }
+            NodeType::AudioPlayer { file_path, .. } => {
+                *file_path = make_absolute(file_path, project_dir);
+            }
+            NodeType::VideoPlayer { path, .. } => {
+                *path = make_absolute(path, project_dir);
+            }
+            NodeType::ClapPlugin { plugin_path, .. } => {
+                *plugin_path = make_absolute(plugin_path, project_dir);
+            }
+            NodeType::MlModel { model_path, labels_path, .. } => {
+                *model_path = make_absolute(model_path, project_dir);
+                *labels_path = make_absolute(labels_path, project_dir);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Project file format — includes graph, pinned nodes, and viewport state.
+/// Backward-compatible: old project.json files (raw Graph) are detected and loaded.
+#[derive(Serialize, Deserialize)]
+struct ProjectFile {
+    graph: Graph,
+    #[serde(default)]
+    pinned_nodes: Vec<NodeId>,
+    #[serde(default)]
+    canvas_offset: [f32; 2],
+    #[serde(default = "default_one_f32")]
+    canvas_zoom: f32,
+}
+
+fn default_one_f32() -> f32 { 1.0 }
 
 /// Minimal session state that gets auto-saved on close and restored on launch.
 #[derive(Serialize, Deserialize)]
@@ -54,6 +146,7 @@ impl super::PatchworkApp {
             }
         };
         let mut graph = state.graph;
+        graph.fix_next_id();
         // Always start with DSP off for safety (prevents unexpected audio on launch)
         for node in graph.nodes.values_mut() {
             if let NodeType::AudioDevice { enabled, .. } = &mut node.node_type {
@@ -296,60 +389,127 @@ impl super::PatchworkApp {
     /// Save to existing project path (Cmd+S). Falls back to Save As if no path set.
     pub(super) fn save_project_quick(&mut self) {
         if let Some(ref dir_str) = self.project_path.clone() {
-            let dir = std::path::Path::new(dir_str);
-            let project_file = dir.join("project.json");
-            let json = serde_json::to_string_pretty(&self.graph).unwrap_or_default();
-            let _ = std::fs::write(&project_file, json);
-            if !self.api_keys.is_empty() {
-                let keys_file = dir.join("api_keys.json");
-                let keys_json = serde_json::to_string_pretty(&self.api_keys).unwrap_or_default();
-                let _ = std::fs::write(&keys_file, keys_json);
-            }
+            self.save_to_dir(dir_str.clone());
         } else {
             self.save_project(); // No path yet → show dialog
         }
     }
 
-    /// Save As — always shows folder picker dialog (Cmd+Shift+S).
+    /// Save As — prompt for project name, then pick parent folder.
+    /// Creates a subfolder with the project name inside the chosen folder.
     pub(super) fn save_project(&mut self) {
-        if let Some(dir) = rfd::FileDialog::new().set_title("Save Project Folder").pick_folder() {
-            let project_file = dir.join("project.json");
-            let json = serde_json::to_string_pretty(&self.graph).unwrap_or_default();
-            let _ = std::fs::write(&project_file, json);
-            if !self.api_keys.is_empty() {
-                let keys_file = dir.join("api_keys.json");
-                let keys_json = serde_json::to_string_pretty(&self.api_keys).unwrap_or_default();
-                let _ = std::fs::write(&keys_file, keys_json);
+        // Step 1: Ask for project name via native dialog
+        let default_name = self.project_path.as_ref()
+            .and_then(|p| Path::new(p).file_name().map(|f| f.to_string_lossy().to_string()))
+            .unwrap_or_else(|| "my-project".to_string());
+
+        // Use save dialog which lets user type a name and pick location
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Save Patchwork Project")
+            .set_file_name(&default_name)
+            .save_file()
+        {
+            // The user picks a path — we treat it as the project folder
+            // (create it if it doesn't exist)
+            let project_dir = if path.extension().is_some() {
+                // User typed "name.json" → use parent as project dir
+                path.parent().map(|p| p.to_path_buf()).unwrap_or(path.clone())
+            } else {
+                // User typed a folder name → use as project dir
+                path
+            };
+            let dir_str = project_dir.display().to_string();
+            self.save_to_dir(dir_str.clone());
+            self.project_path = Some(dir_str);
+        }
+    }
+
+    /// Write project.json + api_keys.json to the given directory.
+    /// Asset paths are temporarily converted to relative for portability, then restored.
+    fn save_to_dir(&mut self, dir_str: String) {
+        let dir = Path::new(&dir_str);
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            crate::system_log::error(format!("Failed to create project folder: {}", e));
+            return;
+        }
+        // Temporarily relativize paths, serialize, then restore absolute paths
+        relativize_paths(&mut self.graph, &dir_str);
+        let pf = ProjectFile {
+            graph: self.graph.clone(),
+            pinned_nodes: self.pinned_nodes.iter().copied().collect(),
+            canvas_offset: [self.canvas_offset.x, self.canvas_offset.y],
+            canvas_zoom: self.canvas_zoom,
+        };
+        let project_file = dir.join("project.json");
+        match serde_json::to_string_pretty(&pf) {
+            Ok(json) => {
+                if json.len() < 10 {
+                    crate::system_log::error("Save produced empty JSON — skipping write".to_string());
+                } else if let Err(e) = std::fs::write(&project_file, &json) {
+                    crate::system_log::error(format!("Save failed: {}", e));
+                } else {
+                    crate::system_log::log(format!("Saved to {}", project_file.display()));
+                }
             }
-            self.project_path = Some(dir.display().to_string());
+            Err(e) => {
+                crate::system_log::error(format!("Serialization failed: {}", e));
+            }
+        }
+        // Restore absolute paths so the running app continues working
+        absolutize_paths(&mut self.graph, &dir_str);
+        if !self.api_keys.is_empty() {
+            let keys_file = dir.join("api_keys.json");
+            let keys_json = serde_json::to_string_pretty(&self.api_keys).unwrap_or_default();
+            let _ = std::fs::write(&keys_file, keys_json);
         }
     }
 
     pub(super) fn load_project(&mut self) {
-        // Try picking a folder first, then fall back to file
         if let Some(path) = rfd::FileDialog::new().add_filter("Patchwork", &["json"]).pick_file() {
             let dir = if path.file_name().map(|f| f == "project.json").unwrap_or(false) {
                 path.parent().map(|p| p.to_path_buf())
             } else {
                 None
             };
-            // Load graph from the file
+            let dir_str = dir.as_ref().map(|d| d.display().to_string())
+                .unwrap_or_else(|| path.parent().map(|p| p.display().to_string()).unwrap_or_default());
+
+            // Load project file
             if let Ok(json) = std::fs::read_to_string(&path) {
-                if let Ok(mut graph) = serde_json::from_str::<Graph>(&json) {
-                    // Always start with DSP off for safety (prevents unexpected audio on load)
-                    for node in graph.nodes.values_mut() {
-                        if let NodeType::AudioDevice { enabled, .. } = &mut node.node_type {
-                            *enabled = false;
+                match serde_json::from_str::<ProjectFile>(&json) {
+                    Ok(pf) => {
+                        let mut graph = pf.graph;
+                        graph.fix_next_id();
+                        absolutize_paths(&mut graph, &dir_str);
+                        // Always start with DSP off for safety
+                        for node in graph.nodes.values_mut() {
+                            if let NodeType::AudioDevice { enabled, .. } = &mut node.node_type {
+                                *enabled = false;
+                            }
                         }
+                        self.audio.stop_output();
+                        self.graph = graph;
+                        self.graph.audio_topology_dirty = true;
+                        // Restore UI state from project file
+                        self.pinned_nodes = pf.pinned_nodes.into_iter().collect();
+                        self.canvas_offset = egui::Vec2::new(pf.canvas_offset[0], pf.canvas_offset[1]);
+                        self.canvas_zoom = pf.canvas_zoom;
+                        self.target_zoom = pf.canvas_zoom;
+                        // Clear transient state
+                        self.port_positions.clear();
+                        self.node_rects.clear();
+                        self.undo_history.clear();
+                        self.selected_nodes.clear();
+                        self.selected_connection = None;
+                        self.wire_menu_conn = None;
+                        self.dragging_from = None;
+                        self.show_node_menu = false;
+                        self.show_context_menu = false;
+                        crate::system_log::log(format!("Loaded {}", path.display()));
                     }
-                    self.graph = graph;
-                    self.graph.audio_topology_dirty = true;
-                    self.audio.stop_output();
-                    self.port_positions.clear();
-                    self.node_rects.clear();
-                    self.undo_history.clear();
-                    self.pinned_nodes.clear();
-                    self.spawn_default_nodes();
+                    Err(e) => {
+                        crate::system_log::error(format!("Load failed: {}", e));
+                    }
                 }
             }
             // Load api_keys from the same folder
@@ -360,10 +520,8 @@ impl super::PatchworkApp {
                         self.api_keys = keys;
                     }
                 }
-                self.project_path = Some(dir.display().to_string());
-            } else {
-                self.project_path = Some(path.display().to_string());
             }
+            self.project_path = Some(dir_str);
         }
     }
 

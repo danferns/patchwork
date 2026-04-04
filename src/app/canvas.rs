@@ -362,9 +362,9 @@ impl super::PatchworkApp {
                 }
             }
 
-            // Origin crosshair
-            if rect.contains(egui::pos2(off.x, off.y)) {
-                painter.circle_filled(egui::pos2(off.x, off.y), 3.0, egui::Color32::from_rgba_premultiplied(gc[0], gc[1], gc[2], 80));
+            // Origin marker — subtle, same size as grid dots
+            if gs > 0 && rect.contains(egui::pos2(off.x, off.y)) {
+                painter.circle_filled(egui::pos2(off.x, off.y), 1.8, egui::Color32::from_rgba_premultiplied(gc[0], gc[1], gc[2], 60));
             }
             // Zoom indicator
             if (zoom - 1.0).abs() > 0.01 {

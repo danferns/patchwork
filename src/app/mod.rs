@@ -1352,6 +1352,55 @@ impl eframe::App for PatchworkApp {
             let image_ids: Vec<NodeId> = self.graph.nodes.keys().copied().collect();
             for id in image_ids {
                 let inputs: Vec<PortValue> = self.graph.collect_inputs(id, &values);
+
+                // Trait-based image nodes (Transform, ImageStyle, ColorChannel, Crop, etc.)
+                // need re-evaluation here because image sources weren't populated during graph.evaluate().
+                // Cached: only reprocess when inputs (image pointer + param state) change.
+                let is_dynamic = matches!(self.graph.nodes.get(&id).map(|n| &n.node_type), Some(NodeType::Dynamic { .. }));
+                if is_dynamic && inputs.iter().any(|v| matches!(v, PortValue::Image(_))) {
+                    // Build cache key from image pointer(s) + node state hash
+                    let mut cache_key: u64 = 0;
+                    for inp in &inputs {
+                        match inp {
+                            PortValue::Image(img) => cache_key ^= std::sync::Arc::as_ptr(img) as u64,
+                            PortValue::Float(f) => cache_key = cache_key.wrapping_mul(31).wrapping_add(f.to_bits() as u64),
+                            _ => {}
+                        }
+                    }
+                    // Include node state (save_state hash) for slider/param changes
+                    if let Some(node) = self.graph.nodes.get(&id) {
+                        if let NodeType::Dynamic { inner } = &node.node_type {
+                            let state = inner.node.save_state();
+                            let state_str = state.to_string();
+                            for b in state_str.bytes() {
+                                cache_key = cache_key.wrapping_mul(31).wrapping_add(b as u64);
+                            }
+                        }
+                    }
+                    let cache_id = egui::Id::new(("dyn_img_cache", id));
+                    let cached: Option<(u64, Vec<(usize, PortValue)>)> = ctx.data_mut(|d| d.get_temp(cache_id));
+                    if let Some((prev_key, prev_results)) = cached {
+                        if prev_key == cache_key {
+                            for (port, val) in prev_results {
+                                values.insert((id, port), val);
+                            }
+                            continue;
+                        }
+                    }
+                    // Cache miss — reprocess
+                    if let Some(mut node_mut) = self.graph.nodes.remove(&id) {
+                        if let NodeType::Dynamic { ref mut inner } = node_mut.node_type {
+                            let results = inner.node.evaluate(&inputs);
+                            for &(port, ref val) in &results {
+                                values.insert((id, port), val.clone());
+                            }
+                            ctx.data_mut(|d| d.insert_temp(cache_id, (cache_key, results)));
+                        }
+                        self.graph.nodes.insert(id, node_mut);
+                    }
+                    continue;
+                }
+
                 let node = match self.graph.nodes.get(&id) { Some(n) => n, None => continue };
                 match &node.node_type {
                     NodeType::ImageNode { image_data, .. } => {
@@ -1475,6 +1524,7 @@ impl eframe::App for PatchworkApp {
                             values.insert((id, 2), PortValue::Text(result_json.clone()));
                         }
                     }
+                    // Trait-based Dynamic nodes with image inputs are handled above (before the match)
                     _ => {}
                 }
             }

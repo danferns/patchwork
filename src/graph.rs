@@ -903,7 +903,8 @@ pub enum NodeType {
     },
     /// Trait-based node — standalone struct implementing NodeBehavior.
     /// This is the plugin pathway: external nodes use this variant.
-    #[serde(skip)]
+    /// Serialization is handled by DynNode's custom Serialize/Deserialize impl
+    /// (type_tag + save_state → JSON, reconstructed via NODE_REGISTRY on load).
     Dynamic {
         inner: DynNode,
     },
@@ -1455,6 +1456,12 @@ impl Graph {
         let node = self.nodes.get(&node_id)?;
         let ports = if is_output { node.node_type.outputs() } else { node.node_type.inputs() };
         ports.get(port_idx).map(|p| p.kind)
+    }
+
+    /// Fix next_id after deserialization to prevent ID collisions.
+    /// Sets next_id to one past the highest existing node ID.
+    pub fn fix_next_id(&mut self) {
+        self.next_id = self.nodes.keys().max().copied().unwrap_or(0) + 1;
     }
 
     pub fn add_node(&mut self, node_type: NodeType, pos: [f32; 2]) -> NodeId {

@@ -143,8 +143,9 @@ fn build_uniform_block(names: &[String], types: &[String]) -> String {
     s += "    resolution: vec2<f32>,\n";
     s += "    mouse: vec2<f32>,\n";
     s += "    _p0: f32,\n";
-    // user uniforms
+    // user uniforms (skip "time" — it's already in the header)
     for (i, name) in names.iter().enumerate() {
+        if name == "time" { continue; }
         let t = types.get(i).map(|s| s.as_str()).unwrap_or("float");
         match t {
             "color" => {
@@ -548,11 +549,32 @@ pub fn render(
         }
         Ok(()) => {
             if let Some(render_state) = wgpu_render_state {
-                let time = ui.ctx().input(|i| i.time) as f32;
+                // Use connected Time node value if "time" uniform port is wired,
+                // otherwise fall back to egui's internal clock.
+                let time = {
+                    let time_uniform_idx = uniform_names.iter().position(|n| n == "time");
+                    if let Some(idx) = time_uniform_idx {
+                        // Check if this uniform's port is connected (port 0 = WGSL code, so time port = 1 + idx)
+                        let time_port = 1 + idx;
+                        let connected = connections.iter().any(|c| c.to_node == node_id && c.to_port == time_port);
+                        if connected {
+                            user_values.get(idx).copied().unwrap_or(0.0)
+                        } else {
+                            ui.ctx().input(|i| i.time) as f32
+                        }
+                    } else {
+                        ui.ctx().input(|i| i.time) as f32
+                    }
+                };
+                // Filter "time" from user_values for GPU buffer — it's in the header at buf[0]
+                let gpu_values: Vec<f32> = uniform_names.iter().zip(user_values.iter())
+                    .filter(|(name, _)| name.as_str() != "time")
+                    .map(|(_, &v)| v)
+                    .collect();
                 let packed = pack_uniforms(
                     time, *canvas_w, *canvas_h,
                     0.0, 0.0,
-                    &user_values,
+                    &gpu_values,
                 );
 
                 render_with_wgpu(
@@ -562,7 +584,7 @@ pub fn render(
 
                 // Pop-out window rendering
                 if popout_open {
-                    let packed2 = pack_uniforms(time, *canvas_w, *canvas_h, 0.0, 0.0, &user_values);
+                    let packed2 = pack_uniforms(time, *canvas_w, *canvas_h, 0.0, 0.0, &gpu_values);
                     render_popout_window(ui.ctx(), &final_code, render_state, vertex_count, node_id, packed2, canvas_w, canvas_h);
                 }
             } else {
@@ -581,8 +603,20 @@ pub fn render(
         if let Some(render_state) = wgpu_render_state {
             let readback_w = (*canvas_w as u32).max(1).min(800);
             let readback_h = (*canvas_h as u32).max(1).min(600);
-            let time: f32 = ui.ctx().data_mut(|d| d.get_temp(egui::Id::new("wgsl_time")).unwrap_or(0.0));
-            let packed = pack_uniforms(time, readback_w as f32, readback_h as f32, 0.0, 0.0, &user_values);
+            // Reuse same time logic as main render — connected port or internal clock
+            let rb_time = {
+                let time_idx = uniform_names.iter().position(|n| n == "time");
+                if let Some(idx) = time_idx {
+                    let time_port = 1 + idx;
+                    let connected = connections.iter().any(|c| c.to_node == node_id && c.to_port == time_port);
+                    if connected { user_values.get(idx).copied().unwrap_or(0.0) }
+                    else { ui.ctx().input(|i| i.time) as f32 }
+                } else { ui.ctx().input(|i| i.time) as f32 }
+            };
+            let rb_gpu_values: Vec<f32> = uniform_names.iter().zip(user_values.iter())
+                .filter(|(name, _)| name.as_str() != "time")
+                .map(|(_, &v)| v).collect();
+            let packed = pack_uniforms(rb_time, readback_w as f32, readback_h as f32, 0.0, 0.0, &rb_gpu_values);
             if let Some(img) = render_offscreen(render_state, &final_code, node_id, packed, readback_w, readback_h) {
                 ui.ctx().data_mut(|d| {
                     d.insert_temp(egui::Id::new(("wgsl_image_output", node_id)), img);

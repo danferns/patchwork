@@ -72,6 +72,9 @@ pub mod curve;
 pub mod draw;
 pub mod color_curves;
 pub mod ml_model;
+pub mod transform_node;
+pub mod image_style_node;
+pub mod color_channel_node;
 pub mod video_player;
 pub mod timer;
 pub mod sample_hold;
@@ -306,6 +309,12 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
             factory: || NodeType::Dynamic { inner: crate::graph::DynNode { node: Box::new(crop_node::CropNode::default()) } } },
         NodeCatalogEntry { label: "Color Curves", category: "Image",
             factory: || NodeType::ColorCurves { master: vec![[0.0, 0.0], [1.0, 1.0]], red: vec![[0.0, 0.0], [1.0, 1.0]], green: vec![[0.0, 0.0], [1.0, 1.0]], blue: vec![[0.0, 0.0], [1.0, 1.0]], active_channel: 0 } },
+        NodeCatalogEntry { label: "Transform", category: "Image",
+            factory: || NodeType::Dynamic { inner: crate::graph::DynNode { node: Box::new(transform_node::TransformNode::default()) } } },
+        NodeCatalogEntry { label: "Image Style", category: "Image",
+            factory: || NodeType::Dynamic { inner: crate::graph::DynNode { node: Box::new(image_style_node::ImageStyleNode::default()) } } },
+        NodeCatalogEntry { label: "Color Channel", category: "Image",
+            factory: || NodeType::Dynamic { inner: crate::graph::DynNode { node: Box::new(color_channel_node::ColorChannelNode::default()) } } },
 
         // ── Signal ───────────────────────────────────────────
         NodeCatalogEntry { label: "Curve", category: "Signal",

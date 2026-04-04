@@ -46,7 +46,9 @@ impl Default for TimeNode {
 
 impl NodeBehavior for TimeNode {
     fn title(&self) -> &str { "Time" }
-    fn inputs(&self) -> Vec<PortDef> { vec![] }
+    fn inputs(&self) -> Vec<PortDef> {
+        vec![PortDef::new("Speed", PortKind::Number)]
+    }
 
     fn outputs(&self) -> Vec<PortDef> {
         vec![
@@ -58,7 +60,13 @@ impl NodeBehavior for TimeNode {
 
     fn color_hint(&self) -> [u8; 3] { [180, 220, 100] }
 
-    fn evaluate(&mut self, _inputs: &[PortValue]) -> Vec<(usize, PortValue)> {
+    fn evaluate(&mut self, inputs: &[PortValue]) -> Vec<(usize, PortValue)> {
+        // Use speed from input port if connected, otherwise use internal slider value
+        if let Some(PortValue::Float(v)) = inputs.first() {
+            if *v != 0.0 || inputs.len() > 0 {
+                self.speed = *v;
+            }
+        }
         let now = Instant::now();
         if self.running {
             let wall_dt = now.duration_since(self.last_instant).as_secs_f64();
@@ -94,11 +102,11 @@ impl NodeBehavior for TimeNode {
         }
     }
 
-    fn render_ui(&mut self, ui: &mut egui::Ui) {
+    fn render_with_context(&mut self, ui: &mut egui::Ui, ctx: &mut crate::node_trait::RenderContext) {
         ui.horizontal(|ui| {
             if ui.button(if self.running { "⏸" } else { "▶" }).clicked() {
                 self.running = !self.running;
-                self.last_instant = Instant::now(); // prevent jump on resume
+                self.last_instant = Instant::now();
             }
             if ui.button("Reset").clicked() {
                 self.elapsed = 0.0;
@@ -106,9 +114,18 @@ impl NodeBehavior for TimeNode {
             }
         });
 
+        // Speed: inline input port + slider
+        let speed_wired = ctx.connections.iter().any(|c| c.to_node == ctx.node_id && c.to_port == 0);
         ui.horizontal(|ui| {
+            crate::nodes::inline_port_circle(ui, ctx.node_id, 0, true, ctx.connections,
+                ctx.port_positions, ctx.dragging_from, ctx.pending_disconnects, PortKind::Number);
             ui.label(egui::RichText::new("Speed").small());
-            ui.add(egui::Slider::new(&mut self.speed, 0.0..=10.0).step_by(0.1));
+            if speed_wired {
+                ui.label(egui::RichText::new(format!("{:.1}", self.speed)).small()
+                    .color(egui::Color32::from_rgb(80, 170, 255)));
+            } else {
+                ui.add(egui::Slider::new(&mut self.speed, 0.0..=10.0).step_by(0.1));
+            }
         });
 
         // Display
