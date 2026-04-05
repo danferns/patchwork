@@ -546,6 +546,13 @@ pub fn render(
             ui.colored_label(egui::Color32::from_rgb(255, 100, 100), format!("Error: {}", e));
             let (rect, _) = ui.allocate_exact_size(egui::vec2(*canvas_w, *canvas_h), egui::Sense::hover());
             ui.painter().rect_filled(rect, 4.0, egui::Color32::from_rgb(40, 15, 15));
+            // Log to system console (deduplicated — only when error text changes)
+            let err_id = egui::Id::new(("wgsl_last_err", node_id));
+            let prev: Option<String> = ui.ctx().data_mut(|d| d.get_temp(err_id));
+            if prev.as_deref() != Some(&e) {
+                crate::system_log::error(format!("WGSL (id:{}): {}", node_id, e));
+                ui.ctx().data_mut(|d| d.insert_temp(err_id, e));
+            }
         }
         Ok(()) => {
             if let Some(render_state) = wgpu_render_state {

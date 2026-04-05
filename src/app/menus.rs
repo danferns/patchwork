@@ -46,31 +46,71 @@ impl super::PatchworkApp {
         let accent = egui::Color32::from_rgb(accent_rgb[0], accent_rgb[1], accent_rgb[2]);
 
         let inv = 1.0 / self.canvas_zoom;
+        let menu_w = 180.0 * inv;
         let resp = egui::Window::new(egui::RichText::new("\u{2795} Add Node").color(accent).strong())
             .id(menu_id)
             .fixed_pos(pos)
-            .default_width(200.0 * inv)
+            .default_width(menu_w)
             .resizable(false)
             .collapsible(false)
             .title_bar(true)
             .scroll([false, true])
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
+                ui.set_max_width(menu_w);
+
                 // Search box (auto-focused)
+                let prev_search = self.node_menu_search.clone();
                 let search_re = ui.add(
                     egui::TextEdit::singleline(&mut self.node_menu_search)
-                        .hint_text("\u{1f50d} Search nodes...")
-                        .desired_width(180.0),
+                        .hint_text("\u{1f50d} Search...")
+                        .desired_width(menu_w - 8.0),
                 );
-                if search_re.gained_focus() || self.node_menu_search.is_empty() {
+                if search_re.gained_focus() || prev_search.is_empty() {
                     search_re.request_focus();
                 }
+                if self.node_menu_search != prev_search {
+                    self.node_menu_selected = 0;
+                }
+
+                // Category filter pills
+                // Category pills — some map to multiple catalog categories
+                let categories: &[(&str, &[&str])] = &[
+                    ("All", &[]),
+                    ("Math", &["Math", "Logic"]),
+                    ("Signal", &["Signal", "Input"]),
+                    ("Visual", &["Image", "Video", "Shader", "ML"]),
+                    ("Audio", &["Audio"]),
+                    ("I/O", &["IO", "Network", "Serial", "OSC", "MIDI", "Hardware"]),
+                    ("Utility", &["Utility", "Output", "Custom"]),
+                ];
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    for &(label, _) in categories {
+                        let is_active = if label == "All" { self.node_menu_category.is_empty() } else { self.node_menu_category == label };
+                        let text = egui::RichText::new(label).small();
+                        let btn = if is_active {
+                            egui::Button::new(text.strong().color(egui::Color32::WHITE))
+                                .fill(egui::Color32::from_rgba_unmultiplied(accent_rgb[0], accent_rgb[1], accent_rgb[2], 180))
+                                .corner_radius(10.0)
+                        } else {
+                            egui::Button::new(text.color(egui::Color32::GRAY))
+                                .fill(egui::Color32::TRANSPARENT)
+                                .corner_radius(10.0)
+                        };
+                        if ui.add(btn).clicked() {
+                            self.node_menu_category = if label == "All" { String::new() } else { label.to_string() };
+                            self.node_menu_selected = 0;
+                        }
+                    }
+                });
 
                 ui.separator();
 
                 let query = self.node_menu_search.to_lowercase();
                 let catalog = nodes::catalog();
                 let wire_ctx = self.wire_menu_context;
+                let cat_filter = &self.node_menu_category;
 
                 // Show filter hint if opened via Tab
                 if wire_ctx.is_some() {
@@ -78,32 +118,61 @@ impl super::PatchworkApp {
                     ui.separator();
                 }
 
-                let mut last_cat = "";
-                let mut any_shown = false;
-
-                let off_e = self.canvas_offset / self.canvas_zoom;
-                let spawn_x = self.node_menu_pos.x - off_e.x;
-                let mut spawn_y_base = self.node_menu_pos.y - off_e.y;
-
-                for entry in &catalog {
+                // Collect visible entries (filtered by search + category + wire compat)
+                let mut visible: Vec<usize> = Vec::new();
+                for (i, entry) in catalog.iter().enumerate() {
                     if entry.category == "System" { continue; }
-
+                    // Category pill filter — match against grouped categories
+                    if !cat_filter.is_empty() {
+                        let matched = categories.iter().any(|&(label, cats)| {
+                            label == cat_filter.as_str() && cats.contains(&entry.category)
+                        });
+                        if !matched { continue; }
+                    }
+                    // Text search
                     if !query.is_empty()
                         && !entry.label.to_lowercase().contains(&query)
                         && !entry.category.to_lowercase().contains(&query)
-                    {
-                        continue;
-                    }
-
-                    // Filter by port compatibility if opened via Tab+wire
+                    { continue; }
+                    // Wire compatibility filter
                     if let Some((_src_nid, _src_port, src_is_output, src_kind)) = wire_ctx {
                         let candidate = (entry.factory)();
-                        // If dragging from output → check candidate's inputs for compatible kind
-                        // If dragging from input → check candidate's outputs
                         let target_ports = if src_is_output { candidate.inputs() } else { candidate.outputs() };
-                        let has_compatible = target_ports.iter().any(|p| port_kinds_compatible(src_kind, p.kind));
-                        if !has_compatible { continue; }
+                        if !target_ports.iter().any(|p| port_kinds_compatible(src_kind, p.kind)) { continue; }
                     }
+                    visible.push(i);
+                }
+
+                // Keyboard navigation (arrow keys + enter)
+                let up = ui.ctx().input(|i| i.key_pressed(egui::Key::ArrowUp));
+                let down = ui.ctx().input(|i| i.key_pressed(egui::Key::ArrowDown));
+                let enter = ui.ctx().input(|i| i.key_pressed(egui::Key::Enter));
+                if up && self.node_menu_selected > 0 {
+                    self.node_menu_selected -= 1;
+                }
+                if down && self.node_menu_selected + 1 < visible.len() {
+                    self.node_menu_selected += 1;
+                }
+                // Clamp selection
+                if !visible.is_empty() {
+                    self.node_menu_selected = self.node_menu_selected.min(visible.len() - 1);
+                }
+
+                let off_e = self.canvas_offset / self.canvas_zoom;
+                let spawn_x = self.node_menu_pos.x - off_e.x;
+                let spawn_y_base = self.node_menu_pos.y - off_e.y;
+
+                // Spawn helper (used by both click and Enter)
+                let mut spawn_idx: Option<usize> = None;
+                if enter && !visible.is_empty() {
+                    spawn_idx = Some(visible[self.node_menu_selected]);
+                }
+
+                let mut last_cat = "";
+                let mut visible_pos = 0usize;
+                for &cat_idx in &visible {
+                    let entry = &catalog[cat_idx];
+                    let is_selected = visible_pos == self.node_menu_selected;
 
                     // Category header
                     if entry.category != last_cat {
@@ -116,46 +185,58 @@ impl super::PatchworkApp {
                         last_cat = entry.category;
                     }
 
+                    let text = egui::RichText::new(entry.label).size(13.0);
                     let btn = ui.add_sized(
                         [ui.available_width(), 24.0],
-                        egui::Button::new(egui::RichText::new(entry.label).size(13.0))
+                        egui::Button::new(if is_selected { text.strong().color(accent) } else { text })
+                            .fill(if is_selected {
+                                egui::Color32::from_rgba_unmultiplied(accent_rgb[0], accent_rgb[1], accent_rgb[2], 30)
+                            } else {
+                                egui::Color32::TRANSPARENT
+                            })
                             .frame(true),
                     );
 
+                    // Scroll selected item into view
+                    if is_selected && (up || down) {
+                        btn.scroll_to_me(Some(egui::Align::Center));
+                    }
+
                     if btn.clicked() {
-                        self.push_undo();
-                        let nt = (entry.factory)();
-
-                        // Find compatible port before consuming nt
-                        let target_port_idx = if let Some((_, _, src_is_output, src_kind)) = wire_ctx {
-                            let target_ports = if src_is_output { nt.inputs() } else { nt.outputs() };
-                            target_ports.iter().position(|p| port_kinds_compatible(src_kind, p.kind))
-                        } else { None };
-
-                        let new_id = self.graph.add_node(nt, [spawn_x, spawn_y_base]);
-
-                        // Auto-connect if opened via Tab+wire
-                        if let Some((src_nid, src_port, src_is_output, _)) = wire_ctx {
-                            if let Some(tp) = target_port_idx {
-                                if src_is_output {
-                                    self.graph.add_connection(src_nid, src_port, new_id, tp);
-                                } else {
-                                    self.graph.add_connection(new_id, tp, src_nid, src_port);
-                                }
-                            }
-                            self.dragging_from = None;
-                            self.wire_menu_context = None;
-                        }
-
-                        spawn_y_base += 40.0;
-                        keep_open = false;
+                        spawn_idx = Some(cat_idx);
                     }
 
                     btn.on_hover_text(format!("Add {} node", entry.label));
-                    any_shown = true;
+                    visible_pos += 1;
                 }
 
-                if !any_shown {
+                // Spawn the selected node (from click or Enter)
+                if let Some(cat_idx) = spawn_idx {
+                    let entry = &catalog[cat_idx];
+                    self.push_undo();
+                    let nt = (entry.factory)();
+                    let target_port_idx = if let Some((_, _, src_is_output, src_kind)) = wire_ctx {
+                        let target_ports = if src_is_output { nt.inputs() } else { nt.outputs() };
+                        target_ports.iter().position(|p| port_kinds_compatible(src_kind, p.kind))
+                    } else { None };
+
+                    let new_id = self.graph.add_node(nt, [spawn_x, spawn_y_base]);
+                    if let Some((src_nid, src_port, src_is_output, _)) = wire_ctx {
+                        if let Some(tp) = target_port_idx {
+                            if src_is_output {
+                                self.graph.add_connection(src_nid, src_port, new_id, tp);
+                            } else {
+                                self.graph.add_connection(new_id, tp, src_nid, src_port);
+                            }
+                        }
+                        self.dragging_from = None;
+                        self.wire_menu_context = None;
+                    }
+                    let _ = spawn_y_base;
+                    keep_open = false;
+                }
+
+                if visible.is_empty() {
                     ui.add_space(8.0);
                     ui.label(egui::RichText::new("No matches").color(egui::Color32::GRAY).italics());
                     ui.add_space(8.0);
@@ -181,6 +262,8 @@ impl super::PatchworkApp {
         if !keep_open {
             self.show_node_menu = false;
             self.node_menu_search.clear();
+            self.node_menu_category.clear();
+            self.node_menu_selected = 0;
             self.wire_menu_context = None;
         }
         ctx.set_style(orig_style);

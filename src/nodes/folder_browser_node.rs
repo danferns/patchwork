@@ -1,4 +1,4 @@
-use crate::graph::{PortDef, PortKind, PortValue};
+use crate::graph::{PortDef, PortKind, PortValue, NodeType};
 use crate::node_trait::NodeBehavior;
 use crate::icons;
 use serde::{Serialize, Deserialize};
@@ -22,11 +22,16 @@ pub struct FolderBrowserNode {
     pub selected_file: String,
     #[serde(default)]
     pub search: String,
+    /// Cached file content — only re-read when selected_file changes.
+    #[serde(skip)]
+    cached_content: String,
+    #[serde(skip)]
+    cached_content_path: String,
 }
 
 impl Default for FolderBrowserNode {
     fn default() -> Self {
-        Self { path: String::new(), selected_file: String::new(), search: String::new() }
+        Self { path: String::new(), selected_file: String::new(), search: String::new(), cached_content: String::new(), cached_content_path: String::new() }
     }
 }
 
@@ -43,9 +48,13 @@ impl NodeBehavior for FolderBrowserNode {
         let name = Path::new(&self.selected_file).file_name()
             .map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         results.push((1, PortValue::Text(name)));
+        // Cache file content — only re-read when selected file changes
         if !self.selected_file.is_empty() {
-            let content = std::fs::read_to_string(&self.selected_file).unwrap_or_default();
-            results.push((2, PortValue::Text(content)));
+            if self.cached_content_path != self.selected_file {
+                self.cached_content = std::fs::read_to_string(&self.selected_file).unwrap_or_default();
+                self.cached_content_path = self.selected_file.clone();
+            }
+            results.push((2, PortValue::Text(self.cached_content.clone())));
         }
         results
     }
@@ -112,7 +121,8 @@ impl NodeBehavior for FolderBrowserNode {
         // File list
         egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
             if let Some(parent) = Path::new(&self.path).parent() {
-                if render_file_row(ui, "..", true, "", 0, false) {
+                let (clicked, _) = render_file_row(ui, "..", true, "", 0, false);
+                if clicked {
                     self.path = parent.to_string_lossy().to_string();
                     ui.ctx().data_mut(|d| d.remove::<(u64, Vec<DirEntry>)>(cache_id));
                 }
@@ -121,13 +131,24 @@ impl NodeBehavior for FolderBrowserNode {
             for entry in &entries {
                 if !query.is_empty() && !entry.name.to_lowercase().contains(&query) { continue; }
                 let selected = entry.full_path == self.selected_file;
-                if render_file_row(ui, &entry.name, entry.is_dir, &entry.ext, entry.size, selected) {
+                let (clicked, double_clicked) = render_file_row(ui, &entry.name, entry.is_dir, &entry.ext, entry.size, selected);
+                if clicked || double_clicked {
                     if entry.is_dir {
                         self.path = entry.full_path.clone();
                         self.selected_file.clear();
                         ui.ctx().data_mut(|d| d.remove::<(u64, Vec<DirEntry>)>(cache_id));
                     } else {
                         self.selected_file = entry.full_path.clone();
+                        // Double-click → spawn appropriate node for this file type
+                        if double_clicked {
+                            if let Some(nt) = node_type_for_file(&entry.full_path, &entry.ext) {
+                                ui.memory_mut(|mem| {
+                                    let mut v: Vec<NodeType> = mem.data.get_temp(egui::Id::new("palette_spawn")).unwrap_or_default();
+                                    v.push(nt);
+                                    mem.data.insert_temp(egui::Id::new("palette_spawn"), v);
+                                });
+                            }
+                        }
                     }
                 }
                 any = true;
@@ -147,7 +168,8 @@ impl NodeBehavior for FolderBrowserNode {
     }
 }
 
-fn render_file_row(ui: &mut egui::Ui, name: &str, is_dir: bool, ext: &str, size: u64, is_selected: bool) -> bool {
+/// Returns (clicked, double_clicked)
+fn render_file_row(ui: &mut egui::Ui, name: &str, is_dir: bool, ext: &str, size: u64, is_selected: bool) -> (bool, bool) {
     let row_h = 22.0;
     let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), egui::Sense::click());
     if ui.is_rect_visible(rect) {
@@ -184,7 +206,49 @@ fn render_file_row(ui: &mut egui::Ui, name: &str, is_dir: bool, ext: &str, size:
                 s, egui::FontId::new(9.0, egui::FontFamily::Proportional), dim);
         }
     }
-    response.clicked()
+    (response.clicked(), response.double_clicked())
+}
+
+/// Create the appropriate NodeType for a file based on its extension.
+fn node_type_for_file(path: &str, ext: &str) -> Option<NodeType> {
+    match ext {
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" => {
+            let image_data = crate::nodes::image_node::load_image_from_path(path);
+            Some(NodeType::ImageNode {
+                path: path.to_string(), save_path: String::new(),
+                image_data, preview_size: 150.0, last_save_hash: 0,
+            })
+        }
+        "mp4" | "mov" | "avi" | "webm" | "mkv" => {
+            Some(NodeType::VideoPlayer {
+                path: path.to_string(), playing: false, looping: false,
+                res_w: 640, res_h: 480, current_frame: None,
+                duration: 0.0, speed: 1.0, status: "Loaded".into(),
+            })
+        }
+        "mp3" | "wav" | "ogg" | "flac" | "aac" | "m4a" => {
+            Some(NodeType::AudioPlayer {
+                file_path: path.to_string(), volume: 1.0,
+                looping: false, duration_secs: 0.0,
+            })
+        }
+        "wgsl" | "glsl" | "hlsl" => {
+            let code = std::fs::read_to_string(path).unwrap_or_default();
+            Some(NodeType::WgslViewer {
+                wgsl_code: code, canvas_w: 300.0, canvas_h: 200.0,
+                uniform_names: Vec::new(), uniform_values: Vec::new(),
+                uniform_types: Vec::new(), uniform_min: Vec::new(),
+                uniform_max: Vec::new(), resolution: 512, expanded: false,
+            })
+        }
+        _ => {
+            // Text/code files → File node
+            let mut file_node = crate::nodes::file_node::FileNode::default();
+            file_node.path = path.to_string();
+            file_node.load_file();
+            Some(NodeType::Dynamic { inner: crate::graph::DynNode { node: Box::new(file_node) } })
+        }
+    }
 }
 
 fn read_dir(path: &str) -> Vec<DirEntry> {

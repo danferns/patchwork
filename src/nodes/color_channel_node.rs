@@ -75,12 +75,7 @@ impl NodeBehavior for ColorChannelNode {
         ]
     }
     fn outputs(&self) -> Vec<PortDef> {
-        vec![
-            PortDef::new("Image", PortKind::Image),
-            PortDef::new("R", PortKind::Image),
-            PortDef::new("G", PortKind::Image),
-            PortDef::new("B", PortKind::Image),
-        ]
+        vec![PortDef::new("Image", PortKind::Image)]
     }
     fn color_hint(&self) -> [u8; 3] { [200, 160, 120] }
     fn inline_ports(&self) -> bool { true }
@@ -92,20 +87,29 @@ impl NodeBehavior for ColorChannelNode {
 
         match inputs.first() {
             Some(PortValue::Image(img)) => {
-                let (combined, r, g, b) = self.process(img);
-                vec![
-                    (0, PortValue::Image(combined)),
-                    (1, PortValue::Image(r)),
-                    (2, PortValue::Image(g)),
-                    (3, PortValue::Image(b)),
-                ]
+                // If all levels are 1.0, pass through without processing
+                let identity = (self.r_level - 1.0).abs() < 0.01
+                    && (self.g_level - 1.0).abs() < 0.01
+                    && (self.b_level - 1.0).abs() < 0.01;
+
+                if identity {
+                    // No processing needed — pass through original
+                    vec![(0, PortValue::Image(img.clone()))]
+                } else {
+                    // Only create combined output (most common use case)
+                    // Individual R/G/B channels only created on demand via process()
+                    let len = img.pixels.len();
+                    let mut pixels = img.pixels.clone();
+                    for i in (0..len).step_by(4) {
+                        if i + 2 >= len { break; }
+                        pixels[i]     = (img.pixels[i] as f32 * self.r_level).clamp(0.0, 255.0) as u8;
+                        pixels[i + 1] = (img.pixels[i + 1] as f32 * self.g_level).clamp(0.0, 255.0) as u8;
+                        pixels[i + 2] = (img.pixels[i + 2] as f32 * self.b_level).clamp(0.0, 255.0) as u8;
+                    }
+                    vec![(0, PortValue::Image(Arc::new(ImageData { width: img.width, height: img.height, pixels })))]
+                }
             }
-            _ => vec![
-                (0, PortValue::None),
-                (1, PortValue::None),
-                (2, PortValue::None),
-                (3, PortValue::None),
-            ],
+            _ => vec![(0, PortValue::None)],
         }
     }
 
@@ -136,11 +140,6 @@ impl NodeBehavior for ColorChannelNode {
             } else {
                 ui.add(egui::Slider::new(&mut self.r_level, 0.0..=2.0).step_by(0.01).show_value(true));
             }
-            // R output port on the right
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                crate::nodes::inline_port_circle(ui, ctx.node_id, 1, false, ctx.connections,
-                    ctx.port_positions, ctx.dragging_from, ctx.pending_disconnects, PortKind::Image);
-            });
         });
 
         // G level
@@ -154,10 +153,6 @@ impl NodeBehavior for ColorChannelNode {
             } else {
                 ui.add(egui::Slider::new(&mut self.g_level, 0.0..=2.0).step_by(0.01).show_value(true));
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                crate::nodes::inline_port_circle(ui, ctx.node_id, 2, false, ctx.connections,
-                    ctx.port_positions, ctx.dragging_from, ctx.pending_disconnects, PortKind::Image);
-            });
         });
 
         // B level
@@ -171,10 +166,6 @@ impl NodeBehavior for ColorChannelNode {
             } else {
                 ui.add(egui::Slider::new(&mut self.b_level, 0.0..=2.0).step_by(0.01).show_value(true));
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                crate::nodes::inline_port_circle(ui, ctx.node_id, 3, false, ctx.connections,
-                    ctx.port_positions, ctx.dragging_from, ctx.pending_disconnects, PortKind::Image);
-            });
         });
 
         ui.separator();

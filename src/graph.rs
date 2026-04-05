@@ -556,6 +556,26 @@ pub enum NodeType {
         #[serde(default)]
         hub_node_id: NodeId,
     },
+    /// OB Orb — ESP32 with 8 WS2812B LED strips (output) + IMU accelerometer/gyroscope (input).
+    /// Mode 0 = Manual per-strip RGB, 1 = Manual uniform color + brightness, 2+ = Effects.
+    ObOrb {
+        #[serde(default = "default_device_id")]
+        device_id: u8,
+        #[serde(default)]
+        hub_node_id: NodeId,
+        #[serde(default)]
+        mode: u8,
+        #[serde(default = "default_orb_color")]
+        color: [u8; 3],
+        #[serde(default)]
+        param1: f32,
+        #[serde(default)]
+        param2: f32,
+        #[serde(default = "default_one")]
+        speed: f32,
+        #[serde(default = "default_orb_brightness")]
+        brightness: f32,
+    },
     Synth {
         #[serde(default)]
         waveform: crate::audio::Waveform,
@@ -974,6 +994,8 @@ pub struct DrawStroke {
 }
 
 fn default_device_id() -> u8 { 1 }
+fn default_orb_color() -> [u8; 3] { [255, 255, 255] }
+fn default_orb_brightness() -> f32 { 1.0 }
 fn default_preview_size() -> f32 { 150.0 }
 fn default_draw_size() -> f32 { 200.0 }
 fn default_draw_width() -> f32 { 2.0 }
@@ -1017,6 +1039,7 @@ impl NodeBehavior for NodeType {
             NodeType::ObHub { .. } => "OB Hub",
             NodeType::ObJoystick { .. } => "OB Joystick",
             NodeType::ObEncoder { .. } => "OB Encoder",
+            NodeType::ObOrb { .. } => "OB Orb",
             NodeType::Synth { .. } => "Synth",
             NodeType::AudioPlayer { .. } => "Audio Player",
             NodeType::AudioInput { .. } => "Microphone",
@@ -1108,6 +1131,10 @@ impl NodeBehavior for NodeType {
             NodeType::ObHub { .. } => vec![PortDef::new("Command", Text)],
             NodeType::ObJoystick { .. } => vec![],
             NodeType::ObEncoder { .. } => vec![],
+            NodeType::ObOrb { .. } => {
+                // Single "Drive" input — connect audio, slider, noise, anything
+                vec![PortDef::new("Drive", Number)]
+            },
             NodeType::Synth { .. } => vec![PortDef::new("Freq", Number), PortDef::new("Amp", Normalized), PortDef::new("Gate", Gate), PortDef::new("FM Wt", Normalized)],
             NodeType::AudioPlayer { .. } => vec![PortDef::new("Play", Trigger), PortDef::new("Volume", Normalized), PortDef::new("Seek", Normalized), PortDef::new("Speed", Number)],
             NodeType::AudioInput { .. } => vec![PortDef::new("Gain", Normalized)],
@@ -1233,6 +1260,14 @@ impl NodeBehavior for NodeType {
                             ports.push(PortDef::dynamic(format!("e{}_click", id), Gate));
                             ports.push(PortDef::dynamic(format!("e{}_pos", id), Number));
                         }
+                        "orb" => {
+                            ports.push(PortDef::dynamic(format!("orb{}_ax", id), Number));
+                            ports.push(PortDef::dynamic(format!("orb{}_ay", id), Number));
+                            ports.push(PortDef::dynamic(format!("orb{}_az", id), Number));
+                            ports.push(PortDef::dynamic(format!("orb{}_gx", id), Number));
+                            ports.push(PortDef::dynamic(format!("orb{}_gy", id), Number));
+                            ports.push(PortDef::dynamic(format!("orb{}_gz", id), Number));
+                        }
                         other => {
                             ports.push(PortDef::dynamic(format!("{}{}_{}", &other[..1], id, "val"), Number));
                         }
@@ -1245,6 +1280,10 @@ impl NodeBehavior for NodeType {
             },
             NodeType::ObJoystick { .. } => vec![PortDef::new("X", Normalized), PortDef::new("Y", Normalized), PortDef::new("Button", Gate)],
             NodeType::ObEncoder { .. } => vec![PortDef::new("Turn", Number), PortDef::new("Click", Gate), PortDef::new("Position", Number)],
+            NodeType::ObOrb { .. } => vec![
+                PortDef::new("Accel X", Number), PortDef::new("Accel Y", Number), PortDef::new("Accel Z", Number),
+                PortDef::new("Gyro X", Number), PortDef::new("Gyro Y", Number), PortDef::new("Gyro Z", Number),
+            ],
             NodeType::Synth { .. } => vec![PortDef::new("Audio", Audio)],
             NodeType::AudioPlayer { .. } => vec![PortDef::new("Audio", Audio), PortDef::new("Progress", Normalized)],
             NodeType::AudioInput { .. } => vec![PortDef::new("Audio", Audio)],
@@ -1312,6 +1351,7 @@ impl NodeBehavior for NodeType {
             NodeType::ObHub { .. } => [40, 180, 120],
             NodeType::ObJoystick { .. } => [80, 160, 255],
             NodeType::ObEncoder { .. } => [200, 140, 80],
+            NodeType::ObOrb { .. } => [60, 200, 200],
             NodeType::Synth { .. } => [100, 220, 180],
             NodeType::AudioPlayer { .. } => [180, 100, 220],
             NodeType::AudioInput { .. } => [220, 80, 120],
@@ -1352,7 +1392,7 @@ impl NodeBehavior for NodeType {
     fn inline_ports(&self) -> bool {
         match self {
             NodeType::Dynamic { inner } => inner.node.inline_ports(),
-            _ => matches!(self, NodeType::Theme { .. } | NodeType::MidiOut { .. } | NodeType::Synth { .. } | NodeType::WgslViewer { .. } | NodeType::ImageEffects { .. } | NodeType::Slider { .. } | NodeType::Blend { .. } | NodeType::HttpRequest { .. } | NodeType::AiRequest { .. } | NodeType::Math { .. } | NodeType::AudioDelay { .. } | NodeType::AudioDistortion { .. } | NodeType::AudioLowPass { .. } | NodeType::AudioHighPass { .. } | NodeType::AudioGain { .. } | NodeType::AudioReverb { .. } | NodeType::AudioEq { .. } | NodeType::AudioPlayer { .. } | NodeType::Timer { .. } | NodeType::SampleHold { .. } | NodeType::Select { .. } | NodeType::Curve { .. } | NodeType::AudioMixer { .. } | NodeType::Speaker { .. } | NodeType::AudioInput { .. } | NodeType::AudioSampler { .. } | NodeType::ClapPlugin { .. } | NodeType::Console { .. }),
+            _ => matches!(self, NodeType::Theme { .. } | NodeType::MidiOut { .. } | NodeType::Synth { .. } | NodeType::WgslViewer { .. } | NodeType::ImageEffects { .. } | NodeType::Slider { .. } | NodeType::Blend { .. } | NodeType::HttpRequest { .. } | NodeType::AiRequest { .. } | NodeType::Math { .. } | NodeType::AudioDelay { .. } | NodeType::AudioDistortion { .. } | NodeType::AudioLowPass { .. } | NodeType::AudioHighPass { .. } | NodeType::AudioGain { .. } | NodeType::AudioReverb { .. } | NodeType::AudioEq { .. } | NodeType::AudioPlayer { .. } | NodeType::Timer { .. } | NodeType::SampleHold { .. } | NodeType::Select { .. } | NodeType::Curve { .. } | NodeType::AudioMixer { .. } | NodeType::Speaker { .. } | NodeType::AudioInput { .. } | NodeType::AudioSampler { .. } | NodeType::ClapPlugin { .. } | NodeType::Console { .. } | NodeType::ObOrb { .. }),
         }
     }
 

@@ -88,6 +88,35 @@ impl ObDevice {
                     self.values.insert("value".into(), v);
                 }
             }
+            ("orb", act) if act == "accel" || act == "gyro" || act == "imu" => {
+                match act {
+                    "accel" => {
+                        if values.len() >= 3 {
+                            self.values.insert("ax".into(), values[0]);
+                            self.values.insert("ay".into(), values[1]);
+                            self.values.insert("az".into(), values[2]);
+                        }
+                    }
+                    "gyro" => {
+                        if values.len() >= 3 {
+                            self.values.insert("gx".into(), values[0]);
+                            self.values.insert("gy".into(), values[1]);
+                            self.values.insert("gz".into(), values[2]);
+                        }
+                    }
+                    "imu" => {
+                        if values.len() >= 6 {
+                            self.values.insert("ax".into(), values[0]);
+                            self.values.insert("ay".into(), values[1]);
+                            self.values.insert("az".into(), values[2]);
+                            self.values.insert("gx".into(), values[3]);
+                            self.values.insert("gy".into(), values[4]);
+                            self.values.insert("gz".into(), values[5]);
+                        }
+                    }
+                    _ => {}
+                }
+            }
             // Generic fallback: store all values by index
             (_, _) => {
                 for (i, &v) in values.iter().enumerate() {
@@ -345,6 +374,11 @@ impl ObManager {
         self.hubs.get_mut(&node_id)
     }
 
+    /// Get mutable reference to any connected hub (for sending commands when hub_node_id is 0)
+    pub fn find_any_hub_mut(&mut self) -> Option<&mut ObHub> {
+        self.hubs.values_mut().find(|h| h.is_connected)
+    }
+
     /// Find any hub that has a device of the given type/id
     pub fn find_device(&self, device_type: &str, id: u8) -> Option<(NodeId, &ObDevice)> {
         for (&hub_id, hub) in &self.hubs {
@@ -413,8 +447,11 @@ fn parse_ob_line(line: &str) -> ObMessage {
     }
 
     // Data messages: /type/id/action val0 val1 ...
-    if line.starts_with('/') {
-        let parts: Vec<&str> = line.split_whitespace().collect();
+    // Also handle lines with prefix noise (e.g., "RECV from MAC /orb/1/accel ...")
+    let data_start = line.find('/').unwrap_or(0);
+    let data_line = &line[data_start..];
+    if data_line.starts_with('/') && !data_line.starts_with("/sys/") {
+        let parts: Vec<&str> = data_line.split_whitespace().collect();
         if !parts.is_empty() {
             let path_parts: Vec<&str> = parts[0].split('/').collect();
             // path_parts = ["", "joystick", "1", "xybtn"]

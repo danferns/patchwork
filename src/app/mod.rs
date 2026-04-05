@@ -147,6 +147,8 @@ pub struct PatchworkApp {
     show_node_menu: bool,
     node_menu_pos: egui::Pos2,
     node_menu_search: String,
+    node_menu_selected: usize,
+    node_menu_category: String, // "" = All
     /// When set, the node menu was opened via Tab while dragging a wire.
     /// Contains (source_node, source_port, is_output, port_kind) for filtering + auto-connect.
     wire_menu_context: Option<(NodeId, usize, bool, PortKind)>,
@@ -239,6 +241,8 @@ impl PatchworkApp {
             show_node_menu: false,
             node_menu_pos: egui::Pos2::ZERO,
             node_menu_search: String::new(),
+            node_menu_selected: 0,
+            node_menu_category: String::new(),
             wire_menu_context: None,
             project_path: None,
             midi: MidiManager::new(),
@@ -1290,6 +1294,15 @@ impl eframe::App for PatchworkApp {
                                         values.insert((id, port_idx + 2), PortValue::Float(hub.get_value("encoder", *did, "position")));
                                         port_idx += 3;
                                     }
+                                    "orb" => {
+                                        values.insert((id, port_idx), PortValue::Float(hub.get_value("orb", *did, "ax")));
+                                        values.insert((id, port_idx + 1), PortValue::Float(hub.get_value("orb", *did, "ay")));
+                                        values.insert((id, port_idx + 2), PortValue::Float(hub.get_value("orb", *did, "az")));
+                                        values.insert((id, port_idx + 3), PortValue::Float(hub.get_value("orb", *did, "gx")));
+                                        values.insert((id, port_idx + 4), PortValue::Float(hub.get_value("orb", *did, "gy")));
+                                        values.insert((id, port_idx + 5), PortValue::Float(hub.get_value("orb", *did, "gz")));
+                                        port_idx += 6;
+                                    }
                                     _ => { port_idx += 1; }
                                 }
                             }
@@ -1319,6 +1332,22 @@ impl eframe::App for PatchworkApp {
                             values.insert((id, 0), PortValue::Float(dev.values.get("turn").copied().unwrap_or(0.0)));
                             values.insert((id, 1), PortValue::Float(dev.values.get("click").copied().unwrap_or(0.0)));
                             values.insert((id, 2), PortValue::Float(dev.values.get("position").copied().unwrap_or(0.0)));
+                        }
+                        ob_injected = true;
+                    }
+                    NodeType::ObOrb { device_id, hub_node_id, .. } => {
+                        let find = if *hub_node_id != 0 {
+                            self.ob.get_hub(*hub_node_id).and_then(|h| h.get_device("orb", *device_id))
+                        } else {
+                            self.ob.find_device("orb", *device_id).map(|(_, d)| d)
+                        };
+                        if let Some(dev) = find {
+                            values.insert((id, 0), PortValue::Float(dev.values.get("ax").copied().unwrap_or(0.0)));
+                            values.insert((id, 1), PortValue::Float(dev.values.get("ay").copied().unwrap_or(0.0)));
+                            values.insert((id, 2), PortValue::Float(dev.values.get("az").copied().unwrap_or(0.0)));
+                            values.insert((id, 3), PortValue::Float(dev.values.get("gx").copied().unwrap_or(0.0)));
+                            values.insert((id, 4), PortValue::Float(dev.values.get("gy").copied().unwrap_or(0.0)));
+                            values.insert((id, 5), PortValue::Float(dev.values.get("gz").copied().unwrap_or(0.0)));
                         }
                         ob_injected = true;
                     }
@@ -1379,6 +1408,67 @@ impl eframe::App for PatchworkApp {
             }
         }
 
+        // Inject AudioAnalyzer + AudioPlayer values BEFORE image eval loop,
+        // so downstream nodes (Map Range → Image Style) see fresh values.
+        {
+            let connections = self.graph.connections.clone();
+            let analyzer_ids: Vec<NodeId> = self.graph.nodes.iter()
+                .filter(|(_, n)| matches!(n.node_type, NodeType::AudioAnalyzer))
+                .map(|(&id, _)| id).collect();
+            for id in analyzer_ids {
+                let (amp, peak, bass, mid, treble) = self.audio.analyzer_results.get(&id)
+                    .and_then(|a| a.try_lock().ok())
+                    .map(|a| (a.amplitude, a.peak, a.bass, a.mid, a.treble))
+                    .unwrap_or((0.0, 0.0, 0.0, 0.0, 0.0));
+                let source_name = connections.iter()
+                    .find(|c| c.to_node == id && c.to_port == 0)
+                    .and_then(|c| self.graph.nodes.get(&c.from_node))
+                    .map(|n| n.node_type.title().to_string())
+                    .unwrap_or_default();
+                ctx.data_mut(|d| {
+                    d.insert_temp(egui::Id::new(("audio_analysis", id)), [amp, peak, bass, mid, treble]);
+                    d.insert_temp(egui::Id::new(("audio_analysis_source", id)), source_name);
+                });
+                values.insert((id, 1), PortValue::Float(amp));
+                values.insert((id, 2), PortValue::Float(peak));
+                values.insert((id, 3), PortValue::Float(bass));
+                values.insert((id, 4), PortValue::Float(mid));
+                values.insert((id, 5), PortValue::Float(treble));
+            }
+        }
+        for (&id, node) in &self.graph.nodes {
+            if matches!(node.node_type, NodeType::AudioPlayer { .. }) {
+                if let Some(progress) = ctx.data_mut(|d| d.get_temp::<f32>(egui::Id::new(("audio_player_progress", id)))) {
+                    values.insert((id, 1), PortValue::Float(progress));
+                }
+            }
+        }
+
+        // Re-evaluate Dynamic nodes that depend on freshly injected values
+        // (e.g., Map Range reading from Audio Analyzer → feeds into Image Style).
+        // Only re-evaluate nodes whose inputs changed since graph.evaluate().
+        {
+            let node_ids: Vec<NodeId> = self.graph.nodes.keys().copied().collect();
+            for nid in node_ids {
+                let is_dynamic = matches!(self.graph.nodes.get(&nid).map(|n| &n.node_type), Some(NodeType::Dynamic { .. }));
+                if !is_dynamic { continue; }
+                let inputs: Vec<PortValue> = self.graph.collect_inputs(nid, &values);
+                // Skip nodes with image inputs (handled in the image loop below)
+                if inputs.iter().any(|v| matches!(v, PortValue::Image(_))) { continue; }
+                // Only re-evaluate if any input is non-None (connected)
+                if inputs.iter().all(|v| matches!(v, PortValue::None)) { continue; }
+                if let Some(mut node) = self.graph.nodes.remove(&nid) {
+                    if let NodeType::Dynamic { ref mut inner } = node.node_type {
+                        let results = inner.node.evaluate(&inputs);
+                        for (port, val) in results {
+                            values.insert((nid, port), val);
+                        }
+                    }
+                    self.graph.nodes.insert(nid, node);
+                }
+            }
+        }
+
         // Evaluate image nodes (with caching — only reprocess when inputs change)
         // Run 2 passes so downstream nodes (e.g., Image receiver) see upstream results (e.g., Effects output)
         for _img_pass in 0..2 {
@@ -1426,6 +1516,11 @@ impl eframe::App for PatchworkApp {
                             let tag = inner.node.type_tag().to_string();
                             let rs = self.wgpu_render_state.clone();
 
+                            // Apply port inputs to node state BEFORE GPU processing.
+                            // This ensures connected values (e.g., Amount from Map Range)
+                            // override the slider value in the node's internal state.
+                            inner.node.evaluate(&inputs);
+
                             // Try GPU path for supported nodes
                             let gpu_results: Option<Vec<(usize, PortValue)>> = match tag.as_str() {
                                 "image_style" => {
@@ -1436,19 +1531,8 @@ impl eframe::App for PatchworkApp {
                                             .map(|img| vec![(0, PortValue::Image(img))])
                                     } else { None }
                                 }
-                                "color_channel" => {
-                                    if let (Some(PortValue::Image(img)), Some(rs)) = (inputs.first(), &rs) {
-                                        let state = inner.node.save_state();
-                                        serde_json::from_value::<nodes::color_channel_node::ColorChannelNode>(state).ok()
-                                            .and_then(|cn| cn.process_gpu(img, id, rs))
-                                            .map(|(c, r, g, b)| vec![
-                                                (0, PortValue::Image(c)),
-                                                (1, PortValue::Image(r)),
-                                                (2, PortValue::Image(g)),
-                                                (3, PortValue::Image(b)),
-                                            ])
-                                    } else { None }
-                                }
+                                // color_channel: CPU path is faster (simple per-pixel multiply,
+                                // GPU readback ×4 outputs is slower than CPU)
                                 _ => None,
                             };
 
@@ -1555,7 +1639,6 @@ impl eframe::App for PatchworkApp {
                     // Noise migrated to trait-based NoiseNode (evaluated in graph.evaluate)
                     NodeType::ColorCurves { master, red, green, blue, .. } => {
                         if let Some(PortValue::Image(img)) = inputs.first() {
-                            // Hash curve points (not just lengths) for accurate cache invalidation
                             let mut curve_hash: u64 = 0;
                             for pts in [master.as_slice(), red.as_slice(), green.as_slice(), blue.as_slice()] {
                                 for p in pts {
@@ -1572,12 +1655,9 @@ impl eframe::App for PatchworkApp {
                                     continue;
                                 }
                             }
-                            let result = if let Some(rs) = &self.wgpu_render_state {
-                                nodes::color_curves::process_gpu(img, master, red, green, blue, id, rs)
-                                    .unwrap_or_else(|| nodes::color_curves::process(img, master, red, green, blue))
-                            } else {
-                                nodes::color_curves::process(img, master, red, green, blue)
-                            };
+                            // ColorCurves uses CPU LUT path — faster than GPU+readback for
+                            // animated sources since readback_texture blocks the frame.
+                            let result = nodes::color_curves::process(img, master, red, green, blue);
                             ctx.data_mut(|d| d.insert_temp(cache_id, (cache_key, result.clone())));
                             values.insert((id, 0), PortValue::Image(result));
                         }
@@ -1613,51 +1693,7 @@ impl eframe::App for PatchworkApp {
             }
         } // end img_pass loop
 
-        // Inject AudioAnalyzer output values — trace back to source, get analysis, store in temp data
-        {
-            let connections = self.graph.connections.clone();
-            let analyzer_ids: Vec<NodeId> = self.graph.nodes.iter()
-                .filter(|(_, n)| matches!(n.node_type, NodeType::AudioAnalyzer))
-                .map(|(&id, _)| id)
-                .collect();
-            for id in analyzer_ids {
-                // Read analysis from the engine's AnalyzerProcessor (shared via Arc<Mutex>)
-                let (amp, peak, bass, mid, treble) = self.audio.analyzer_results.get(&id)
-                    .and_then(|a| a.try_lock().ok())
-                    .map(|a| (a.amplitude, a.peak, a.bass, a.mid, a.treble))
-                    .unwrap_or((0.0, 0.0, 0.0, 0.0, 0.0));
-
-                // Find what's connected to the analyzer's input
-                let source_name = connections.iter()
-                    .find(|c| c.to_node == id && c.to_port == 0)
-                    .and_then(|c| self.graph.nodes.get(&c.from_node))
-                    .map(|n| n.node_type.title().to_string())
-                    .unwrap_or_default();
-
-                // Store for the node's render function to display
-                ctx.data_mut(|d| {
-                    d.insert_temp(egui::Id::new(("audio_analysis", id)), [amp, peak, bass, mid, treble]);
-                    d.insert_temp(egui::Id::new(("audio_analysis_source", id)), source_name);
-                });
-                // Inject output port values into graph (port 0 = Audio pass-through, 1-5 = analysis)
-                values.insert((id, 1), PortValue::Float(amp));
-                values.insert((id, 2), PortValue::Float(peak));
-                values.insert((id, 3), PortValue::Float(bass));
-                values.insert((id, 4), PortValue::Float(mid));
-                values.insert((id, 5), PortValue::Float(treble));
-            }
-        }
-
-        // Inject AudioPlayer progress output values
-        for (&id, node) in &self.graph.nodes {
-            if matches!(node.node_type, NodeType::AudioPlayer { .. }) {
-                if let Some(progress) = ctx.data_mut(|d| d.get_temp::<f32>(egui::Id::new(("audio_player_progress", id)))) {
-                    values.insert((id, 1), PortValue::Float(progress));
-                }
-            }
-        }
-
-        // WGSL Viewer image output already injected before the image evaluation loop above.
+        // AudioAnalyzer + AudioPlayer values already injected before the image evaluation loop above.
 
         // Sync OB Hub detected_devices from ObManager + auto-connect saved ports
         {
@@ -1703,7 +1739,7 @@ impl eframe::App for PatchworkApp {
         // Process MCP commands (if MCP server is active)
         self.process_mcp_commands(&values);
 
-        // Store BG image/shader for canvas drawing (from Theme node's BG Image port 20)
+        // Store BG image/shader for canvas drawing (from Theme node's BG Image port 21)
         {
             let mut bg_img: Option<std::sync::Arc<ImageData>> = None;
             let mut bg_wgsl_node: Option<NodeId> = None;
@@ -1715,9 +1751,11 @@ impl eframe::App for PatchworkApp {
                     if self.graph.nodes.get(&source_node).map(|n| matches!(n.node_type, NodeType::WgslViewer { .. })).unwrap_or(false) {
                         bg_wgsl_node = Some(source_node);
                     } else {
-                        // Regular image source
-                        let val = Graph::static_input_value(&self.graph.connections, &values, theme_id, 20);
-                        if let PortValue::Image(img) = val { bg_img = Some(img); }
+                        // Regular image source (Image node, ImageEffects, Blend, etc.)
+                        // Read from the source node's output via the values HashMap
+                        if let Some(val) = values.get(&(conn.from_node, conn.from_port)) {
+                            if let PortValue::Image(img) = val { bg_img = Some(img.clone()); }
+                        }
                     }
                 }
             }
@@ -1782,6 +1820,7 @@ impl eframe::App for PatchworkApp {
                     let nt = match dtype.as_str() {
                         "joystick" => NodeType::ObJoystick { device_id: did, hub_node_id: hub_id },
                         "encoder" => NodeType::ObEncoder { device_id: did, hub_node_id: hub_id },
+                        "orb" => NodeType::ObOrb { device_id: did, hub_node_id: hub_id, mode: 0, color: [255, 255, 255], param1: 0.0, param2: 0.0, speed: 1.0, brightness: 1.0 },
                         _ => continue,
                     };
                     self.push_undo();

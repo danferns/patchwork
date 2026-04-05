@@ -35,7 +35,44 @@ pub fn render(
             .desired_width(ui.available_width()),
     );
 
-    ui.add_space(4.0);
+    ui.add_space(2.0);
+
+    // Category filter pills
+    let pill_id = egui::Id::new("palette_cat_filter");
+    let mut active_cat: String = ui.ctx().data_mut(|d| d.get_temp(pill_id).unwrap_or_default());
+    let accent = ui.visuals().hyperlink_color;
+    let categories: &[(&str, &[&str])] = &[
+        ("All", &[]),
+        ("Math", &["Math", "Logic"]),
+        ("Signal", &["Signal", "Input"]),
+        ("Visual", &["Image", "Video", "Shader", "ML"]),
+        ("Audio", &["Audio"]),
+        ("I/O", &["IO", "Network", "Serial", "OSC", "MIDI", "Hardware"]),
+        ("Utility", &["Utility", "Output", "Custom"]),
+    ];
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0 * inv;
+        for &(label, _) in categories {
+            let is_active = if label == "All" { active_cat.is_empty() } else { active_cat == label };
+            let text = egui::RichText::new(label).size(10.0 * inv);
+            let accent_arr = accent.to_array();
+            let btn = if is_active {
+                egui::Button::new(text.strong().color(egui::Color32::WHITE))
+                    .fill(egui::Color32::from_rgba_unmultiplied(accent_arr[0], accent_arr[1], accent_arr[2], 180))
+                    .corner_radius(8.0 * inv)
+            } else {
+                egui::Button::new(text.color(egui::Color32::GRAY))
+                    .fill(egui::Color32::TRANSPARENT)
+                    .corner_radius(8.0 * inv)
+            };
+            if ui.add(btn).clicked() {
+                active_cat = if label == "All" { String::new() } else { label.to_string() };
+                ui.ctx().data_mut(|d| d.insert_temp(pill_id, active_cat.clone()));
+            }
+        }
+    });
+
+    ui.add_space(2.0);
 
     let query = search.to_lowercase();
     let cat = catalog();
@@ -47,6 +84,14 @@ pub fn render(
 
         for entry in &cat {
             if entry.category == "System" { continue; }
+
+            // Category pill filter
+            if !active_cat.is_empty() {
+                let matched = categories.iter().any(|&(label, cats)| {
+                    label == active_cat.as_str() && cats.contains(&entry.category)
+                });
+                if !matched { continue; }
+            }
 
             if !query.is_empty()
                 && !entry.label.to_lowercase().contains(&query)
