@@ -198,6 +198,7 @@ pub struct PatchworkApp {
     device_refresh_rx: std::sync::mpsc::Receiver<DeviceRefreshResult>,
     // WGPU render state for shader nodes
     wgpu_render_state: Option<egui_wgpu::RenderState>,
+    gpu_tex_cache: crate::gpu_image::GpuTextureCache,
     // Undo / Redo
     undo_history: UndoHistory,
     drag_undo_pushed: bool,
@@ -317,6 +318,7 @@ impl PatchworkApp {
                 rx
             },
             wgpu_render_state,
+            gpu_tex_cache: crate::gpu_image::GpuTextureCache::new(),
             undo_history: UndoHistory::new(50),
             drag_undo_pushed: false,
             property_undo_pushed: false,
@@ -1266,6 +1268,7 @@ impl eframe::App for PatchworkApp {
         let conn_count = self.graph.connections.len();
         self.monitor.tick(node_count, conn_count);
 
+        self.gpu_tex_cache.begin_frame();
         let now_secs = self.app_start_instant.elapsed().as_secs_f64();
         let mut values = self.graph.evaluate(now_secs);
 
@@ -1381,7 +1384,10 @@ impl eframe::App for PatchworkApp {
 
         // Make wgpu render state available to image processing nodes via egui temp data
         if let Some(rs) = &self.wgpu_render_state {
-            ctx.data_mut(|d| d.insert_temp(egui::Id::new("wgpu_render_state"), rs.clone()));
+            ctx.data_mut(|d| {
+                d.insert_temp(egui::Id::new("wgpu_render_state"), rs.clone());
+                d.insert_temp(egui::Id::new("wgpu_target_format"), rs.target_format);
+            });
         }
 
         // Fast image content hash — samples ~32 pixels spread across the image.
@@ -1403,6 +1409,10 @@ impl eframe::App for PatchworkApp {
         for (&id, node) in &self.graph.nodes {
             if matches!(node.node_type, NodeType::WgslViewer { .. }) {
                 if let Some(img) = ctx.data_mut(|d| d.get_temp::<std::sync::Arc<ImageData>>(egui::Id::new(("wgsl_image_output", id)))) {
+                    // Pre-upload WGSL output for downstream GPU nodes
+                    if let Some(rs) = &self.wgpu_render_state {
+                        self.gpu_tex_cache.get_or_upload(&rs.device, &rs.queue, &img);
+                    }
                     values.insert((id, 0), PortValue::Image(img));
                 }
             }
@@ -1526,9 +1536,15 @@ impl eframe::App for PatchworkApp {
                                 "image_style" => {
                                     if let (Some(PortValue::Image(img)), Some(rs)) = (inputs.first(), &rs) {
                                         let state = inner.node.save_state();
-                                        serde_json::from_value::<nodes::image_style_node::ImageStyleNode>(state).ok()
-                                            .and_then(|sn| sn.process_gpu(img, id, rs))
-                                            .map(|img| vec![(0, PortValue::Image(img))])
+                                        let result = serde_json::from_value::<nodes::image_style_node::ImageStyleNode>(state).ok()
+                                            .and_then(|sn| sn.process_gpu(img, id, rs));
+                                        if let Some(ref result_img) = result {
+                                            // Cache output for display
+                                            let tex = crate::gpu_image::upload_texture(&rs.device, &rs.queue, result_img, "style_cache");
+                                            self.gpu_tex_cache.cache_node_output(id, 0, tex, result_img.width, result_img.height);
+                                            self.gpu_tex_cache.store_for_display(id, rs);
+                                        }
+                                        result.map(|img| vec![(0, PortValue::Image(img))])
                                     } else { None }
                                 }
                                 // color_channel: CPU path is faster (simple per-pixel multiply,
@@ -1576,7 +1592,7 @@ impl eframe::App for PatchworkApp {
                             }
                             // GPU path (fast), falling back to CPU
                             let result = if let Some(rs) = &self.wgpu_render_state {
-                                nodes::image_effects::process_gpu(img, *brightness, *contrast, *saturation, *hue, *exposure, *gamma, id, rs)
+                                nodes::image_effects::process_gpu_cached(img, *brightness, *contrast, *saturation, *hue, *exposure, *gamma, id, rs, &mut self.gpu_tex_cache)
                                     .unwrap_or_else(|| nodes::image_effects::process(img, *brightness, *contrast, *saturation, *hue, *exposure, *gamma))
                             } else {
                                 nodes::image_effects::process(img, *brightness, *contrast, *saturation, *hue, *exposure, *gamma)
@@ -1601,7 +1617,7 @@ impl eframe::App for PatchworkApp {
                                 }
                             }
                             let result = if let Some(rs) = &self.wgpu_render_state {
-                                nodes::blend::process_gpu(a, b, *mode, *mix, id, rs)
+                                nodes::blend::process_gpu_cached(a, b, *mode, *mix, id, rs, &mut self.gpu_tex_cache)
                                     .unwrap_or_else(|| nodes::blend::process(a, b, *mode, *mix))
                             } else {
                                 nodes::blend::process(a, b, *mode, *mix)
@@ -1655,9 +1671,18 @@ impl eframe::App for PatchworkApp {
                                     continue;
                                 }
                             }
-                            // ColorCurves uses CPU LUT path — faster than GPU+readback for
-                            // animated sources since readback_texture blocks the frame.
-                            let result = nodes::color_curves::process(img, master, red, green, blue);
+                            // GPU path — render on GPU, skip readback, cache for display.
+                            let result = if let Some(rs) = &self.wgpu_render_state {
+                                let gpu_result = nodes::color_curves::process_gpu_cached(
+                                    img, master, red, green, blue, id, rs, &mut self.gpu_tex_cache);
+                                if gpu_result.is_some() {
+                                    // Store GPU texture in display callback resources for zero-copy rendering
+                                    self.gpu_tex_cache.store_for_display(id, rs);
+                                }
+                                gpu_result.unwrap_or_else(|| nodes::color_curves::process(img, master, red, green, blue))
+                            } else {
+                                nodes::color_curves::process(img, master, red, green, blue)
+                            };
                             ctx.data_mut(|d| d.insert_temp(cache_id, (cache_key, result.clone())));
                             values.insert((id, 0), PortValue::Image(result));
                         }
@@ -1665,6 +1690,9 @@ impl eframe::App for PatchworkApp {
                     NodeType::VideoPlayer { current_frame, duration, .. } => {
                         if let Some(frame) = current_frame {
                             values.insert((id, 0), PortValue::Image(frame.clone()));
+                            if let Some(rs) = &self.wgpu_render_state {
+                                self.gpu_tex_cache.get_or_upload(&rs.device, &rs.queue, frame);
+                            }
                             if *duration > 0.0 {
                                 // Progress output would need frame counting — skip for now
                                 values.insert((id, 1), PortValue::Float(0.0));
@@ -1674,6 +1702,10 @@ impl eframe::App for PatchworkApp {
                     NodeType::Camera { current_frame, .. } => {
                         if let Some(frame) = current_frame {
                             values.insert((id, 0), PortValue::Image(frame.clone()));
+                            // Pre-upload to GPU cache so downstream GPU nodes skip upload
+                            if let Some(rs) = &self.wgpu_render_state {
+                                self.gpu_tex_cache.get_or_upload(&rs.device, &rs.queue, frame);
+                            }
                         }
                     }
                     NodeType::MlModel { annotated_frame, result_text, result_json, .. } => {

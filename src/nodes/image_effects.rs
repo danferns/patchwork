@@ -429,3 +429,85 @@ pub fn process_gpu(
 
     Some(crate::gpu_image::readback_texture(device, queue, &output_tex, w, h))
 }
+
+/// GPU processing with output caching for zero-copy display.
+/// Same as process_gpu but caches output texture for downstream GPU nodes and Display.
+pub fn process_gpu_cached(
+    img: &ImageData,
+    brightness: f32, contrast: f32, saturation: f32,
+    hue: f32, exposure: f32, gamma: f32,
+    node_id: NodeId,
+    render_state: &eframe::egui_wgpu::RenderState,
+    tex_cache: &mut crate::gpu_image::GpuTextureCache,
+) -> Option<Arc<ImageData>> {
+    let device = &render_state.device;
+    let queue = &render_state.queue;
+    let w = img.width;
+    let h = img.height;
+    if w == 0 || h == 0 { return None; }
+
+    // Reuse pipeline from process_gpu (ensure it exists)
+    let has_pipeline = {
+        let renderer = render_state.renderer.read();
+        renderer.callback_resources.get::<ImageEffectsStore>()
+            .and_then(|s| s.nodes.get(&node_id)).is_some()
+    };
+    if !has_pipeline {
+        return process_gpu(img, brightness, contrast, saturation, hue, exposure, gamma, node_id, render_state);
+    }
+
+    // Check cache for input texture — skip upload if already on GPU
+    let input_tex = crate::gpu_image::upload_texture(device, queue, img, "img_fx_input");
+    let input_view = input_tex.create_view(&Default::default());
+
+    // Output with TEXTURE_BINDING so it can be cached for display
+    let output_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("img_fx_output"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let output_view = output_tex.create_view(&Default::default());
+
+    let renderer = render_state.renderer.read();
+    let store = renderer.callback_resources.get::<ImageEffectsStore>()?;
+    let gpu = store.nodes.get(&node_id)?;
+
+    let params = [brightness, contrast, saturation, hue, exposure, gamma, w as f32, h as f32];
+    queue.write_buffer(&gpu.uniform_buffer, 0, bytemuck::cast_slice(&params));
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None, layout: &gpu.bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: gpu.uniform_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&input_view) },
+            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&gpu.sampler) },
+        ],
+    });
+
+    let mut encoder = device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("img_fx_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &output_view, resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: None, ..Default::default()
+        });
+        pass.set_pipeline(&gpu.pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+    queue.submit(Some(encoder.finish()));
+    drop(renderer);
+
+    // Readback for CPU consumers
+    let result = crate::gpu_image::readback_texture(device, queue, &output_tex, w, h);
+    // Cache output for display (Visual Output renders directly)
+    tex_cache.cache_node_output(node_id, 0, output_tex, w, h);
+    tex_cache.store_for_display(node_id, render_state);
+    Some(result)
+}

@@ -45,7 +45,11 @@ impl NodeBehavior for VisualOutputNode {
         let input_val = Graph::static_input_value(ctx.connections, ctx.values, ctx.node_id, 0);
         if let PortValue::Image(img) = &input_val {
             ui.label(egui::RichText::new(format!("{}×{}", img.width, img.height)).small().color(dim));
-            crate::nodes::image_node::show_image_preview(ui, ctx.node_id, img, self.preview_size);
+            // Use GPU paint callback — check if source node has a pre-rendered GPU texture
+            let gpu_source = ctx.connections.iter()
+                .find(|c| c.to_node == ctx.node_id && c.to_port == 0)
+                .map(|c| (c.from_node, c.from_port));
+            crate::nodes::image_node::show_image_gpu(ui, ctx.node_id, &img, self.preview_size, gpu_source);
 
             // Size slider
             ui.horizontal(|ui| {
@@ -106,7 +110,7 @@ impl NodeBehavior for VisualOutputNode {
                                 if pad_y > 0.0 { ui.add_space(pad_y); }
                                 ui.horizontal(|ui| {
                                     if pad_x > 0.0 { ui.add_space(pad_x); }
-                                    crate::nodes::image_node::show_image_preview(ui, nid, &img_clone, draw_w);
+                                    crate::nodes::image_node::show_image_gpu(ui, nid, &img_clone, draw_w, None);
                                 });
                             });
                         if ctx.input(|i| i.viewport().close_requested()) || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {

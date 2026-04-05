@@ -174,29 +174,30 @@ pub fn render(
 }
 
 /// Apply color curves to an image. Called during evaluation.
+/// Uses pre-baked u8→u8 LUTs (channel curve + master in one table) for maximum throughput.
 pub fn process(img: &ImageData, master: &[[f32; 2]], red: &[[f32; 2]], green: &[[f32; 2]], blue: &[[f32; 2]]) -> Arc<ImageData> {
-    // Build LUTs (256 entries each)
-    let master_lut: Vec<f32> = (0..256).map(|i| evaluate_curve(master, i as f32 / 255.0)).collect();
-    let red_lut: Vec<f32> = (0..256).map(|i| evaluate_curve(red, i as f32 / 255.0)).collect();
-    let green_lut: Vec<f32> = (0..256).map(|i| evaluate_curve(green, i as f32 / 255.0)).collect();
-    let blue_lut: Vec<f32> = (0..256).map(|i| evaluate_curve(blue, i as f32 / 255.0)).collect();
+    // Build combined u8→u8 LUTs: input byte → channel curve → master curve → output byte
+    // This makes the inner loop just 3 array lookups with zero float math.
+    let mut r_lut = [0u8; 256];
+    let mut g_lut = [0u8; 256];
+    let mut b_lut = [0u8; 256];
+    for i in 0..256 {
+        let t = i as f32 / 255.0;
+        let rv = evaluate_curve(red, t).clamp(0.0, 1.0);
+        let gv = evaluate_curve(green, t).clamp(0.0, 1.0);
+        let bv = evaluate_curve(blue, t).clamp(0.0, 1.0);
+        r_lut[i] = (evaluate_curve(master, rv).clamp(0.0, 1.0) * 255.0) as u8;
+        g_lut[i] = (evaluate_curve(master, gv).clamp(0.0, 1.0) * 255.0) as u8;
+        b_lut[i] = (evaluate_curve(master, bv).clamp(0.0, 1.0) * 255.0) as u8;
+    }
 
     let mut pixels = img.pixels.clone();
     let len = pixels.len();
     let mut i = 0;
     while i + 3 < len {
-        let r = pixels[i] as usize;
-        let g = pixels[i + 1] as usize;
-        let b = pixels[i + 2] as usize;
-
-        // Apply channel curves then master
-        let nr = master_lut[(red_lut[r].clamp(0.0, 1.0) * 255.0) as usize].clamp(0.0, 1.0);
-        let ng = master_lut[(green_lut[g].clamp(0.0, 1.0) * 255.0) as usize].clamp(0.0, 1.0);
-        let nb = master_lut[(blue_lut[b].clamp(0.0, 1.0) * 255.0) as usize].clamp(0.0, 1.0);
-
-        pixels[i] = (nr * 255.0) as u8;
-        pixels[i + 1] = (ng * 255.0) as u8;
-        pixels[i + 2] = (nb * 255.0) as u8;
+        pixels[i]     = r_lut[pixels[i] as usize];
+        pixels[i + 1] = g_lut[pixels[i + 1] as usize];
+        pixels[i + 2] = b_lut[pixels[i + 2] as usize];
         i += 4;
     }
     Arc::new(ImageData::new(img.width, img.height, pixels))
@@ -435,4 +436,93 @@ pub fn process_gpu(
     drop(renderer);
 
     Some(crate::gpu_image::readback_texture(device, queue, &output_tex, w, h))
+}
+
+/// GPU processing with texture caching — no readback.
+/// Returns a placeholder Arc<ImageData> (dimensions only, empty pixels).
+/// The actual GPU texture is stored in the cache for downstream GPU consumers.
+pub fn process_gpu_cached(
+    img: &ImageData,
+    master: &[[f32; 2]], red: &[[f32; 2]], green: &[[f32; 2]], blue: &[[f32; 2]],
+    node_id: NodeId,
+    render_state: &eframe::egui_wgpu::RenderState,
+    tex_cache: &mut crate::gpu_image::GpuTextureCache,
+) -> Option<Arc<ImageData>> {
+    let device = &render_state.device;
+    let queue = &render_state.queue;
+    let w = img.width;
+    let h = img.height;
+    if w == 0 || h == 0 { return None; }
+
+    // Ensure pipeline cached (same as process_gpu)
+    let has_pipeline = {
+        let renderer = render_state.renderer.read();
+        renderer.callback_resources.get::<CurvesGpuStore>()
+            .and_then(|s| s.nodes.get(&node_id))
+            .is_some()
+    };
+
+    if !has_pipeline {
+        // Delegate to process_gpu for pipeline creation (first call only)
+        return process_gpu(img, master, red, green, blue, node_id, render_state);
+    }
+
+    // Upload input (check cache first)
+    let input_tex = crate::gpu_image::upload_texture(device, queue, img, "curves_input");
+    let input_view = input_tex.create_view(&Default::default());
+    let lut_tex = build_lut_texture(device, queue, master, red, green, blue);
+    let lut_view = lut_tex.create_view(&Default::default());
+
+    // Output texture — TEXTURE_BINDING so it can be sampled by next node's display callback
+    let output_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("curves_output_cached"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let output_view = output_tex.create_view(&Default::default());
+
+    let renderer = render_state.renderer.read();
+    let store = renderer.callback_resources.get::<CurvesGpuStore>()?;
+    let gpu = store.nodes.get(&node_id)?;
+
+    let params = [w as f32, h as f32, 0.0f32, 0.0f32];
+    queue.write_buffer(&gpu.uniform_buffer, 0, bytemuck::cast_slice(&params));
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None, layout: &gpu.bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: gpu.uniform_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&input_view) },
+            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&lut_view) },
+            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&gpu.sampler) },
+        ],
+    });
+
+    let mut encoder = device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("curves_pass_cached"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &output_view, resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: None, ..Default::default()
+        });
+        pass.set_pipeline(&gpu.pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+    queue.submit(Some(encoder.finish()));
+    drop(renderer);
+
+    // Readback for downstream nodes that need CPU pixels (e.g., Blend)
+    let result = crate::gpu_image::readback_texture(device, queue, &output_tex, w, h);
+
+    // Also cache the output texture for direct GPU display (Visual Output skips re-upload)
+    tex_cache.cache_node_output(node_id, 0, output_tex, w, h);
+
+    Some(result)
 }

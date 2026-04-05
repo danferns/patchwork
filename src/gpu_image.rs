@@ -7,6 +7,161 @@ use eframe::egui_wgpu::{self, wgpu};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+// ── GPU Texture Cache ───────────────────────────────────────────────────────
+// Avoids redundant CPU→GPU uploads when the same Arc<ImageData> flows through
+// multiple GPU nodes in one frame. Keyed by Arc pointer address.
+
+struct CachedTexture {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    width: u32,
+    height: u32,
+    frame: u64,
+}
+
+pub struct GpuTextureCache {
+    entries: HashMap<u64, CachedTexture>,
+    current_frame: u64,
+}
+
+impl GpuTextureCache {
+    pub fn new() -> Self {
+        Self { entries: HashMap::new(), current_frame: 0 }
+    }
+
+    /// Call at start of each frame
+    pub fn begin_frame(&mut self) {
+        self.current_frame += 1;
+        // Evict textures older than 2 frames
+        self.entries.retain(|_, v| self.current_frame - v.frame <= 2);
+    }
+
+    /// Get a cached GPU texture for an Arc<ImageData>, or upload it.
+    /// Returns a texture view that can be bound to a shader.
+    pub fn get_or_upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        img: &Arc<ImageData>,
+    ) -> &wgpu::TextureView {
+        let key = Arc::as_ptr(img) as u64;
+        // Check if cached and same dimensions
+        let needs_upload = self.entries.get(&key)
+            .map(|c| c.width != img.width || c.height != img.height)
+            .unwrap_or(true);
+
+        if needs_upload {
+            let texture = upload_texture(device, queue, img, "cached_tex");
+            let view = texture.create_view(&Default::default());
+            self.entries.insert(key, CachedTexture {
+                texture, view, width: img.width, height: img.height, frame: self.current_frame,
+            });
+        } else {
+            // Update frame stamp to prevent eviction
+            if let Some(entry) = self.entries.get_mut(&key) {
+                entry.frame = self.current_frame;
+            }
+        }
+        &self.entries.get(&key).unwrap().view
+    }
+
+    /// Store a rendered output texture in the cache, keyed by the output Arc<ImageData>.
+    /// Call after readback — the next node in the chain can reuse this texture.
+    pub fn cache_output(
+        &mut self,
+        img: &Arc<ImageData>,
+        texture: wgpu::Texture,
+    ) {
+        let key = Arc::as_ptr(img) as u64;
+        let view = texture.create_view(&Default::default());
+        self.entries.insert(key, CachedTexture {
+            texture, view, width: img.width, height: img.height, frame: self.current_frame,
+        });
+    }
+
+    /// Check if a GPU texture exists for this image (without uploading)
+    pub fn has_texture(&self, img: &Arc<ImageData>) -> bool {
+        let key = Arc::as_ptr(img) as u64;
+        self.entries.get(&key).map(|c| c.width == img.width && c.height == img.height).unwrap_or(false)
+    }
+
+    /// Get a cached view (returns None if not cached)
+    pub fn get_view(&self, img: &Arc<ImageData>) -> Option<&wgpu::TextureView> {
+        let key = Arc::as_ptr(img) as u64;
+        self.entries.get(&key)
+            .filter(|c| c.width == img.width && c.height == img.height)
+            .map(|c| &c.view)
+    }
+
+    /// Store a GPU texture keyed by (NodeId, port) — for GPU-to-GPU passing between nodes.
+    pub fn cache_node_output(&mut self, node_id: crate::graph::NodeId, port: usize, texture: wgpu::Texture, width: u32, height: u32) {
+        let key = (node_id as u64).wrapping_mul(31).wrapping_add(port as u64);
+        let view = texture.create_view(&Default::default());
+        self.entries.insert(key, CachedTexture { texture, view, width, height, frame: self.current_frame });
+    }
+
+    /// Get a GPU texture by (NodeId, port) — for reading a previous node's GPU output.
+    pub fn get_node_output(&self, node_id: crate::graph::NodeId, port: usize) -> Option<(&wgpu::TextureView, u32, u32)> {
+        let key = (node_id as u64).wrapping_mul(31).wrapping_add(port as u64);
+        self.entries.get(&key).map(|c| (&c.view, c.width, c.height))
+    }
+
+    /// Store a pre-rendered output texture in the display callback resources,
+    /// so the GpuImageDisplayCallback can render it without re-uploading.
+    pub fn store_for_display(
+        &self,
+        node_id: crate::graph::NodeId,
+        render_state: &eframe::egui_wgpu::RenderState,
+    ) {
+        let key = (node_id as u64).wrapping_mul(31).wrapping_add(0u64);
+        if let Some(cached) = self.entries.get(&key) {
+            let mut renderer = render_state.renderer.write();
+            let store = renderer.callback_resources.entry::<GpuDisplayStore>().or_insert_with(|| GpuDisplayStore {
+                resources: None,
+                instances: HashMap::new(),
+                prerendered: HashMap::new(),
+            });
+            // Initialize display resources if needed
+            if store.resources.is_none() {
+                let device = &render_state.device;
+                let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("display_shader"), source: wgpu::ShaderSource::Wgsl(DISPLAY_SHADER.into()),
+                });
+                let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("display_bgl"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None },
+                        wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+                    ],
+                });
+                let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[&bgl], push_constant_ranges: &[] });
+                let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("display_pipeline"), layout: Some(&pl),
+                    vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_main"), buffers: &[], compilation_options: wgpu::PipelineCompilationOptions::default() },
+                    fragment: Some(wgpu::FragmentState { module: &shader, entry_point: Some("fs_main"), targets: &[Some(render_state.target_format.into())], compilation_options: wgpu::PipelineCompilationOptions::default() }),
+                    primitive: wgpu::PrimitiveState::default(), depth_stencil: None, multisample: wgpu::MultisampleState::default(), multiview: None, cache: None,
+                });
+                let sampler = device.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default() });
+                store.resources = Some(GpuDisplayResources { pipeline, bind_group_layout: bgl, sampler });
+            }
+            // Create bind group for the cached texture
+            if let Some(res) = &store.resources {
+                let bg = render_state.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None, layout: &res.bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&cached.view) },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&res.sampler) },
+                    ],
+                });
+                let view = cached.texture.create_view(&Default::default());
+                store.prerendered.insert(node_id, (view, bg));
+            }
+        }
+    }
+}
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const BLEND_SHADER: &str = r#"
@@ -415,6 +570,23 @@ fn create_blend_pipeline(device: &wgpu::Device, target_format: wgpu::TextureForm
 }
 
 pub fn upload_texture(device: &wgpu::Device, queue: &wgpu::Queue, img: &ImageData, label: &str) -> wgpu::Texture {
+    // Guard against empty pixel buffers (GPU-only placeholders)
+    if img.pixels.is_empty() {
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label), size: wgpu::Extent3d { width: img.width.max(1), height: img.height.max(1), depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[],
+        });
+        let black = vec![0u8; (img.width.max(1) * img.height.max(1) * 4) as usize];
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            &black,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(img.width.max(1) * 4), rows_per_image: Some(img.height.max(1)) },
+            wgpu::Extent3d { width: img.width.max(1), height: img.height.max(1), depth_or_array_layers: 1 },
+        );
+        return tex;
+    }
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d { width: img.width, height: img.height, depth_or_array_layers: 1 },
@@ -500,3 +672,148 @@ pub fn readback_texture(
 
     Arc::new(ImageData { width, height, pixels })
 }
+
+// ── GPU Image Display Callback ──────────────────────────────────────────────
+// Renders an Arc<ImageData> directly to screen via wgpu paint callback.
+// Bypasses egui's texture system — uploads once per frame, renders directly.
+
+struct GpuDisplayResources {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+}
+
+struct GpuDisplayInstance {
+    bind_group: wgpu::BindGroup,
+    _texture: wgpu::Texture,
+}
+
+pub struct GpuDisplayStore {
+    resources: Option<GpuDisplayResources>,
+    instances: HashMap<NodeId, GpuDisplayInstance>,
+    /// Pre-rendered GPU textures from upstream nodes (stored here for paint callback access)
+    pub prerendered: HashMap<NodeId, (wgpu::TextureView, wgpu::BindGroup)>,
+}
+
+pub struct GpuImageDisplayCallback {
+    pub node_id: NodeId,
+    pub img: Arc<ImageData>,
+    pub target_format: wgpu::TextureFormat,
+    /// If set, try to use the GPU texture cached for this (source_node, port) first.
+    /// Falls back to uploading img if not found in cache.
+    pub gpu_source: Option<(NodeId, usize)>,
+}
+
+impl egui_wgpu::CallbackTrait for GpuImageDisplayCallback {
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        _screen: &egui_wgpu::ScreenDescriptor,
+        _encoder: &mut wgpu::CommandEncoder,
+        callback_resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        let store = callback_resources.entry::<GpuDisplayStore>().or_insert_with(|| GpuDisplayStore {
+            resources: None,
+            instances: HashMap::new(),
+            prerendered: HashMap::new(),
+        });
+
+        if store.resources.is_none() {
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("display_shader"),
+                source: wgpu::ShaderSource::Wgsl(DISPLAY_SHADER.into()),
+            });
+            let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("display_bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None, bind_group_layouts: &[&bind_group_layout], push_constant_ranges: &[],
+            });
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("display_pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_main"), buffers: &[], compilation_options: wgpu::PipelineCompilationOptions::default() },
+                fragment: Some(wgpu::FragmentState { module: &shader, entry_point: Some("fs_main"), targets: &[Some(self.target_format.into())], compilation_options: wgpu::PipelineCompilationOptions::default() }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None, multisample: wgpu::MultisampleState::default(), multiview: None, cache: None,
+            });
+            let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default()
+            });
+            store.resources = Some(GpuDisplayResources { pipeline, bind_group_layout, sampler });
+        }
+
+        let res = match store.resources.as_ref() {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+
+        // Check if a pre-rendered GPU texture exists for the source node
+        if let Some(src) = self.gpu_source {
+            if store.prerendered.contains_key(&src.0) {
+                // Pre-rendered texture available — skip upload entirely
+                store.instances.remove(&self.node_id); // clear old instance
+                return Vec::new();
+            }
+        }
+
+        // Upload image to GPU texture
+        if self.img.pixels.is_empty() {
+            return Vec::new(); // GPU placeholder with no pixels — nothing to upload
+        }
+        let texture = upload_texture(device, queue, &self.img, "display_img");
+        let view = texture.create_view(&Default::default());
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None, layout: &res.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&res.sampler) },
+            ],
+        });
+
+        store.instances.insert(self.node_id, GpuDisplayInstance { bind_group, _texture: texture });
+        Vec::new()
+    }
+
+    fn paint(
+        &self,
+        _info: egui::PaintCallbackInfo,
+        render_pass: &mut wgpu::RenderPass<'static>,
+        callback_resources: &egui_wgpu::CallbackResources,
+    ) {
+        if let Some(store) = callback_resources.get::<GpuDisplayStore>() {
+            let res = match &store.resources { Some(r) => r, None => return };
+
+            // Try pre-rendered source first (zero-copy GPU path)
+            if let Some(src) = &self.gpu_source {
+                if let Some((_, bg)) = store.prerendered.get(&src.0) {
+                    render_pass.set_pipeline(&res.pipeline);
+                    render_pass.set_bind_group(0, bg, &[]);
+                    render_pass.draw(0..3, 0..1);
+                    return;
+                }
+            }
+
+            // Fall back to uploaded instance
+            if let Some(inst) = store.instances.get(&self.node_id) {
+                render_pass.set_pipeline(&res.pipeline);
+                render_pass.set_bind_group(0, &inst.bind_group, &[]);
+                render_pass.draw(0..3, 0..1);
+            }
+        }
+    }
+}
+

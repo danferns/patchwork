@@ -96,15 +96,23 @@ impl NodeBehavior for ColorChannelNode {
                     // No processing needed — pass through original
                     vec![(0, PortValue::Image(img.clone()))]
                 } else {
-                    // Only create combined output (most common use case)
-                    // Individual R/G/B channels only created on demand via process()
+                    // Pre-bake u8→u8 LUTs to avoid float math in inner loop
+                    let mut r_lut = [0u8; 256];
+                    let mut g_lut = [0u8; 256];
+                    let mut b_lut = [0u8; 256];
+                    for i in 0..256 {
+                        r_lut[i] = (i as f32 * self.r_level).clamp(0.0, 255.0) as u8;
+                        g_lut[i] = (i as f32 * self.g_level).clamp(0.0, 255.0) as u8;
+                        b_lut[i] = (i as f32 * self.b_level).clamp(0.0, 255.0) as u8;
+                    }
                     let len = img.pixels.len();
                     let mut pixels = img.pixels.clone();
-                    for i in (0..len).step_by(4) {
-                        if i + 2 >= len { break; }
-                        pixels[i]     = (img.pixels[i] as f32 * self.r_level).clamp(0.0, 255.0) as u8;
-                        pixels[i + 1] = (img.pixels[i + 1] as f32 * self.g_level).clamp(0.0, 255.0) as u8;
-                        pixels[i + 2] = (img.pixels[i + 2] as f32 * self.b_level).clamp(0.0, 255.0) as u8;
+                    let mut i = 0;
+                    while i + 3 < len {
+                        pixels[i]     = r_lut[pixels[i] as usize];
+                        pixels[i + 1] = g_lut[pixels[i + 1] as usize];
+                        pixels[i + 2] = b_lut[pixels[i + 2] as usize];
+                        i += 4;
                     }
                     vec![(0, PortValue::Image(Arc::new(ImageData { width: img.width, height: img.height, pixels })))]
                 }

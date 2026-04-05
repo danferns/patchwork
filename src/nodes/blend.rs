@@ -366,3 +366,78 @@ pub fn process_gpu(
 
     Some(crate::gpu_image::readback_texture(device, queue, &output_tex, w, h))
 }
+
+pub fn process_gpu_cached(
+    a: &ImageData, b: &ImageData, mode: u8, mix: f32,
+    node_id: NodeId, render_state: &egui_wgpu::RenderState,
+    tex_cache: &mut crate::gpu_image::GpuTextureCache,
+) -> Option<Arc<ImageData>> {
+    let device = &render_state.device;
+    let queue = &render_state.queue;
+    let w = a.width.min(b.width);
+    let h = a.height.min(b.height);
+    if w == 0 || h == 0 { return None; }
+
+    let has_pipeline = {
+        let renderer = render_state.renderer.read();
+        renderer.callback_resources.get::<BlendGpuStore>()
+            .and_then(|s| s.nodes.get(&node_id)).is_some()
+    };
+    if !has_pipeline {
+        return process_gpu(a, b, mode, mix, node_id, render_state);
+    }
+
+    let tex_a = crate::gpu_image::upload_texture(device, queue, a, "blend_a");
+    let tex_b = crate::gpu_image::upload_texture(device, queue, b, "blend_b");
+    let view_a = tex_a.create_view(&Default::default());
+    let view_b = tex_b.create_view(&Default::default());
+
+    let output_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("blend_output"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let output_view = output_tex.create_view(&Default::default());
+
+    let renderer = render_state.renderer.read();
+    let store = renderer.callback_resources.get::<BlendGpuStore>()?;
+    let gpu = store.nodes.get(&node_id)?;
+
+    let params = [mode as f32, mix, w as f32, h as f32];
+    queue.write_buffer(&gpu.uniform_buffer, 0, bytemuck::cast_slice(&params));
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None, layout: &gpu.bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: gpu.uniform_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view_a) },
+            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&view_b) },
+            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&gpu.sampler) },
+        ],
+    });
+
+    let mut encoder = device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("blend_gpu_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &output_view, resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: None, ..Default::default()
+        });
+        pass.set_pipeline(&gpu.pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+    queue.submit(Some(encoder.finish()));
+    drop(renderer);
+
+    let result = crate::gpu_image::readback_texture(device, queue, &output_tex, w, h);
+    tex_cache.cache_node_output(node_id, 0, output_tex, w, h);
+    tex_cache.store_for_display(node_id, render_state);
+    Some(result)
+}

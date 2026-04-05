@@ -110,30 +110,65 @@ fn save_image(img: &ImageData, path: &str) {
 }
 
 /// Display an image thumbnail in the UI. Caches texture per node + image pointer.
+/// Render image via wgpu paint callback — bypasses egui texture system.
+/// Faster for animated images (no ColorImage copy + load_texture each frame).
+pub fn show_image_gpu(ui: &mut egui::Ui, node_id: NodeId, img: &std::sync::Arc<ImageData>, max_size: f32, gpu_source: Option<(NodeId, usize)>) {
+    if img.width == 0 || img.height == 0 { return; }
+
+    let aspect = img.height as f32 / img.width as f32;
+    let w = max_size.min(ui.available_width());
+    let h = w * aspect;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
+
+    // If pixels are empty AND no GPU source, nothing to render
+    if img.pixels.is_empty() && gpu_source.is_none() { return; }
+
+    let target_format = ui.ctx().data_mut(|d| {
+        d.get_temp::<eframe::egui_wgpu::wgpu::TextureFormat>(egui::Id::new("wgpu_target_format"))
+    }).unwrap_or(eframe::egui_wgpu::wgpu::TextureFormat::Bgra8UnormSrgb);
+
+    ui.painter().add(eframe::egui_wgpu::Callback::new_paint_callback(
+        rect,
+        crate::gpu_image::GpuImageDisplayCallback {
+            node_id,
+            img: img.clone(),
+            target_format,
+            gpu_source,
+        },
+    ));
+}
+
 pub fn show_image_preview(ui: &mut egui::Ui, node_id: NodeId, img: &ImageData, max_size: f32) {
     let tex_id = egui::Id::new(("img_tex", node_id));
-    let ptr_id = egui::Id::new(("img_ptr", node_id));
+    let hash_id = egui::Id::new(("img_hash", node_id));
 
-    // Check if we already have a texture for this exact image data
-    let img_ptr = img as *const ImageData as u64;
-    let prev_ptr: Option<u64> = ui.ctx().data_mut(|d| d.get_temp(ptr_id));
+    // Fast content hash — same as image eval loop cache
+    let img_hash = {
+        let mut h: u64 = (img.width as u64).wrapping_mul(31).wrapping_add(img.height as u64);
+        let len = img.pixels.len();
+        if len > 0 {
+            let step = (len / 128).max(1);
+            for i in (0..len).step_by(step).take(32) {
+                h = h.wrapping_mul(31).wrapping_add(img.pixels[i] as u64);
+            }
+        }
+        h
+    };
+    let prev_hash: Option<u64> = ui.ctx().data_mut(|d| d.get_temp(hash_id));
 
-    let texture: egui::TextureHandle = if prev_ptr == Some(img_ptr) {
-        // Same image pointer — reuse cached texture
+    let texture: egui::TextureHandle = if prev_hash == Some(img_hash) {
+        // Same content — reuse cached texture
         if let Some(tex) = ui.ctx().data_mut(|d| d.get_temp::<egui::TextureHandle>(tex_id)) {
             tex
         } else {
-            // Cache miss, recreate
             let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                [img.width as usize, img.height as usize],
-                &img.pixels,
+                [img.width as usize, img.height as usize], &img.pixels,
             );
             ui.ctx().load_texture(format!("img_{}", node_id), color_image, egui::TextureOptions::LINEAR)
         }
     } else {
-        // New image — upload texture (use downscaled version for preview)
-        let (tw, th, pixels) = if img.width > 512 || img.height > 512 {
-            // Downsample for preview
+        // New image content — upload (downsample large images for preview)
+        let (tw, th, pix) = if img.width > 512 || img.height > 512 {
             let scale = 512.0 / img.width.max(img.height) as f32;
             let tw = (img.width as f32 * scale) as u32;
             let th = (img.height as f32 * scale) as u32;
@@ -149,15 +184,15 @@ pub fn show_image_preview(ui: &mut egui::Ui, node_id: NodeId, img: &ImageData, m
                     }
                 }
             }
-            (tw, th, small)
+            (tw as usize, th as usize, small)
         } else {
-            (img.width, img.height, img.pixels.clone())
+            (img.width as usize, img.height as usize, img.pixels.to_vec())
         };
-        let color_image = egui::ColorImage::from_rgba_unmultiplied([tw as usize, th as usize], &pixels);
+        let color_image = egui::ColorImage::from_rgba_unmultiplied([tw, th], &pix);
         ui.ctx().load_texture(format!("img_{}", node_id), color_image, egui::TextureOptions::LINEAR)
     };
 
-    ui.ctx().data_mut(|d| d.insert_temp(ptr_id, img_ptr));
+    ui.ctx().data_mut(|d| d.insert_temp(hash_id, img_hash));
 
     // Compute display size maintaining aspect ratio
     let aspect = img.width as f32 / img.height.max(1) as f32;
