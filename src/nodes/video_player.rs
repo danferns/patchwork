@@ -14,6 +14,7 @@ struct VideoDecoder {
     _width: u32,
     _height: u32,
     frame_changed: bool,
+    disconnected: bool,
 }
 
 impl Drop for VideoDecoder {
@@ -121,14 +122,22 @@ impl VideoDecoder {
             _width: width,
             _height: height,
             frame_changed: false,
+            disconnected: false,
         })
     }
 
     fn try_recv_frame(&mut self) -> Option<Arc<ImageData>> {
-        // Get latest frame (with pacing, usually just 0-1 frame in channel)
         let mut latest = None;
-        while let Ok(frame) = self.frame_rx.try_recv() {
-            latest = Some(frame);
+        loop {
+            match self.frame_rx.try_recv() {
+                Ok(frame) => { latest = Some(frame); }
+                Err(mpsc::TryRecvError::Empty) => break,       // No new frame, keep last
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // Reader thread died (camera unplugged, ffmpeg crashed, EOF)
+                    self.disconnected = true;
+                    return None;
+                }
+            }
         }
         if latest.is_some() {
             self.frame_changed = true;
@@ -289,6 +298,13 @@ pub fn render_video(
             if let Some(frame) = decoder.try_recv_frame() {
                 *current_frame = Some(frame);
             }
+            if decoder.disconnected {
+                *current_frame = None;
+                *status = "Disconnected".to_string();
+                *playing = false;
+                crate::system_log::warn(format!("Video source disconnected (id:{})", node_id));
+                decoder.disconnected = false;
+            }
         }
     });
 
@@ -426,11 +442,18 @@ pub fn render_camera(
         ui.colored_label(color, egui::RichText::new(&*status).small());
     }
 
-    // Receive frame
+    // Receive frame — detect camera/source disconnect
     VIDEO_DECODERS.with(|d| {
         if let Some(decoder) = d.borrow_mut().get_mut(&node_id) {
             if let Some(frame) = decoder.try_recv_frame() {
                 *current_frame = Some(frame);
+            }
+            if decoder.disconnected {
+                *current_frame = None;
+                *status = "Disconnected".to_string();
+                *active = false;
+                crate::system_log::warn(format!("Camera disconnected (id:{})", node_id));
+                decoder.disconnected = false; // only log once
             }
         }
     });

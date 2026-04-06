@@ -19,6 +19,10 @@ pub mod ob_hub;
 pub mod ob_joystick;
 pub mod ob_encoder;
 pub mod ob_orb;
+pub mod ob_distance;
+pub mod ob_pressure;
+pub mod ob_bend;
+pub mod ob_move;
 pub mod html_viewer;
 pub mod mcp_server;
 pub mod rust_plugin;
@@ -405,9 +409,17 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
         NodeCatalogEntry { label: "OB Hub", category: "Hardware",
             factory: || NodeType::ObHub { port_name: String::new(), selected_port: String::new(), detected_devices: Vec::new() } },
         NodeCatalogEntry { label: "OB Joystick", category: "Hardware",
-            factory: || NodeType::ObJoystick { device_id: 1, hub_node_id: 0 } },
+            factory: || NodeType::ObJoystick { device_id: 1, hub_node_id: 0, label_color: [255, 255, 255] } },
         NodeCatalogEntry { label: "OB Encoder", category: "Hardware",
-            factory: || NodeType::ObEncoder { device_id: 1, hub_node_id: 0 } },
+            factory: || NodeType::ObEncoder { device_id: 1, hub_node_id: 0, label_color: [255, 255, 255] } },
+        NodeCatalogEntry { label: "OB Move", category: "Hardware",
+            factory: || NodeType::ObMove { device_id: 1, hub_node_id: 0 } },
+        NodeCatalogEntry { label: "OB Bend", category: "Hardware",
+            factory: || NodeType::ObBend { device_id: 1, hub_node_id: 0, label_color: [255, 255, 255] } },
+        NodeCatalogEntry { label: "OB Pressure", category: "Hardware",
+            factory: || NodeType::ObPressure { device_id: 1, hub_node_id: 0, label_color: [255, 255, 255] } },
+        NodeCatalogEntry { label: "OB Distance", category: "Hardware",
+            factory: || NodeType::ObDistance { device_id: 1, hub_node_id: 0, label_color: [255, 255, 255] } },
         NodeCatalogEntry { label: "OB Orb", category: "Hardware",
             factory: || NodeType::ObOrb { device_id: 1, hub_node_id: 0, mode: 0, color: [255, 255, 255], param1: 0.0, param2: 0.0, speed: 1.0, brightness: 1.0 } },
 
@@ -537,6 +549,10 @@ pub fn render_content(
         NodeType::ObHub { .. } => ob_hub::render(ui, node_id, node_type, ob_manager),
         NodeType::ObJoystick { .. } => ob_joystick::render(ui, node_id, node_type, values, connections, ob_manager),
         NodeType::ObEncoder { .. } => ob_encoder::render(ui, node_id, node_type, values, connections, ob_manager),
+        NodeType::ObMove { .. } => ob_move::render(ui, node_id, node_type, values, connections, ob_manager),
+        NodeType::ObBend { .. } => ob_bend::render(ui, node_id, node_type, values, connections, ob_manager),
+        NodeType::ObPressure { .. } => ob_pressure::render(ui, node_id, node_type, values, connections, ob_manager),
+        NodeType::ObDistance { .. } => ob_distance::render(ui, node_id, node_type, values, connections, ob_manager),
         NodeType::ObOrb { .. } => ob_orb::render(ui, node_id, node_type, values, connections, ob_manager, port_positions, dragging_from, pending_disconnects),
         NodeType::Synth { .. } => synth::render(ui, node_id, node_type, values, connections, audio_manager, port_positions, dragging_from, pending_disconnects),
         NodeType::AudioPlayer { .. } => audio_player::render(ui, node_id, node_type, values, connections, audio_manager, port_positions, dragging_from, pending_disconnects),

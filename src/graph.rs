@@ -546,15 +546,49 @@ pub enum NodeType {
     ObJoystick {
         #[serde(default = "default_device_id")]
         device_id: u8,
-        /// Which Hub node this device belongs to (set by spawn button, 0 = auto-find)
         #[serde(default)]
         hub_node_id: NodeId,
+        /// LED strip label color [R, G, B] — sent to device for visual identification
+        #[serde(default = "default_orb_color")]
+        label_color: [u8; 3],
     },
     ObEncoder {
         #[serde(default = "default_device_id")]
         device_id: u8,
         #[serde(default)]
         hub_node_id: NodeId,
+        #[serde(default = "default_orb_color")]
+        label_color: [u8; 3],
+    },
+    ObMove {
+        #[serde(default = "default_device_id")]
+        device_id: u8,
+        #[serde(default)]
+        hub_node_id: NodeId,
+    },
+    ObBend {
+        #[serde(default = "default_device_id")]
+        device_id: u8,
+        #[serde(default)]
+        hub_node_id: NodeId,
+        #[serde(default = "default_orb_color")]
+        label_color: [u8; 3],
+    },
+    ObPressure {
+        #[serde(default = "default_device_id")]
+        device_id: u8,
+        #[serde(default)]
+        hub_node_id: NodeId,
+        #[serde(default = "default_orb_color")]
+        label_color: [u8; 3],
+    },
+    ObDistance {
+        #[serde(default = "default_device_id")]
+        device_id: u8,
+        #[serde(default)]
+        hub_node_id: NodeId,
+        #[serde(default = "default_orb_color")]
+        label_color: [u8; 3],
     },
     /// OB Orb — ESP32 with 8 WS2812B LED strips (output) + IMU accelerometer/gyroscope (input).
     /// Mode 0 = Manual per-strip RGB, 1 = Manual uniform color + brightness, 2+ = Effects.
@@ -1039,6 +1073,10 @@ impl NodeBehavior for NodeType {
             NodeType::ObHub { .. } => "OB Hub",
             NodeType::ObJoystick { .. } => "OB Joystick",
             NodeType::ObEncoder { .. } => "OB Encoder",
+            NodeType::ObMove { .. } => "OB Move",
+            NodeType::ObBend { .. } => "OB Bend",
+            NodeType::ObPressure { .. } => "OB Pressure",
+            NodeType::ObDistance { .. } => "OB Distance",
             NodeType::ObOrb { .. } => "OB Orb",
             NodeType::Synth { .. } => "Synth",
             NodeType::AudioPlayer { .. } => "Audio Player",
@@ -1131,8 +1169,11 @@ impl NodeBehavior for NodeType {
             NodeType::ObHub { .. } => vec![PortDef::new("Command", Text)],
             NodeType::ObJoystick { .. } => vec![],
             NodeType::ObEncoder { .. } => vec![],
+            NodeType::ObMove { .. } => vec![],
+            NodeType::ObBend { .. } => vec![],
+            NodeType::ObPressure { .. } => vec![],
+            NodeType::ObDistance { .. } => vec![],
             NodeType::ObOrb { .. } => {
-                // Single "Drive" input — connect audio, slider, noise, anything
                 vec![PortDef::new("Drive", Number)]
             },
             NodeType::Synth { .. } => vec![PortDef::new("Freq", Number), PortDef::new("Amp", Normalized), PortDef::new("Gate", Gate), PortDef::new("FM Wt", Normalized)],
@@ -1260,6 +1301,23 @@ impl NodeBehavior for NodeType {
                             ports.push(PortDef::dynamic(format!("e{}_click", id), Gate));
                             ports.push(PortDef::dynamic(format!("e{}_pos", id), Number));
                         }
+                        "move" => {
+                            ports.push(PortDef::dynamic(format!("m{}_ax", id), Number));
+                            ports.push(PortDef::dynamic(format!("m{}_ay", id), Number));
+                            ports.push(PortDef::dynamic(format!("m{}_az", id), Number));
+                            ports.push(PortDef::dynamic(format!("m{}_gx", id), Number));
+                            ports.push(PortDef::dynamic(format!("m{}_gy", id), Number));
+                            ports.push(PortDef::dynamic(format!("m{}_gz", id), Number));
+                        }
+                        "bend" => {
+                            ports.push(PortDef::dynamic(format!("b{}_val", id), Normalized));
+                        }
+                        "pressure" => {
+                            ports.push(PortDef::dynamic(format!("p{}_val", id), Normalized));
+                        }
+                        "distance" => {
+                            ports.push(PortDef::dynamic(format!("d{}_val", id), Normalized));
+                        }
                         "orb" => {
                             ports.push(PortDef::dynamic(format!("orb{}_ax", id), Number));
                             ports.push(PortDef::dynamic(format!("orb{}_ay", id), Number));
@@ -1278,11 +1336,20 @@ impl NodeBehavior for NodeType {
                 }
                 ports
             },
-            NodeType::ObJoystick { .. } => vec![PortDef::new("X", Normalized), PortDef::new("Y", Normalized), PortDef::new("Button", Gate)],
-            NodeType::ObEncoder { .. } => vec![PortDef::new("Turn", Number), PortDef::new("Click", Gate), PortDef::new("Position", Number)],
+            NodeType::ObMove { .. } => vec![
+                PortDef::new("Accel X", Number), PortDef::new("Accel Y", Number), PortDef::new("Accel Z", Number),
+                PortDef::new("Gyro X", Number), PortDef::new("Gyro Y", Number), PortDef::new("Gyro Z", Number),
+                PortDef::new("Changed", Trigger),
+            ],
+            NodeType::ObBend { .. } => vec![PortDef::new("Value", Normalized), PortDef::new("Changed", Trigger)],
+            NodeType::ObPressure { .. } => vec![PortDef::new("Value", Normalized), PortDef::new("Changed", Trigger)],
+            NodeType::ObDistance { .. } => vec![PortDef::new("Value", Normalized), PortDef::new("Changed", Trigger)],
+            NodeType::ObJoystick { .. } => vec![PortDef::new("X", Normalized), PortDef::new("Y", Normalized), PortDef::new("Button", Gate), PortDef::new("Changed", Trigger)],
+            NodeType::ObEncoder { .. } => vec![PortDef::new("Turn", Number), PortDef::new("Click", Gate), PortDef::new("Position", Number), PortDef::new("Changed", Trigger)],
             NodeType::ObOrb { .. } => vec![
                 PortDef::new("Accel X", Number), PortDef::new("Accel Y", Number), PortDef::new("Accel Z", Number),
                 PortDef::new("Gyro X", Number), PortDef::new("Gyro Y", Number), PortDef::new("Gyro Z", Number),
+                PortDef::new("Changed", Trigger),
             ],
             NodeType::Synth { .. } => vec![PortDef::new("Audio", Audio)],
             NodeType::AudioPlayer { .. } => vec![PortDef::new("Audio", Audio), PortDef::new("Progress", Normalized)],
@@ -1351,6 +1418,10 @@ impl NodeBehavior for NodeType {
             NodeType::ObHub { .. } => [40, 180, 120],
             NodeType::ObJoystick { .. } => [80, 160, 255],
             NodeType::ObEncoder { .. } => [200, 140, 80],
+            NodeType::ObMove { .. } => [100, 160, 200],
+            NodeType::ObBend { .. } => [160, 200, 100],
+            NodeType::ObPressure { .. } => [200, 100, 160],
+            NodeType::ObDistance { .. } => [200, 200, 60],
             NodeType::ObOrb { .. } => [60, 200, 200],
             NodeType::Synth { .. } => [100, 220, 180],
             NodeType::AudioPlayer { .. } => [180, 100, 220],

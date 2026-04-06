@@ -353,6 +353,20 @@ impl PatchworkApp {
     /// 3. Sync all audio node parameters to the engine (lock-free atomic writes)
     /// 4. Auto-register new audio nodes that don't have processors yet
     fn sync_audio_engine(&mut self) {
+        // ── Check for audio device error (disconnect, hardware failure) ──
+        if self.audio.audio_error.load(std::sync::atomic::Ordering::Relaxed) {
+            self.audio.audio_error.store(false, std::sync::atomic::Ordering::Relaxed);
+            self.audio.stop_output();
+            // Set DSP to off in the AudioDevice node so UI reflects the error
+            for node in self.graph.nodes.values_mut() {
+                if let NodeType::AudioDevice { enabled, .. } = &mut node.node_type {
+                    *enabled = false;
+                }
+            }
+            crate::system_log::error("Audio device disconnected — DSP stopped".to_string());
+            return;
+        }
+
         // ── Gate: require an enabled AudioDevice node for any audio to flow ──
         let dsp_enabled = self.graph.nodes.values().any(|n| {
             matches!(n.node_type, NodeType::AudioDevice { enabled: true, .. })
@@ -1268,7 +1282,7 @@ impl eframe::App for PatchworkApp {
         let conn_count = self.graph.connections.len();
         self.monitor.tick(node_count, conn_count);
 
-        self.gpu_tex_cache.begin_frame();
+        self.gpu_tex_cache.begin_frame(self.wgpu_render_state.as_ref());
         let now_secs = self.app_start_instant.elapsed().as_secs_f64();
         let mut values = self.graph.evaluate(now_secs);
 
@@ -1297,6 +1311,27 @@ impl eframe::App for PatchworkApp {
                                         values.insert((id, port_idx + 2), PortValue::Float(hub.get_value("encoder", *did, "position")));
                                         port_idx += 3;
                                     }
+                                    "move" => {
+                                        values.insert((id, port_idx), PortValue::Float(hub.get_value("move", *did, "ax")));
+                                        values.insert((id, port_idx + 1), PortValue::Float(hub.get_value("move", *did, "ay")));
+                                        values.insert((id, port_idx + 2), PortValue::Float(hub.get_value("move", *did, "az")));
+                                        values.insert((id, port_idx + 3), PortValue::Float(hub.get_value("move", *did, "gx")));
+                                        values.insert((id, port_idx + 4), PortValue::Float(hub.get_value("move", *did, "gy")));
+                                        values.insert((id, port_idx + 5), PortValue::Float(hub.get_value("move", *did, "gz")));
+                                        port_idx += 6;
+                                    }
+                                    "bend" => {
+                                        values.insert((id, port_idx), PortValue::Float(hub.get_value("bend", *did, "val")));
+                                        port_idx += 1;
+                                    }
+                                    "pressure" => {
+                                        values.insert((id, port_idx), PortValue::Float(hub.get_value("pressure", *did, "val")));
+                                        port_idx += 1;
+                                    }
+                                    "distance" => {
+                                        values.insert((id, port_idx), PortValue::Float(hub.get_value("distance", *did, "val")));
+                                        port_idx += 1;
+                                    }
                                     "orb" => {
                                         values.insert((id, port_idx), PortValue::Float(hub.get_value("orb", *did, "ax")));
                                         values.insert((id, port_idx + 1), PortValue::Float(hub.get_value("orb", *did, "ay")));
@@ -1312,29 +1347,123 @@ impl eframe::App for PatchworkApp {
                         }
                         ob_injected = true;
                     }
-                    NodeType::ObJoystick { device_id, hub_node_id } => {
+                    NodeType::ObJoystick { device_id, hub_node_id, .. } => {
                         let find = if *hub_node_id != 0 {
                             self.ob.get_hub(*hub_node_id).and_then(|h| h.get_device("joystick", *device_id))
                         } else {
                             self.ob.find_device("joystick", *device_id).map(|(_, d)| d)
                         };
                         if let Some(dev) = find {
-                            values.insert((id, 0), PortValue::Float(dev.values.get("x").copied().unwrap_or(0.0)));
-                            values.insert((id, 1), PortValue::Float(dev.values.get("y").copied().unwrap_or(0.0)));
-                            values.insert((id, 2), PortValue::Float(dev.values.get("btn").copied().unwrap_or(0.0)));
+                            let x = dev.values.get("x").copied().unwrap_or(0.0);
+                            let y = dev.values.get("y").copied().unwrap_or(0.0);
+                            let btn = dev.values.get("btn").copied().unwrap_or(0.0);
+                            values.insert((id, 0), PortValue::Float(x));
+                            values.insert((id, 1), PortValue::Float(y));
+                            values.insert((id, 2), PortValue::Float(btn));
+                            // Changed trigger: compare with previous frame
+                            let prev_key = egui::Id::new(("ob_prev", id));
+                            let prev: Option<[f32; 3]> = ctx.data_mut(|d| d.get_temp(prev_key));
+                            let curr = [x, y, btn];
+                            let changed = prev.map(|p| (p[0]-curr[0]).abs() > 0.001 || (p[1]-curr[1]).abs() > 0.001 || (p[2]-curr[2]).abs() > 0.5).unwrap_or(false);
+                            values.insert((id, 3), PortValue::Float(if changed { 1.0 } else { 0.0 }));
+                            ctx.data_mut(|d| d.insert_temp(prev_key, curr));
                         }
                         ob_injected = true;
                     }
-                    NodeType::ObEncoder { device_id, hub_node_id } => {
+                    NodeType::ObEncoder { device_id, hub_node_id, .. } => {
                         let find = if *hub_node_id != 0 {
                             self.ob.get_hub(*hub_node_id).and_then(|h| h.get_device("encoder", *device_id))
                         } else {
                             self.ob.find_device("encoder", *device_id).map(|(_, d)| d)
                         };
                         if let Some(dev) = find {
-                            values.insert((id, 0), PortValue::Float(dev.values.get("turn").copied().unwrap_or(0.0)));
-                            values.insert((id, 1), PortValue::Float(dev.values.get("click").copied().unwrap_or(0.0)));
-                            values.insert((id, 2), PortValue::Float(dev.values.get("position").copied().unwrap_or(0.0)));
+                            let turn = dev.values.get("turn").copied().unwrap_or(0.0);
+                            let click = dev.values.get("click").copied().unwrap_or(0.0);
+                            let pos = dev.values.get("position").copied().unwrap_or(0.0);
+                            values.insert((id, 0), PortValue::Float(turn));
+                            values.insert((id, 1), PortValue::Float(click));
+                            values.insert((id, 2), PortValue::Float(pos));
+                            let prev_key = egui::Id::new(("ob_prev", id));
+                            let prev: Option<[f32; 3]> = ctx.data_mut(|d| d.get_temp(prev_key));
+                            let curr = [turn, click, pos];
+                            let changed = prev.map(|p| (p[0]-curr[0]).abs() > 0.001 || (p[1]-curr[1]).abs() > 0.5 || (p[2]-curr[2]).abs() > 0.001).unwrap_or(false);
+                            values.insert((id, 3), PortValue::Float(if changed { 1.0 } else { 0.0 }));
+                            ctx.data_mut(|d| d.insert_temp(prev_key, curr));
+                        }
+                        ob_injected = true;
+                    }
+                    NodeType::ObMove { device_id, hub_node_id } => {
+                        let find = if *hub_node_id != 0 {
+                            self.ob.get_hub(*hub_node_id).and_then(|h| h.get_device("move", *device_id))
+                        } else {
+                            self.ob.find_device("move", *device_id).map(|(_, d)| d)
+                        };
+                        if let Some(dev) = find {
+                            let vals: [f32; 6] = [
+                                dev.values.get("ax").copied().unwrap_or(0.0),
+                                dev.values.get("ay").copied().unwrap_or(0.0),
+                                dev.values.get("az").copied().unwrap_or(0.0),
+                                dev.values.get("gx").copied().unwrap_or(0.0),
+                                dev.values.get("gy").copied().unwrap_or(0.0),
+                                dev.values.get("gz").copied().unwrap_or(0.0),
+                            ];
+                            for i in 0..6 { values.insert((id, i), PortValue::Float(vals[i])); }
+                            let prev_key = egui::Id::new(("ob_prev", id));
+                            let prev: Option<[f32; 6]> = ctx.data_mut(|d| d.get_temp(prev_key));
+                            let changed = prev.map(|p| (0..6).any(|i| (p[i]-vals[i]).abs() > 0.001)).unwrap_or(false);
+                            values.insert((id, 6), PortValue::Float(if changed { 1.0 } else { 0.0 }));
+                            ctx.data_mut(|d| d.insert_temp(prev_key, vals));
+                        }
+                        ob_injected = true;
+                    }
+                    NodeType::ObBend { device_id, hub_node_id, .. } => {
+                        let find = if *hub_node_id != 0 {
+                            self.ob.get_hub(*hub_node_id).and_then(|h| h.get_device("bend", *device_id))
+                        } else {
+                            self.ob.find_device("bend", *device_id).map(|(_, d)| d)
+                        };
+                        if let Some(dev) = find {
+                            let val = dev.values.get("val").copied().unwrap_or(0.0);
+                            values.insert((id, 0), PortValue::Float(val));
+                            let prev_key = egui::Id::new(("ob_prev", id));
+                            let prev: Option<f32> = ctx.data_mut(|d| d.get_temp(prev_key));
+                            let changed = prev.map(|p| (p - val).abs() > 0.001).unwrap_or(false);
+                            values.insert((id, 1), PortValue::Float(if changed { 1.0 } else { 0.0 }));
+                            ctx.data_mut(|d| d.insert_temp(prev_key, val));
+                        }
+                        ob_injected = true;
+                    }
+                    NodeType::ObPressure { device_id, hub_node_id, .. } => {
+                        let find = if *hub_node_id != 0 {
+                            self.ob.get_hub(*hub_node_id).and_then(|h| h.get_device("pressure", *device_id))
+                        } else {
+                            self.ob.find_device("pressure", *device_id).map(|(_, d)| d)
+                        };
+                        if let Some(dev) = find {
+                            let val = dev.values.get("val").copied().unwrap_or(0.0);
+                            values.insert((id, 0), PortValue::Float(val));
+                            let prev_key = egui::Id::new(("ob_prev", id));
+                            let prev: Option<f32> = ctx.data_mut(|d| d.get_temp(prev_key));
+                            let changed = prev.map(|p| (p - val).abs() > 0.001).unwrap_or(false);
+                            values.insert((id, 1), PortValue::Float(if changed { 1.0 } else { 0.0 }));
+                            ctx.data_mut(|d| d.insert_temp(prev_key, val));
+                        }
+                        ob_injected = true;
+                    }
+                    NodeType::ObDistance { device_id, hub_node_id, .. } => {
+                        let find = if *hub_node_id != 0 {
+                            self.ob.get_hub(*hub_node_id).and_then(|h| h.get_device("distance", *device_id))
+                        } else {
+                            self.ob.find_device("distance", *device_id).map(|(_, d)| d)
+                        };
+                        if let Some(dev) = find {
+                            let val = dev.values.get("val").copied().unwrap_or(0.0);
+                            values.insert((id, 0), PortValue::Float(val));
+                            let prev_key = egui::Id::new(("ob_prev", id));
+                            let prev: Option<f32> = ctx.data_mut(|d| d.get_temp(prev_key));
+                            let changed = prev.map(|p| (p - val).abs() > 0.01).unwrap_or(false);
+                            values.insert((id, 1), PortValue::Float(if changed { 1.0 } else { 0.0 }));
+                            ctx.data_mut(|d| d.insert_temp(prev_key, val));
                         }
                         ob_injected = true;
                     }
@@ -1345,12 +1474,20 @@ impl eframe::App for PatchworkApp {
                             self.ob.find_device("orb", *device_id).map(|(_, d)| d)
                         };
                         if let Some(dev) = find {
-                            values.insert((id, 0), PortValue::Float(dev.values.get("ax").copied().unwrap_or(0.0)));
-                            values.insert((id, 1), PortValue::Float(dev.values.get("ay").copied().unwrap_or(0.0)));
-                            values.insert((id, 2), PortValue::Float(dev.values.get("az").copied().unwrap_or(0.0)));
-                            values.insert((id, 3), PortValue::Float(dev.values.get("gx").copied().unwrap_or(0.0)));
-                            values.insert((id, 4), PortValue::Float(dev.values.get("gy").copied().unwrap_or(0.0)));
-                            values.insert((id, 5), PortValue::Float(dev.values.get("gz").copied().unwrap_or(0.0)));
+                            let vals: [f32; 6] = [
+                                dev.values.get("ax").copied().unwrap_or(0.0),
+                                dev.values.get("ay").copied().unwrap_or(0.0),
+                                dev.values.get("az").copied().unwrap_or(0.0),
+                                dev.values.get("gx").copied().unwrap_or(0.0),
+                                dev.values.get("gy").copied().unwrap_or(0.0),
+                                dev.values.get("gz").copied().unwrap_or(0.0),
+                            ];
+                            for i in 0..6 { values.insert((id, i), PortValue::Float(vals[i])); }
+                            let prev_key = egui::Id::new(("ob_prev", id));
+                            let prev: Option<[f32; 6]> = ctx.data_mut(|d| d.get_temp(prev_key));
+                            let changed = prev.map(|p| (0..6).any(|i| (p[i]-vals[i]).abs() > 0.001)).unwrap_or(false);
+                            values.insert((id, 6), PortValue::Float(if changed { 1.0 } else { 0.0 }));
+                            ctx.data_mut(|d| d.insert_temp(prev_key, vals));
                         }
                         ob_injected = true;
                     }
@@ -1850,8 +1987,12 @@ impl eframe::App for PatchworkApp {
                     ctx.data_mut(|d| d.remove::<(String, u8)>(spawn_id));
                     let hub_pos = self.graph.nodes.get(&hub_id).map(|n| n.pos).unwrap_or([200.0, 200.0]);
                     let nt = match dtype.as_str() {
-                        "joystick" => NodeType::ObJoystick { device_id: did, hub_node_id: hub_id },
-                        "encoder" => NodeType::ObEncoder { device_id: did, hub_node_id: hub_id },
+                        "joystick" => NodeType::ObJoystick { device_id: did, hub_node_id: hub_id, label_color: [255, 255, 255] },
+                        "encoder" => NodeType::ObEncoder { device_id: did, hub_node_id: hub_id, label_color: [255, 255, 255] },
+                        "move" => NodeType::ObMove { device_id: did, hub_node_id: hub_id },
+                        "bend" => NodeType::ObBend { device_id: did, hub_node_id: hub_id, label_color: [255, 255, 255] },
+                        "pressure" => NodeType::ObPressure { device_id: did, hub_node_id: hub_id, label_color: [255, 255, 255] },
+                        "distance" => NodeType::ObDistance { device_id: did, hub_node_id: hub_id, label_color: [255, 255, 255] },
                         "orb" => NodeType::ObOrb { device_id: did, hub_node_id: hub_id, mode: 0, color: [255, 255, 255], param1: 0.0, param2: 0.0, speed: 1.0, brightness: 1.0 },
                         _ => continue,
                     };

@@ -147,10 +147,14 @@ impl super::PatchworkApp {
         };
         let mut graph = state.graph;
         graph.fix_next_id();
-        // Always start with DSP off for safety (prevents unexpected audio on launch)
+        // Always start with DSP, Camera, Mic off for safety
         for node in graph.nodes.values_mut() {
-            if let NodeType::AudioDevice { enabled, .. } = &mut node.node_type {
-                *enabled = false;
+            match &mut node.node_type {
+                NodeType::AudioDevice { enabled, .. } => { *enabled = false; }
+                NodeType::Camera { active, .. } => { *active = false; }
+                NodeType::AudioInput { active, .. } => { *active = false; }
+                NodeType::VideoPlayer { playing, .. } => { *playing = false; }
+                _ => {}
             }
         }
         self.graph = graph;
@@ -481,10 +485,15 @@ impl super::PatchworkApp {
                         let mut graph = pf.graph;
                         graph.fix_next_id();
                         absolutize_paths(&mut graph, &dir_str);
-                        // Always start with DSP off for safety
+                        // Always start with DSP, Camera, Mic off for safety —
+                        // prevents stale "active" state without actual streams running
                         for node in graph.nodes.values_mut() {
-                            if let NodeType::AudioDevice { enabled, .. } = &mut node.node_type {
-                                *enabled = false;
+                            match &mut node.node_type {
+                                NodeType::AudioDevice { enabled, .. } => { *enabled = false; }
+                                NodeType::Camera { active, .. } => { *active = false; }
+                                NodeType::AudioInput { active, .. } => { *active = false; }
+                                NodeType::VideoPlayer { playing, .. } => { *playing = false; }
+                                _ => {}
                             }
                         }
                         self.audio.stop_output();

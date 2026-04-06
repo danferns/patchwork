@@ -41,6 +41,9 @@ pub struct AudioManager {
     // Cached device lists (refreshed periodically, not every frame)
     pub cached_output_devices: Vec<String>,
     pub cached_input_devices: Vec<String>,
+    /// Set to true by audio error callback when device disconnects or errors.
+    /// UI checks this each frame to show warning and disable DSP.
+    pub audio_error: Arc<AtomicBool>,
     /// Dropout counter — lives outside the Mutex so the audio callback can
     /// increment it even when try_lock fails (which is the whole point).
     pub dropout_count: Arc<AtomicU32>,
@@ -87,6 +90,7 @@ impl AudioManager {
             sampler_input_sources: HashMap::new(),
             cached_output_devices: Vec::new(),
             cached_input_devices: Vec::new(),
+            audio_error: Arc::new(AtomicBool::new(false)),
             dropout_count: Arc::new(AtomicU32::new(0)),
             master_volume: Arc::new(super::params::AtomicF32::new(0.8)),
             engine_tx: None, node_params: HashMap::new(),
@@ -116,6 +120,7 @@ impl AudioManager {
             sampler_input_sources: HashMap::new(),
             cached_output_devices: Vec::new(),
             cached_input_devices: Vec::new(),
+            audio_error: Arc::new(AtomicBool::new(false)),
             dropout_count: Arc::new(AtomicU32::new(0)),
             master_volume: Arc::new(super::params::AtomicF32::new(0.8)),
             engine_tx: None, node_params: HashMap::new(),
@@ -200,8 +205,12 @@ impl AudioManager {
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 engine.execute(data, channels);
             },
-            |err| {
-                crate::system_log::error(format!("Audio error: {}", err));
+            {
+                let error_flag = self.audio_error.clone();
+                move |err| {
+                    crate::system_log::error(format!("Audio error: {}", err));
+                    error_flag.store(true, Ordering::Relaxed);
+                }
             },
             None,
         ).map_err(|e| format!("Build stream failed: {}", e))?;

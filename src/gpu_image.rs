@@ -30,10 +30,18 @@ impl GpuTextureCache {
     }
 
     /// Call at start of each frame
-    pub fn begin_frame(&mut self) {
+    pub fn begin_frame(&mut self, render_state: Option<&eframe::egui_wgpu::RenderState>) {
         self.current_frame += 1;
         // Evict textures older than 2 frames
         self.entries.retain(|_, v| self.current_frame - v.frame <= 2);
+        // Clear prerendered display textures from previous frame
+        if let Some(rs) = render_state {
+            let mut renderer = rs.renderer.write();
+            if let Some(store) = renderer.callback_resources.get_mut::<GpuDisplayStore>() {
+                store.prerendered.clear();
+                store.instances.clear();
+            }
+        }
     }
 
     /// Get a cached GPU texture for an Arc<ImageData>, or upload it.

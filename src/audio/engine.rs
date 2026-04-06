@@ -215,31 +215,29 @@ impl AudioEngine {
             self.input_scratch[..num_frames].fill(0.0);
             let mut has_input = false;
 
-            // Copy input connections + check if this is a mixer (needs per-port gain)
-            let (input_connections, port_gains): (Vec<(usize, Option<NodeId>)>, Vec<f32>) = self.slots.get(&node_id)
-                .map(|slot| {
-                    let conns: Vec<_> = slot.inputs.iter().enumerate()
-                        .map(|(i, id)| (i, *id))
-                        .collect();
-                    // Read per-port gains from params (for mixer nodes: param[ch] = gain for channel ch)
-                    let is_mixer = slot.processor.kind() == ProcessorKind::Mixer;
-                    let gains: Vec<f32> = if is_mixer {
-                        (0..conns.len()).map(|i| {
-                            if i < slot.params.len() { slot.params[i].load() } else { 1.0 }
-                        }).collect()
-                    } else {
-                        vec![1.0; conns.len()]
-                    };
-                    (conns, gains)
-                })
-                .unwrap_or_default();
+            // Read input connections into stack array (zero heap allocation)
+            const MAX_INPUTS: usize = 16;
+            let mut conn_buf: [(Option<NodeId>, f32); MAX_INPUTS] = [(None, 1.0); MAX_INPUTS];
+            let mut conn_count = 0usize;
 
-            for (idx, (_port, maybe_src)) in input_connections.iter().enumerate() {
+            if let Some(slot) = self.slots.get(&node_id) {
+                let is_mixer = slot.processor.kind() == ProcessorKind::Mixer;
+                for (i, src) in slot.inputs.iter().enumerate() {
+                    if i >= MAX_INPUTS { break; }
+                    let gain = if is_mixer {
+                        if i < slot.params.len() { slot.params[i].load() } else { 1.0 }
+                    } else { 1.0 };
+                    conn_buf[i] = (*src, gain);
+                    conn_count = i + 1;
+                }
+            }
+
+            for i in 0..conn_count {
+                let (maybe_src, gain) = conn_buf[i];
                 if let Some(src_id) = maybe_src {
-                    if let Some(src_slot) = self.slots.get(src_id) {
-                        let gain = port_gains.get(idx).copied().unwrap_or(1.0);
-                        for i in 0..num_frames {
-                            self.input_scratch[i] += src_slot.output_buffer[i] * gain;
+                    if let Some(src_slot) = self.slots.get(&src_id) {
+                        for s in 0..num_frames {
+                            self.input_scratch[s] += src_slot.output_buffer[s] * gain;
                         }
                         has_input = true;
                     }

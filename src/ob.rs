@@ -88,6 +88,42 @@ impl ObDevice {
                     self.values.insert("value".into(), v);
                 }
             }
+            ("move", "accel") => {
+                if values.len() >= 3 {
+                    self.values.insert("ax".into(), values[0]);
+                    self.values.insert("ay".into(), values[1]);
+                    self.values.insert("az".into(), values[2]);
+                }
+            }
+            ("move", "gyro") => {
+                if values.len() >= 3 {
+                    self.values.insert("gx".into(), values[0]);
+                    self.values.insert("gy".into(), values[1]);
+                    self.values.insert("gz".into(), values[2]);
+                }
+            }
+            ("bend", "val") => {
+                if let Some(&v) = values.first() {
+                    self.values.insert("val".into(), v.clamp(0.0, 1.0));
+                }
+            }
+            ("pressure", "val") => {
+                if let Some(&v) = values.first() {
+                    self.values.insert("val".into(), v.clamp(0.0, 1.0));
+                }
+            }
+            ("distance", "val") => {
+                if let Some(&v) = values.first() {
+                    self.values.insert("val".into(), v.clamp(0.0, 1.0));
+                }
+            }
+            ("distance", "mm") => {
+                if let Some(&v) = values.first() {
+                    // Normalize: 50mm=0.0 (close), 200mm=1.0 (far), clamped
+                    let norm = ((v - 50.0) / (200.0 - 50.0)).clamp(0.0, 1.0);
+                    self.values.insert("val".into(), norm);
+                }
+            }
             ("orb", act) if act == "accel" || act == "gyro" || act == "imu" => {
                 match act {
                     "accel" => {
