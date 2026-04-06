@@ -37,11 +37,64 @@ impl NodeBehavior for CommentNode {
 
     fn custom_render(&self) -> bool { true }
     fn no_title(&self) -> bool { true }
-    fn min_width(&self) -> Option<f32> { Some(160.0) }
+    fn min_width(&self) -> Option<f32> { Some(130.0) }
 
     fn render_background(&self, painter: &egui::Painter, rect: egui::Rect) -> Option<egui::Frame> {
         let bg = egui::Color32::from_rgb(self.bg_color[0], self.bg_color[1], self.bg_color[2]);
         painter.rect_filled(rect, 8.0, bg);
+
+        // Paper fold — drawn here in render_background so we have the real
+        // outer rect and the fold sits exactly at the top-right corner of
+        // the node instead of an approximated position inside render_ui.
+        let fold_size = 14.0_f32;
+        let corner_r = 8.0_f32;
+        // Pull the fold inward by the corner radius so it doesn't poke past
+        // the rounded top-right corner of the node.
+        let tr = egui::pos2(rect.right() - corner_r * 0.25, rect.top() + corner_r * 0.25);
+
+        // Classic "lifted corner" look:
+        //   • shadow cast on the card underneath (the lower-left triangle
+        //     of the fold square) → darker
+        //   • the back of the lifted flap (the upper-right triangle) →
+        //     slightly lighter than the card color
+        let shadow = egui::Color32::from_rgb(
+            self.bg_color[0].saturating_sub(30),
+            self.bg_color[1].saturating_sub(30),
+            self.bg_color[2].saturating_sub(30),
+        );
+        let flap = egui::Color32::from_rgb(
+            self.bg_color[0].saturating_add(18),
+            self.bg_color[1].saturating_add(18),
+            self.bg_color[2].saturating_add(18),
+        );
+
+        // Shadow — lower-left triangle of the fold square
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(tr.x - fold_size, tr.y),
+                egui::pos2(tr.x, tr.y + fold_size),
+                egui::pos2(tr.x - fold_size, tr.y + fold_size),
+            ],
+            shadow,
+            egui::Stroke::NONE,
+        ));
+        // Flap — upper-right triangle (the folded-over corner itself)
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(tr.x - fold_size, tr.y),
+                egui::pos2(tr.x, tr.y),
+                egui::pos2(tr.x, tr.y + fold_size),
+            ],
+            flap,
+            egui::Stroke::NONE,
+        ));
+        // Crease line along the diagonal
+        let crease = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 60);
+        painter.line_segment(
+            [egui::pos2(tr.x - fold_size, tr.y), egui::pos2(tr.x, tr.y + fold_size)],
+            egui::Stroke::new(1.0, crease),
+        );
+
         // Return frame for margins only (fill already drawn above)
         Some(egui::Frame::NONE.inner_margin(12.0))
     }
@@ -62,7 +115,6 @@ impl NodeBehavior for CommentNode {
 
     fn render_ui(&mut self, ui: &mut egui::Ui) {
         let node_id = ui.id(); // use egui's widget ID as proxy
-        let fold_size = 12.0;
 
         let popup_id = egui::Id::new(("comment_popup_d", node_id));
         let popup_time_id = egui::Id::new(("comment_popup_time_d", node_id));
@@ -72,8 +124,23 @@ impl NodeBehavior for CommentNode {
 
         let is_editing = ui.ctx().data_mut(|d| d.get_temp::<bool>(editing_id).unwrap_or(false));
 
-        // Allocate body area
-        let avail_w = ui.available_width();
+        // Allocate body area — size tightly to actual text so there's no
+        // extra right-side padding in the node background. When editing we
+        // give a slightly wider area for comfortable typing.
+        let font = egui::FontId::proportional(self.font_size);
+        let placeholder = "Write a note...";
+        let measure_line = |ui: &egui::Ui, s: &str| -> f32 {
+            ui.fonts(|f| f.layout_no_wrap(s.to_string(), font.clone(), egui::Color32::WHITE).size().x)
+        };
+        let longest = if self.text.is_empty() {
+            measure_line(ui, placeholder)
+        } else {
+            self.text.lines().map(|l| measure_line(ui, l)).fold(0.0_f32, f32::max)
+        };
+        let min_body_w = if is_editing { 180.0 } else { 120.0 };
+        let max_body_w = 360.0;
+        let body_w = (longest + 10.0).clamp(min_body_w, max_body_w);
+        let avail_w = ui.available_width().min(body_w);
         let estimated_h = 80.0_f32.max(self.text.lines().count() as f32 * (self.font_size + 4.0) + 30.0);
         let (body_rect, body_response) = ui.allocate_exact_size(
             egui::vec2(avail_w, estimated_h), egui::Sense::click(),
@@ -133,19 +200,6 @@ impl NodeBehavior for CommentNode {
         let dim = ui.visuals().widgets.noninteractive.fg_stroke.color;
         painter.text(egui::pos2(node_rect.left() + 14.0, node_rect.bottom() - 6.0),
             egui::Align2::LEFT_BOTTOM, "Comment", egui::FontId::proportional(10.0), dim);
-
-        // Paper fold (top-right corner)
-        let tr = node_rect.right_top();
-        let fold_dark = egui::Color32::from_rgb(
-            self.bg_color[0].saturating_sub(12), self.bg_color[1].saturating_sub(12), self.bg_color[2].saturating_sub(12));
-        let fold_light = egui::Color32::from_rgb(
-            self.bg_color[0].saturating_add(20), self.bg_color[1].saturating_add(20), self.bg_color[2].saturating_add(20));
-        painter.add(egui::Shape::convex_polygon(
-            vec![egui::pos2(tr.x - fold_size, tr.y), egui::pos2(tr.x, tr.y), egui::pos2(tr.x, tr.y + fold_size)],
-            fold_dark, egui::Stroke::NONE));
-        painter.add(egui::Shape::convex_polygon(
-            vec![egui::pos2(tr.x - fold_size, tr.y), egui::pos2(tr.x, tr.y + fold_size), egui::pos2(tr.x - fold_size, tr.y + fold_size)],
-            fold_light, egui::Stroke::NONE));
 
         // Accent border when editing
         let popup_open = ui.ctx().data_mut(|d| d.get_temp::<bool>(popup_id).unwrap_or(false));

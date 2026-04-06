@@ -444,7 +444,7 @@ pub fn catalog() -> Vec<NodeCatalogEntry> {
                     bg_color: [20, 20, 20], text_color: [220, 220, 220],
                     window_bg: [24, 24, 24], window_alpha: 240,
                     grid_color: [28, 28, 28], grid_style: 2, wire_style: 0,
-                    wiggle_gravity: 0.0, wiggle_range: 1.0, wiggle_speed: 1.0,
+                    wiggle_gravity: 0.0, wiggle_range: 1.0, wiggle_speed: 1.0, wiggle_signal: 0.0,
                     rounding: 16.0, spacing: 4.0, use_hsl: false,
                     wire_thickness: 6.0, background_path: String::new(),
                 }
@@ -525,8 +525,8 @@ pub fn render_content(
             midi_in::render(ui, port_name, channel, note, velocity, log, node_id, midi_in_ports, midi_connected_in, midi_actions),
         NodeType::Serial { port_name, baud_rate, log, last_line, send_buf } =>
             serial::render(ui, port_name, baud_rate, log, last_line, send_buf, node_id, values, connections, serial_ports, serial_connected, serial_actions),
-        NodeType::Theme { dark_mode, accent, font_size, bg_color, text_color, window_bg, window_alpha, grid_color, grid_style, wire_style, wiggle_gravity, wiggle_range, wiggle_speed, rounding, spacing, use_hsl, wire_thickness, background_path } =>
-            theme::render(ui, dark_mode, accent, font_size, bg_color, text_color, window_bg, window_alpha, grid_color, grid_style, wire_style, wiggle_gravity, wiggle_range, wiggle_speed, rounding, spacing, use_hsl, wire_thickness, background_path, node_id, values, connections, port_positions, dragging_from, pending_disconnects),
+        NodeType::Theme { dark_mode, accent, font_size, bg_color, text_color, window_bg, window_alpha, grid_color, grid_style, wire_style, wiggle_gravity, wiggle_range, wiggle_speed, wiggle_signal, rounding, spacing, use_hsl, wire_thickness, background_path } =>
+            theme::render(ui, dark_mode, accent, font_size, bg_color, text_color, window_bg, window_alpha, grid_color, grid_style, wire_style, wiggle_gravity, wiggle_range, wiggle_speed, wiggle_signal, rounding, spacing, use_hsl, wire_thickness, background_path, node_id, values, connections, port_positions, dragging_from, pending_disconnects),
         // Comment migrated to trait-based node
         NodeType::Console { .. } => {} // migrated to trait — legacy fallback
         // Monitor migrated to trait-based node
@@ -536,7 +536,7 @@ pub fn render_content(
             osc_in::render(ui, port, address_filter, arg_count, last_args, last_args_text, log, listening, discovered, node_id, osc_listening, osc_actions),
         // KeyInput migrated to trait-based node
         NodeType::Script { name, input_names, output_names, code, last_values, error, continuous, trigger } =>
-            script::render(ui, name, input_names, output_names, code, last_values, error, continuous, trigger, values, node_id),
+            script::render(ui, name, input_names, output_names, code, last_values, error, continuous, trigger, values, node_id, pending_disconnects),
         NodeType::Palette { search } =>
             palette::render(ui, search, node_id),
         NodeType::HttpRequest { url, method, headers, response, status, auto_send, last_hash } =>

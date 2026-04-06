@@ -20,6 +20,7 @@ fn default_canvas_w() -> f32 { 400.0 }
 fn default_canvas_h() -> f32 { 300.0 }
 fn default_wiggle_range() -> f32 { 1.0 }
 fn default_wiggle_speed() -> f32 { 1.0 }
+fn default_wiggle_signal() -> f32 { 0.0 }
 fn default_resolution() -> u32 { 120 }
 fn default_max_tokens() -> u32 { 1024 }
 fn default_provider() -> String { "anthropic".into() }
@@ -415,6 +416,11 @@ pub enum NodeType {
         /// Wiggly wire: speed multiplier (0.1=slow, 2.0=fast)
         #[serde(default = "default_wiggle_speed")]
         wiggle_speed: f32,
+        /// Wiggly wire: how much incoming signal activity (value changes)
+        /// modulates the wiggle amplitude/frequency. 0 = ignore activity,
+        /// 1 = full activity-driven animation.
+        #[serde(default = "default_wiggle_signal")]
+        wiggle_signal: f32,
         #[serde(default = "default_rounding")]
         rounding: f32,
         #[serde(default = "default_spacing")]
@@ -1153,10 +1159,12 @@ impl NodeBehavior for NodeType {
                 PortDef::new("Spacing", Number),
                 PortDef::new("Win Alpha", Normalized),
                 PortDef::new("Background", Text),
+                PortDef::new("Wire", Number),
                 PortDef::new("BG Image", Image),
                 PortDef::new("W Gravity", Normalized),
                 PortDef::new("W Range", Normalized),
                 PortDef::new("W Speed", Normalized),
+                PortDef::new("W Signal", Normalized),
             ],
             NodeType::Serial { .. } => vec![PortDef::new("Send", Text)],
             NodeType::Console { .. } => vec![PortDef::new("Log", Generic)],
@@ -1597,6 +1605,11 @@ impl Graph {
     }
     pub fn remove_connections_to_port(&mut self, node_id: NodeId, port: usize) {
         self.connections.retain(|c| !(c.to_node == node_id && c.to_port == port));
+        self.topo_dirty = true;
+        self.audio_topology_dirty = true;
+    }
+    /// Mark topology caches as dirty. Call after manually mutating `connections`.
+    pub fn mark_topo_dirty(&mut self) {
         self.topo_dirty = true;
         self.audio_topology_dirty = true;
     }

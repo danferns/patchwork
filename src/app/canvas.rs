@@ -124,17 +124,22 @@ pub(super) fn draw_wire(painter: &egui::Painter, from: egui::Pos2, to: egui::Pos
                 painter.line_segment([pair[0], pair[1]], egui::Stroke::new(width, color));
             }
         }
-        3 => {
-            // Wiggly wire — sine-displaced bezier, activity-driven
-            draw_wiggly_wire(painter, from, to, color, width, wp);
-        }
         _ => {
-            // Bezier (default)
-            let dx = (to.x - from.x).abs().max(50.0) * 0.5;
-            painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
-                [from, egui::pos2(from.x + dx, from.y), egui::pos2(to.x - dx, to.y), to],
-                false, egui::Color32::TRANSPARENT, egui::Stroke::new(width, color),
-            ));
+            // Curved (default): unified Bezier + Wiggly. When all wiggle
+            // params (gravity, range, speed) are zero the output is
+            // indistinguishable from a plain cubic bezier — so "Bezier"
+            // is just this mode with zeroed wiggle parameters. No need
+            // for a separate style.
+            let has_wiggle = wp.gravity > 0.0 || wp.range > 0.0 || wp.activity > 0.0;
+            if has_wiggle {
+                draw_wiggly_wire(painter, from, to, color, width, wp);
+            } else {
+                let dx = (to.x - from.x).abs().max(50.0) * 0.5;
+                painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+                    [from, egui::pos2(from.x + dx, from.y), egui::pos2(to.x - dx, to.y), to],
+                    false, egui::Color32::TRANSPARENT, egui::Stroke::new(width, color),
+                ));
+            }
         }
     }
 }
@@ -405,11 +410,11 @@ impl super::PatchworkApp {
         let color_none  = egui::Color32::from_rgb(140, 140, 140);   // gray fallback
 
         // Wire thickness + style + wiggly params from Theme
-        let (wire_thickness, wire_style, wiggle_gravity, wiggle_range, wiggle_speed): (f32, u8, f32, f32, f32) = self.graph.nodes.values()
-            .find_map(|n| if let NodeType::Theme { wire_thickness, wire_style, wiggle_gravity, wiggle_range, wiggle_speed, .. } = &n.node_type {
-                Some((*wire_thickness, *wire_style, *wiggle_gravity, *wiggle_range, *wiggle_speed))
+        let (wire_thickness, wire_style, wiggle_gravity, wiggle_range, wiggle_speed, wiggle_signal): (f32, u8, f32, f32, f32, f32) = self.graph.nodes.values()
+            .find_map(|n| if let NodeType::Theme { wire_thickness, wire_style, wiggle_gravity, wiggle_range, wiggle_speed, wiggle_signal, .. } = &n.node_type {
+                Some((*wire_thickness, *wire_style, *wiggle_gravity, *wiggle_range, *wiggle_speed, *wiggle_signal))
             } else { None })
-            .unwrap_or((6.0, 0, 0.0, 1.0, 1.0));
+            .unwrap_or((6.0, 0, 0.0, 1.0, 1.0, 0.0));
         let wire_thickness = wire_thickness.max(1.0);
 
         // (endpoint_radius removed — connectors now use draw_wire_connector)
@@ -492,9 +497,9 @@ impl super::PatchworkApp {
                     (base_color, wire_thickness)
                 };
 
-                // Compute wire activity for wiggly mode:
-                // Compare current value hash with stored previous — exponential smoothing
-                let wire_activity = if wire_style == 3 {
+                // Compute wire activity for curved mode when range>0 AND the user
+                // has given signal weight > 0 (otherwise activity is ignored).
+                let wire_activity = if wire_style == 0 && wiggle_range > 0.0 && wiggle_signal > 0.0 {
                     let val_id = egui::Id::new(("wire_val_hash", conn.from_node, conn.from_port));
                     let activity_id = egui::Id::new(("wire_activity", conn.from_node, conn.from_port));
                     let smooth_id = egui::Id::new(("wire_smooth", conn.from_node, conn.from_port));
@@ -528,7 +533,14 @@ impl super::PatchworkApp {
                     0.0
                 };
 
-                let wp = WiggleParams { activity: wire_activity, time: now, gravity: wiggle_gravity, range: wiggle_range, speed: wiggle_speed };
+                // Signal weight scales the per-wire activity before it drives the wiggle.
+                let wp = WiggleParams {
+                    activity: wire_activity * wiggle_signal,
+                    time: now,
+                    gravity: wiggle_gravity,
+                    range: wiggle_range,
+                    speed: wiggle_speed,
+                };
 
                 // 3D wire: shadow + dark edge + main + highlight
                 draw_wire_3d(&painter, a, b, color, width, wire_style, &wp);
@@ -573,8 +585,9 @@ impl super::PatchworkApp {
             }
         }
 
-        // Request continuous repaint when wiggly wires are active (for animation)
-        if wire_style == 3 {
+        // Request continuous repaint when the curved style has active wiggle
+        // parameters (animation depends on speed / range / gravity being > 0).
+        if wire_style == 0 && (wiggle_range > 0.0 || wiggle_speed > 0.0 || wiggle_gravity > 0.0) {
             ctx.request_repaint();
         }
 
@@ -669,7 +682,7 @@ impl super::PatchworkApp {
                         ptr
                     };
 
-                    let drag_wp = WiggleParams { activity: 0.3, time: now, gravity: wiggle_gravity, range: wiggle_range, speed: wiggle_speed };
+                    let drag_wp = WiggleParams { activity: 0.3 * wiggle_signal, time: now, gravity: wiggle_gravity, range: wiggle_range, speed: wiggle_speed };
                     if is_output {
                         draw_wire_3d(&painter, from, wire_end, drag_color, wire_thickness, wire_style, &drag_wp);
                         draw_wire_connector(&painter, from, drag_color, true);

@@ -1,0 +1,144 @@
+{
+  "graph": {
+    "nodes": {
+      "6": {
+        "id": 6,
+        "node_type": {
+          "Camera": {
+            "device_index": 0,
+            "res_w": 640,
+            "res_h": 480,
+            "active": true,
+            "status": "Capturing"
+          }
+        },
+        "pos": [
+          192.81946,
+          731.2836
+        ]
+      },
+      "2": {
+        "id": 2,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "zoom_control",
+              "state": {
+                "zoom_value": 0.6143642067909241
+              }
+            }
+          }
+        },
+        "pos": [
+          1100.0,
+          10.0
+        ]
+      },
+      "3": {
+        "id": 3,
+        "node_type": {
+          "Palette": {
+            "search": ""
+          }
+        },
+        "pos": [
+          10.0,
+          200.0
+        ]
+      },
+      "8": {
+        "id": 8,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "visual_output",
+              "state": {
+                "preview_size": 200.0
+              }
+            }
+          }
+        },
+        "pos": [
+          853.38196,
+          732.0961
+        ]
+      },
+      "7": {
+        "id": 7,
+        "node_type": {
+          "ImageEffects": {
+            "brightness": 1.0,
+            "contrast": 1.1,
+            "saturation": 3.0,
+            "hue": 250.0,
+            "exposure": 0.0,
+            "gamma": 1.0
+          }
+        },
+        "pos": [
+          565.88196,
+          702.4399
+        ]
+      },
+      "1": {
+        "id": 1,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "file_menu",
+              "state": {}
+            }
+          }
+        },
+        "pos": [
+          10.0,
+          10.0
+        ]
+      },
+      "4": {
+        "id": 4,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "monitor",
+              "state": {}
+            }
+          }
+        },
+        "pos": [
+          1100.0,
+          500.0
+        ]
+      }
+    },
+    "connections": [
+      {
+        "from_node": 6,
+        "from_port": 0,
+        "to_node": 7,
+        "to_port": 0,
+        "label": ""
+      },
+      {
+        "from_node": 7,
+        "from_port": 0,
+        "to_node": 8,
+        "to_port": 0,
+        "label": ""
+      }
+    ],
+    "next_id": 9
+  },
+  "pinned_nodes": [
+    5,
+    2,
+    1,
+    4,
+    3
+  ],
+  "canvas_offset": [
+    289.36127,
+    -150.92387
+  ],
+  "canvas_zoom": 0.6143642
+}

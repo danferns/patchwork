@@ -1,0 +1,240 @@
+{
+  "graph": {
+    "nodes": {
+      "7": {
+        "id": 7,
+        "node_type": {
+          "Synth": {
+            "waveform": "Sine",
+            "frequency": 496.089,
+            "amplitude": 0.5,
+            "active": true,
+            "fm_depth": 0.0
+          }
+        },
+        "pos": [
+          309.1632,
+          908.1899
+        ]
+      },
+      "2": {
+        "id": 2,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "zoom_control",
+              "state": {
+                "zoom_value": 0.6143642067909241
+              }
+            }
+          }
+        },
+        "pos": [
+          1100.0,
+          10.0
+        ]
+      },
+      "5": {
+        "id": 5,
+        "node_type": {
+          "AudioDevice": {
+            "selected_output": "",
+            "selected_input": "",
+            "master_volume": 0.8,
+            "enabled": true
+          }
+        },
+        "pos": [
+          1088.457,
+          249.25784
+        ]
+      },
+      "8": {
+        "id": 8,
+        "node_type": {
+          "AudioMixer": {
+            "channel_count": 2,
+            "gains": [
+              0.5,
+              0.67
+            ]
+          }
+        },
+        "pos": [
+          775.31946,
+          686.4086
+        ]
+      },
+      "10": {
+        "id": 10,
+        "node_type": {
+          "Slider": {
+            "value": 450.99,
+            "min": 0.0,
+            "max": 1000.0,
+            "step": 0.01,
+            "slider_color": [
+              80,
+              160,
+              255
+            ],
+            "label": ""
+          }
+        },
+        "pos": [
+          -12.586792,
+          588.0024
+        ]
+      },
+      "3": {
+        "id": 3,
+        "node_type": {
+          "Palette": {
+            "search": ""
+          }
+        },
+        "pos": [
+          10.0,
+          200.0
+        ]
+      },
+      "11": {
+        "id": 11,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "multiply",
+              "state": {
+                "const_a": 1.0,
+                "const_b": 1.100000023841858
+              }
+            }
+          }
+        },
+        "pos": [
+          69.03821,
+          893.0961
+        ]
+      },
+      "9": {
+        "id": 9,
+        "node_type": {
+          "Speaker": {
+            "active": true,
+            "volume": 0.8,
+            "pan": 0.0,
+            "channel_offset": 0,
+            "device": ""
+          }
+        },
+        "pos": [
+          1069.882,
+          719.5336
+        ]
+      },
+      "6": {
+        "id": 6,
+        "node_type": {
+          "Synth": {
+            "waveform": "Sine",
+            "frequency": 450.99,
+            "amplitude": 0.5,
+            "active": true,
+            "fm_depth": 0.0
+          }
+        },
+        "pos": [
+          312.00696,
+          530.9399
+        ]
+      },
+      "1": {
+        "id": 1,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "file_menu",
+              "state": {}
+            }
+          }
+        },
+        "pos": [
+          10.12109,
+          10.0
+        ]
+      },
+      "4": {
+        "id": 4,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "monitor",
+              "state": {}
+            }
+          }
+        },
+        "pos": [
+          1100.0,
+          500.0
+        ]
+      }
+    },
+    "connections": [
+      {
+        "from_node": 7,
+        "from_port": 0,
+        "to_node": 8,
+        "to_port": 2,
+        "label": ""
+      },
+      {
+        "from_node": 6,
+        "from_port": 0,
+        "to_node": 8,
+        "to_port": 0,
+        "label": ""
+      },
+      {
+        "from_node": 8,
+        "from_port": 0,
+        "to_node": 9,
+        "to_port": 0,
+        "label": ""
+      },
+      {
+        "from_node": 10,
+        "from_port": 0,
+        "to_node": 6,
+        "to_port": 0,
+        "label": ""
+      },
+      {
+        "from_node": 10,
+        "from_port": 0,
+        "to_node": 11,
+        "to_port": 0,
+        "label": ""
+      },
+      {
+        "from_node": 11,
+        "from_port": 0,
+        "to_node": 7,
+        "to_port": 0,
+        "label": ""
+      }
+    ],
+    "next_id": 12
+  },
+  "pinned_nodes": [
+    5,
+    2,
+    1,
+    4,
+    3
+  ],
+  "canvas_offset": [
+    289.36127,
+    -150.92387
+  ],
+  "canvas_zoom": 0.6143642
+}

@@ -192,6 +192,7 @@ pub fn render(
     wiggle_gravity: &mut f32,
     wiggle_range: &mut f32,
     wiggle_speed: &mut f32,
+    wiggle_signal: &mut f32,
     rounding: &mut f32,
     spacing: &mut f32,
     use_hsl: &mut bool,
@@ -204,6 +205,11 @@ pub fn render(
     dragging_from: &mut Option<(NodeId, usize, bool)>,
     pending_disconnects: &mut Vec<(NodeId, usize)>,
 ) {
+    // Legacy migration: old saves had style 3 = Wiggly. Wiggly is now
+    // unified with Bezier into the single "Curved" style (index 0), where
+    // the wiggle params directly control displacement.
+    if *wire_style == 3 { *wire_style = 0; }
+
     // Save / Open
     ui.horizontal(|ui| {
         if ui.small_button("Save...").clicked() {
@@ -307,63 +313,85 @@ pub fn render(
         }
     });
 
-    // Wire style selector
+    // Wire style selector — Curved, Straight, Ortho.
+    // (Bezier + Wiggly are unified into "Curved": set wiggle params to 0
+    // for a plain bezier look, or raise them for a living/animated wire.)
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Wires").small());
-        for (label, val) in [("Bezier", 0u8), ("Straight", 1), ("Ortho", 2), ("Wiggly", 3)] {
+        for (label, val) in [("Curved", 0u8), ("Straight", 1), ("Ortho", 2)] {
             if ui.selectable_label(*wire_style == val, label).clicked() {
                 *wire_style = val;
             }
         }
     });
 
-    // Wiggly wire sub-settings (only shown when Wiggly is selected)
-    if *wire_style == 3 {
-        // Read from input ports if connected (ports 22, 23, 24)
+    // Wiggle params: always relevant under Curved style (params = 0 → bezier,
+    // params > 0 → animated wiggly). Shown only when Curved is active; the
+    // ports themselves remain valid across style switches so wires don't
+    // need to be disconnected on toggle.
+    if *wire_style == 0 {
+        // Wiggle params are stored in their internal scaled ranges but displayed
+        // as a normalized 0..1 slider. Port inputs are already 0..1 and scale
+        // up to the same internal ranges.
+        //   Gravity  : 0..10   (sag in downward pixels-per-distance)
+        //   Range    : 0..24   (amplitude multiplier)
+        //   Speed    : 0..48   (phase advance rate)
+        //   Signal   : 0..1    (how much per-wire activity modulates animation)
+        const GRAV_MAX: f32 = 10.0;
+        const RANGE_MAX: f32 = 24.0;
+        const SPEED_MAX: f32 = 48.0;
+
+        // Read from input ports if connected (ports 22, 23, 24, 25)
         let grav_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 22);
         let range_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 23);
         let speed_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 24);
-        // Port values are normalized 0-1, scaled to the internal ranges
+        let signal_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 25);
         if grav_wired {
-            *wiggle_gravity = Graph::static_input_value(connections, values, node_id, 22).as_float().clamp(0.0, 1.0) * 4.0;
+            *wiggle_gravity = Graph::static_input_value(connections, values, node_id, 22).as_float().clamp(0.0, 1.0) * GRAV_MAX;
         }
         if range_wired {
-            *wiggle_range = Graph::static_input_value(connections, values, node_id, 23).as_float().clamp(0.0, 1.0) * 16.0;
+            *wiggle_range = Graph::static_input_value(connections, values, node_id, 23).as_float().clamp(0.0, 1.0) * RANGE_MAX;
         }
         if speed_wired {
-            *wiggle_speed = Graph::static_input_value(connections, values, node_id, 24).as_float().clamp(0.0, 1.0) * 16.0;
+            *wiggle_speed = Graph::static_input_value(connections, values, node_id, 24).as_float().clamp(0.0, 1.0) * SPEED_MAX;
+        }
+        if signal_wired {
+            *wiggle_signal = Graph::static_input_value(connections, values, node_id, 25).as_float().clamp(0.0, 1.0);
         }
 
-        ui.horizontal(|ui| {
-            super::inline_port_circle(ui, node_id, 22, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Normalized);
-            ui.label(egui::RichText::new("Gravity").small().color(egui::Color32::GRAY));
-            if grav_wired {
-                ui.label(egui::RichText::new(format!("{:.1}", *wiggle_gravity)).small().color(egui::Color32::from_rgb(80, 170, 255)));
-            } else {
-                ui.add(egui::Slider::new(wiggle_gravity, 0.0..=4.0).step_by(0.1).show_value(false));
-                ui.add(egui::DragValue::new(wiggle_gravity).speed(0.1).range(0.0..=4.0).max_decimals(1));
-            }
-        });
-        ui.horizontal(|ui| {
-            super::inline_port_circle(ui, node_id, 23, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Normalized);
-            ui.label(egui::RichText::new("Range").small().color(egui::Color32::GRAY));
-            if range_wired {
-                ui.label(egui::RichText::new(format!("{:.1}", *wiggle_range)).small().color(egui::Color32::from_rgb(80, 170, 255)));
-            } else {
-                ui.add(egui::Slider::new(wiggle_range, 0.0..=16.0).step_by(0.1).show_value(false));
-                ui.add(egui::DragValue::new(wiggle_range).speed(0.1).range(0.0..=16.0).max_decimals(1));
-            }
-        });
-        ui.horizontal(|ui| {
-            super::inline_port_circle(ui, node_id, 24, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Normalized);
-            ui.label(egui::RichText::new("Speed").small().color(egui::Color32::GRAY));
-            if speed_wired {
-                ui.label(egui::RichText::new(format!("{:.2}", *wiggle_speed)).small().color(egui::Color32::from_rgb(80, 170, 255)));
-            } else {
-                ui.add(egui::Slider::new(wiggle_speed, 0.0..=16.0).step_by(0.05).show_value(false));
-                ui.add(egui::DragValue::new(wiggle_speed).speed(0.05).range(0.0..=16.0).max_decimals(2));
-            }
-        });
+        // Helper: normalized slider that reads/writes an internally-scaled value.
+        let wiggle_row = |ui: &mut egui::Ui,
+                          label: &str,
+                          port: usize,
+                          wired: bool,
+                          value: &mut f32,
+                          scale: f32,
+                          port_positions: &mut HashMap<(NodeId, usize, bool), egui::Pos2>,
+                          dragging_from: &mut Option<(NodeId, usize, bool)>,
+                          pending_disconnects: &mut Vec<(NodeId, usize)>| {
+            ui.horizontal(|ui| {
+                super::inline_port_circle(ui, node_id, port, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Normalized);
+                ui.label(egui::RichText::new(label).small().color(egui::Color32::GRAY));
+                let mut norm = (*value / scale).clamp(0.0, 1.0);
+                if wired {
+                    ui.label(egui::RichText::new(format!("{:.2}", norm)).small().color(egui::Color32::from_rgb(80, 170, 255)));
+                } else {
+                    let resp = ui.add(egui::Slider::new(&mut norm, 0.0..=1.0).step_by(0.01).show_value(false));
+                    ui.add(egui::DragValue::new(&mut norm).speed(0.01).range(0.0..=1.0).max_decimals(2));
+                    if resp.changed() || ui.ctx().input(|i| i.pointer.any_released()) {
+                        *value = norm * scale;
+                    } else {
+                        *value = norm * scale;
+                    }
+                }
+            });
+        };
+
+        wiggle_row(ui, "Gravity", 22, grav_wired, wiggle_gravity, GRAV_MAX, port_positions, dragging_from, pending_disconnects);
+        wiggle_row(ui, "Range", 23, range_wired, wiggle_range, RANGE_MAX, port_positions, dragging_from, pending_disconnects);
+        wiggle_row(ui, "Speed", 24, speed_wired, wiggle_speed, SPEED_MAX, port_positions, dragging_from, pending_disconnects);
+        // Signal is already normalized 0..1 — no scale needed.
+        wiggle_row(ui, "Signal", 25, signal_wired, wiggle_signal, 1.0, port_positions, dragging_from, pending_disconnects);
     }
 
     ui.separator();

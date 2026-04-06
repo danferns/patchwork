@@ -1,0 +1,350 @@
+{
+  "graph": {
+    "nodes": {
+      "46": {
+        "id": 46,
+        "node_type": {
+          "ImageEffects": {
+            "brightness": 1.0,
+            "contrast": 1.0,
+            "saturation": 1.0,
+            "hue": 0.0,
+            "exposure": 0.55,
+            "gamma": 1.0
+          }
+        },
+        "pos": [
+          942.3507,
+          605.8774
+        ]
+      },
+      "6": {
+        "id": 6,
+        "node_type": {
+          "AiRequest": {
+            "provider": "openai",
+            "model": "gpt-4o",
+            "system_prompt": "Generate WGSL fragment shaders.\nWrite ONLY the @fragment function. Patchwork automatically provides:\n- The Uniforms struct and `var<uniform> u: Uniforms`\n- The VertexOutput struct with `position` and `uv` fields\n- The @vertex function (fullscreen triangle)\n\nYour output should be ONLY:\n\n@fragment\nfn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {\n    // your shader code\n    return vec4<f32>(r, g, b, 1.0);\n}\n\n## Available Built-in Uniforms\n\nAccess via `u.` prefix:\n- u.time — elapsed time in seconds (f32). Connect a Time node to control.\n- u.resolution — viewport size as vec2<f32> (width, height)\n- u.mouse — mouse position as vec2<f32> (pixel coordinates)\n\n## UV Coordinates\n\n- `in.uv` — normalized 0.0 to 1.0, origin at top-left\n- `in.uv * 2.0 - 1.0` — centered, -1 to +1\n\n## Custom Uniforms (User-Controllable Parameters)\n\nAny `u.xxx` reference that is NOT a built-in automatically creates an input port on the node. Users can connect sliders, audio analyzers, sensors, or other nodes to control these values.\n-WGSL has NO `let mut` — use `var` for mutable variables, `let` for immutable\n- Loop bounds MUST be compile-time constants. Use a fixed max with `if (i >= count) { break; }` for dynamic counts\n- Default slider range is 0-1. Design uniforms so 0-1 range produces useful output (e.g., multiply internally: `u.count * 12.0` gives 0-12)\n\nExamples:\n- u.speed — creates a \"speed\" port (float, default slider 0-1)\n- u.size — creates a \"size\" port\n- u.amount — creates an \"amount\" port\n- u.bass, u.mid, u.treble — create ports for audio reactivity\n- u.color_r, u.color_g, u.color_b — detected as a color group, creates a Color node with R/G/B auto-connected when user clicks \"+\"\n\nNaming conventions for smart defaults:\n- \"speed\", \"rate\" → slider 0-10\n- \"size\", \"scale\", \"radius\" → slider 0-2\n- \"count\", \"num\", \"n\" → integer slider 0-20\n- \"freq\", \"frequency\" → slider 20-2000\n- \"angle\", \"rotation\" → slider 0-6.28\n- \"mix\", \"blend\", \"amount\" → slider 0-1\n- \"time\", \"t\" → Time node auto-connected\n- Anything else → slider 0-1\n\n## Rules\n\n1. Do NOT define struct Uniforms, struct VertexOutput, or @vertex — Patchwork provides these\n2. Do NOT use @group or @binding — Patchwork handles binding\n3. ALL custom parameters must be accessed as u.name (not as function arguments)\n4. Return vec4<f32> with alpha = 1.0 for opaque output\n5. Use `in.uv` for UV coordinates (0-1 range, top-left origin)\n6. Use `u.time` for animation (not a custom clock)\n7. Keep shaders performant — avoid deep loops, heavy branching\n8. Prefer smooth, continuous functions (sin, cos, smoothstep, fract, length)\n9. All uniforms are f32 type — no int, no vec, no bool uniforms\n\n## Examples\n\nSimple gradient:\n@fragment\nfn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {\n    return vec4<f32>(in.uv.x, in.uv.y, 0.5, 1.0);\n}\n\nAudio-reactive circles:\n@fragment\nfn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {\n    let uv = in.uv * 2.0 - 1.0;\n    let d = length(uv);\n    let ring = smoothstep(0.02, 0.0, abs(d - u.bass));\n    return vec4<f32>(ring * u.color_r / 255.0, ring * u.color_g / 255.0, ring * u.color_b / 255.0, 1.0);\n}\n\nControllable plasma:\n@fragment\nfn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {\n    let uv = in.uv * 2.0 - 1.0;\n    let t = u.time * u.speed;\n    let freq = 3.0 + u.size * 15.0;\n    let v = sin(uv.x * freq + t) + sin(uv.y * freq * 0.7 + t * 1.3) + sin(length(uv) * freq - t);\n    let r = sin(v) * 0.5 + 0.5;\n    let g = sin(v + 2.09) * 0.5 + 0.5;\n    let b = sin(v + 4.18) * 0.5 + 0.5;\n    return vec4<f32>(r, g, b, 1.0);\n}\n",
+            "user_prompt": "make a plasma with size control",
+            "response": "@fragment\nfn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {\n    let uv = in.uv * 2.0 - 1.0;\n    let t = u.time;\n    let freq = 3.0 + u.size * 15.0;\n    let v = sin(uv.x * freq + t) + sin(uv.y * freq * 0.7 + t * 1.3) + sin(length(uv) * freq - t);\n    let r = sin(v) * 0.5 + 0.5;\n    let g = sin(v + 2.09) * 0.5 + 0.5;\n    let b = sin(v + 4.18) * 0.5 + 0.5;\n    return vec4<f32>(r, g, b, 1.0);\n}",
+            "status": "done",
+            "max_tokens": 1024,
+            "temperature": 0.7,
+            "api_key": "XXX",
+            "response_type": 0,
+            "last_trigger": 0.0,
+            "api_key_name": "",
+            "custom_url": ""
+          }
+        },
+        "pos": [
+          -188.74304,
+          686.2836
+        ]
+      },
+      "42": {
+        "id": 42,
+        "node_type": {
+          "Slider": {
+            "value": 3.57,
+            "min": 0.0,
+            "max": 30.0,
+            "step": 0.01,
+            "slider_color": [
+              80,
+              160,
+              255
+            ],
+            "label": "size"
+          }
+        },
+        "pos": [
+          -188.21179,
+          361.53363
+        ]
+      },
+      "3": {
+        "id": 3,
+        "node_type": {
+          "Palette": {
+            "search": ""
+          }
+        },
+        "pos": [
+          6.5703163,
+          458.7734
+        ]
+      },
+      "48": {
+        "id": 48,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "visual_output",
+              "state": {
+                "preview_size": 200.0
+              }
+            }
+          }
+        },
+        "pos": [
+          1208.2882,
+          601.7524
+        ]
+      },
+      "9": {
+        "id": 9,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "text_editor",
+              "state": {
+                "content": "@fragment\nfn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {\n    let uv = in.uv * 2.0 - 1.0;\n    let t = u.time;\n    let freq = 3.0 + u.size * 15.0;\n    let v = sin(uv.x * freq + t) + sin(uv.y * freq * 0.7 + t * 1.3) + sin(length(uv) * freq - t);\n    let r = sin(v) * 0.5 + 0.5;\n    let g = sin(v + 2.09) * 0.5 + 0.5;\n    let b = sin(v + 4.18) * 0.5 + 0.5;\n    return vec4<f32>(r, g, b, 1.0);\n}"
+              }
+            }
+          }
+        },
+        "pos": [
+          58.881958,
+          685.6274
+        ]
+      },
+      "40": {
+        "id": 40,
+        "node_type": {
+          "WgslViewer": {
+            "wgsl_code": "@fragment\nfn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {\n    let uv = in.uv * 2.0 - 1.0;\n    let t = u.time;\n    let freq = 3.0 + u.size * 15.0;\n    let v = sin(uv.x * freq + t) + sin(uv.y * freq * 0.7 + t * 1.3) + sin(length(uv) * freq - t);\n    let r = sin(v) * 0.5 + 0.5;\n    let g = sin(v + 2.09) * 0.5 + 0.5;\n    let b = sin(v + 4.18) * 0.5 + 0.5;\n    return vec4<f32>(r, g, b, 1.0);\n}",
+            "uniform_names": [
+              "time",
+              "size"
+            ],
+            "uniform_types": [
+              "float",
+              "float"
+            ],
+            "uniform_values": [
+              28531.545,
+              3.57
+            ],
+            "uniform_min": [],
+            "uniform_max": [],
+            "canvas_w": 400.0,
+            "canvas_h": 300.0,
+            "resolution": 120,
+            "expanded": false
+          }
+        },
+        "pos": [
+          407.4132,
+          607.1899
+        ]
+      },
+      "41": {
+        "id": 41,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "time",
+              "state": {
+                "elapsed": 28531.54443669368,
+                "running": true,
+                "speed": 10.0
+              }
+            }
+          }
+        },
+        "pos": [
+          59.913208,
+          374.56488
+        ]
+      },
+      "44": {
+        "id": 44,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "color",
+              "state": {
+                "b": 255,
+                "g": 128,
+                "r": 128
+              }
+            }
+          }
+        },
+        "pos": [
+          555.88196,
+          1529.8462
+        ]
+      },
+      "2": {
+        "id": 2,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "zoom_control",
+              "state": {
+                "zoom_value": 0.6143642067909241
+              }
+            }
+          }
+        },
+        "pos": [
+          1267.6093,
+          12.621094
+        ]
+      },
+      "4": {
+        "id": 4,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "monitor",
+              "state": {}
+            }
+          }
+        },
+        "pos": [
+          1259.9492,
+          508.84772
+        ]
+      },
+      "1": {
+        "id": 1,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "file_menu",
+              "state": {}
+            }
+          }
+        },
+        "pos": [
+          8.47266,
+          31.300783
+        ]
+      },
+      "49": {
+        "id": 49,
+        "node_type": {
+          "Theme": {
+            "dark_mode": true,
+            "accent": [
+              213,
+              103,
+              228
+            ],
+            "font_size": 14.0,
+            "bg_color": [
+              20,
+              20,
+              20
+            ],
+            "text_color": [
+              220,
+              220,
+              220
+            ],
+            "window_bg": [
+              24,
+              24,
+              24
+            ],
+            "window_alpha": 240,
+            "grid_color": [
+              28,
+              28,
+              28
+            ],
+            "grid_style": 2,
+            "wire_style": 3,
+            "wiggle_gravity": 0.0,
+            "wiggle_range": 0.0,
+            "wiggle_speed": 2.7,
+            "rounding": 16.0,
+            "spacing": 4.0,
+            "use_hsl": false,
+            "wire_thickness": 6.0,
+            "background_path": ""
+          }
+        },
+        "pos": [
+          1220.2257,
+          699.6586
+        ]
+      },
+      "45": {
+        "id": 45,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "mouse_tracker",
+              "state": {}
+            }
+          }
+        },
+        "pos": [
+          45.225708,
+          1217.2212
+        ]
+      }
+    },
+    "connections": [
+      {
+        "from_node": 6,
+        "from_port": 0,
+        "to_node": 9,
+        "to_port": 0,
+        "label": ""
+      },
+      {
+        "from_node": 9,
+        "from_port": 0,
+        "to_node": 40,
+        "to_port": 0,
+        "label": ""
+      },
+      {
+        "from_node": 41,
+        "from_port": 0,
+        "to_node": 40,
+        "to_port": 1,
+        "label": ""
+      },
+      {
+        "from_node": 42,
+        "from_port": 0,
+        "to_node": 40,
+        "to_port": 2,
+        "label": ""
+      },
+      {
+        "from_node": 40,
+        "from_port": 0,
+        "to_node": 46,
+        "to_port": 0,
+        "label": ""
+      },
+      {
+        "from_node": 46,
+        "from_port": 0,
+        "to_node": 48,
+        "to_port": 0,
+        "label": ""
+      }
+    ],
+    "next_id": 50
+  },
+  "pinned_nodes": [
+    3,
+    4,
+    2,
+    5,
+    1
+  ],
+  "canvas_offset": [
+    289.36127,
+    -150.92387
+  ],
+  "canvas_zoom": 0.6143642
+}

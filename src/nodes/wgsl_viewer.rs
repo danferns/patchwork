@@ -382,6 +382,40 @@ pub fn render(
 
     // Auto-detect uniforms from shader code
     let (detected_names, detected_types) = detect_uniforms(&code);
+
+    // Diff old vs new uniform layout to detect ports whose semantic changed.
+    // Port layout: port 0 = WGSL code, ports 1+ = uniform components
+    // (float uniforms = 1 port, color uniforms = 3 ports for r/g/b).
+    // If a port's logical name changed (removed or shifted), disconnect it
+    // so stale wires don't silently drive the wrong uniform.
+    let build_port_labels = |names: &[String], types: &[String]| -> Vec<String> {
+        let mut labels = Vec::new();
+        for (i, name) in names.iter().enumerate() {
+            let t = types.get(i).map(|s| s.as_str()).unwrap_or("float");
+            if t == "color" {
+                labels.push(format!("{}.r", name));
+                labels.push(format!("{}.g", name));
+                labels.push(format!("{}.b", name));
+            } else {
+                labels.push(name.clone());
+            }
+        }
+        labels
+    };
+    let old_labels = build_port_labels(uniform_names, uniform_types);
+    let new_labels = build_port_labels(&detected_names, &detected_types);
+    if old_labels != new_labels {
+        let max_len = old_labels.len().max(new_labels.len());
+        for i in 0..max_len {
+            let old_l = old_labels.get(i);
+            let new_l = new_labels.get(i);
+            if old_l != new_l {
+                // Uniform port indices start at 1 (port 0 = WGSL code).
+                pending_disconnects.push((node_id, i + 1));
+            }
+        }
+    }
+
     *uniform_names = detected_names;
     *uniform_types = detected_types;
 

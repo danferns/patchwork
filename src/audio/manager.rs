@@ -371,11 +371,21 @@ impl AudioManager {
                     Some((Box::new(input::FilePlayerProcessor { buffer: buf.clone(), volume: *volume }), 1))
                 } else { None }
             }
-            NodeType::AudioSampler { volume, .. } => {
-                if let Some(buf) = self.sampler_buffers.get(&nid) {
-                    Some((Box::new(sampler::SamplerProcessor::new(buf.clone(), *volume)), 3))
-                } else { None }
-                }
+            NodeType::AudioSampler { volume, record_duration, .. } => {
+                // Make sure a buffer exists so the processor can be registered
+                // during auto-registration of newly-added nodes. Without this,
+                // a freshly created Sampler node has no processor/connections
+                // until the user toggles DSP off/on.
+                let buf = if let Some(buf) = self.sampler_buffers.get(&nid) {
+                    buf.clone()
+                } else {
+                    let sr = self.engine_sample_rate as u32;
+                    let buf = std::sync::Arc::new(super::buffers::SamplerBuffer::new(sr, *record_duration));
+                    self.sampler_buffers.insert(nid, buf.clone());
+                    buf
+                };
+                Some((Box::new(sampler::SamplerProcessor::new(buf, *volume)), 3))
+            }
             _ => None,
         }
     }

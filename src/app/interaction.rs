@@ -595,7 +595,7 @@ impl super::PatchworkApp {
                                     bg_color: [20, 20, 20], text_color: [220, 220, 220],
                                     window_bg: [24, 24, 24], window_alpha: 240,
                                     grid_color: [28, 28, 28], grid_style: 2, wire_style: 0,
-                                    wiggle_gravity: 0.0, wiggle_range: 1.0, wiggle_speed: 1.0,
+                                    wiggle_gravity: 0.0, wiggle_range: 1.0, wiggle_speed: 1.0, wiggle_signal: 0.0,
                                     rounding: 16.0, spacing: 4.0, use_hsl: false,
                                     wire_thickness: 6.0, background_path: String::new(),
                                 }, [pos.x - off_e.x, pos.y - off_e.y]);

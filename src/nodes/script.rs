@@ -13,8 +13,13 @@ pub fn render(
     continuous: &mut bool,
     trigger: &mut bool,
     _values: &HashMap<(NodeId, usize), PortValue>,
-    _node_id: NodeId,
+    node_id: NodeId,
+    pending_disconnects: &mut Vec<(NodeId, usize)>,
 ) {
+    // Input port base: port 0 = Code (continuous) OR port 0 = Exec, port 1 = Code (trigger mode).
+    // Inputs follow at `input_base`.
+    let prev_continuous = *continuous;
+    let input_base = |cont: bool| -> usize { if cont { 1 } else { 2 } };
     // ── Name ──
     ui.horizontal(|ui| {
         ui.label("Name:");
@@ -50,6 +55,13 @@ pub fn render(
         });
     }
     if let Some(idx) = input_remove {
+        // Disconnect the removed input AND all subsequent ones, since their
+        // port indices would shift down after removal and silently bind to
+        // the wrong slot.
+        let base = input_base(*continuous);
+        for i in idx..input_names.len() {
+            pending_disconnects.push((node_id, base + i));
+        }
         input_names.remove(idx);
     }
 
@@ -77,14 +89,28 @@ pub fn render(
         });
     }
     if let Some(idx) = output_remove {
+        // NOTE: Output-side stale wires (where from_port shifts down) are
+        // cleaned up by the generic Script stale-connection pruning pass
+        // in app/mod.rs, which prunes any connection with out-of-range
+        // from_port for Script nodes.
         output_names.remove(idx);
         if idx < last_values.len() { last_values.remove(idx); }
+    }
+
+    // If the user toggles continuous mode, the input port base shifts
+    // (adds/removes the Exec port). Disconnect the old input ports so
+    // wires don't silently re-bind to Exec/Code after the shift.
+    if *continuous != prev_continuous {
+        let old_base = input_base(prev_continuous);
+        for i in 0..input_names.len() {
+            pending_disconnects.push((node_id, old_base + i));
+        }
     }
 
     // ── Code ──
     // Check if code is coming from input port
     let _code_port_idx: usize = if *continuous { 0 } else { 1 };
-    let _code_connected = _values.iter().any(|((nid, _), _)| *nid == _node_id) ||
+    let _code_connected = _values.iter().any(|((nid, _), _)| *nid == node_id) ||
         false; // simplified check
     // Check connections for the Code port
     ui.separator();

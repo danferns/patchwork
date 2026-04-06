@@ -314,6 +314,9 @@ impl NodeBehavior for DisplayNode {
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new("Signals").small());
                             if ui.small_button("-").clicked() && self.signal_count > 1 {
+                                // Disconnect the removed signal port before shrinking
+                                let removed = self.signal_count - 1;
+                                ctx.pending_disconnects.push((ctx.node_id, removed));
                                 self.signal_count -= 1;
                                 self.ensure_histories();
                             }

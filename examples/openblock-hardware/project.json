@@ -1,0 +1,402 @@
+{
+  "graph": {
+    "nodes": {
+      "5": {
+        "id": 5,
+        "node_type": {
+          "AudioDevice": {
+            "selected_output": "",
+            "selected_input": "",
+            "master_volume": 0.8,
+            "enabled": true
+          }
+        },
+        "pos": [
+          1100.0,
+          350.0
+        ]
+      },
+      "15": {
+        "id": 15,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "visual_output",
+              "state": {
+                "preview_size": 200.0
+              }
+            }
+          }
+        },
+        "pos": [
+          1229.5269,
+          405.4303
+        ]
+      },
+      "20": {
+        "id": 20,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "map_range",
+              "state": {
+                "clamp": true,
+                "in_max": 0.20000000298023224,
+                "in_min": 0.0,
+                "out_max": 2000.0,
+                "out_min": 300.0
+              }
+            }
+          }
+        },
+        "pos": [
+          530.52686,
+          755.58655
+        ]
+      },
+      "2": {
+        "id": 2,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "zoom_control",
+              "state": {
+                "zoom_value": 0.5112802982330322
+              }
+            }
+          }
+        },
+        "pos": [
+          1100.0,
+          10.0
+        ]
+      },
+      "14": {
+        "id": 14,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "time",
+              "state": {
+                "elapsed": 209.2018706250001,
+                "running": true,
+                "speed": 1.0
+              }
+            }
+          }
+        },
+        "pos": [
+          137.49564,
+          160.8053
+        ]
+      },
+      "18": {
+        "id": 18,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "map_range",
+              "state": {
+                "clamp": false,
+                "in_max": 0.20000000298023224,
+                "in_min": 0.0,
+                "out_max": 60.0,
+                "out_min": 5.0
+              }
+            }
+          }
+        },
+        "pos": [
+          532.33936,
+          1175.0553
+        ]
+      },
+      "4": {
+        "id": 4,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "monitor",
+              "state": {}
+            }
+          }
+        },
+        "pos": [
+          1100.0,
+          500.0
+        ]
+      },
+      "1": {
+        "id": 1,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "file_menu",
+              "state": {}
+            }
+          }
+        },
+        "pos": [
+          10.121095,
+          10.0
+        ]
+      },
+      "6": {
+        "id": 6,
+        "node_type": {
+          "ObHub": {
+            "port_name": "/dev/cu.usbmodem101",
+            "selected_port": "/dev/cu.usbmodem101",
+            "detected_devices": [
+              [
+                "pressure",
+                1
+              ]
+            ]
+          }
+        },
+        "pos": [
+          41.120636,
+          987.58655
+        ]
+      },
+      "7": {
+        "id": 7,
+        "node_type": {
+          "Synth": {
+            "waveform": "Square",
+            "frequency": 368.0,
+            "amplitude": 0.040000003,
+            "active": true,
+            "fm_depth": 0.0
+          }
+        },
+        "pos": [
+          974.08936,
+          892.3678
+        ]
+      },
+      "13": {
+        "id": 13,
+        "node_type": {
+          "WgslViewer": {
+            "wgsl_code": "@fragment\nfn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {\n    let uv = in.uv;\n    let t = u.time * 0.5;\n    let r = sin(uv.x * 3.14 + t) * 0.5 + 0.5;\n    let g = sin(uv.y * 3.14 + t * 1.3) * 0.5 + 0.5;\n    let b = sin((uv.x + uv.y) * 2.0 - t) * 0.5 + 0.5;\n    return vec4<f32>(r, g, b, 1.0);\n}\n",
+            "uniform_names": [
+              "time"
+            ],
+            "uniform_types": [
+              "float"
+            ],
+            "uniform_values": [
+              209.20187
+            ],
+            "uniform_min": [],
+            "uniform_max": [],
+            "canvas_w": 400.0,
+            "canvas_h": 300.0,
+            "resolution": 120,
+            "expanded": false
+          }
+        },
+        "pos": [
+          462.12064,
+          161.46155
+        ]
+      },
+      "19": {
+        "id": 19,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "map_range",
+              "state": {
+                "clamp": true,
+                "in_max": 0.20000000298023224,
+                "in_min": 0.0,
+                "out_max": 1.0,
+                "out_min": 0.0
+              }
+            }
+          }
+        },
+        "pos": [
+          754.96436,
+          752.46155
+        ]
+      },
+      "16": {
+        "id": 16,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "image_style",
+              "state": {
+                "amount": 7.199999809265137,
+                "mode": "Pixelate"
+              }
+            }
+          }
+        },
+        "pos": [
+          943.3081,
+          508.64905
+        ]
+      },
+      "21": {
+        "id": 21,
+        "node_type": {
+          "Speaker": {
+            "active": true,
+            "volume": 0.8,
+            "pan": 0.0,
+            "channel_offset": 0,
+            "device": ""
+          }
+        },
+        "pos": [
+          1243.2769,
+          887.39905
+        ]
+      },
+      "3": {
+        "id": 3,
+        "node_type": {
+          "Palette": {
+            "search": ""
+          }
+        },
+        "pos": [
+          10.0,
+          200.0
+        ]
+      },
+      "9": {
+        "id": 9,
+        "node_type": {
+          "Dynamic": {
+            "inner": {
+              "type_tag": "text_editor",
+              "state": {
+                "content": "@fragment\nfn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {\n    let uv = in.uv;\n    let t = u.time * 0.5;\n    let r = sin(uv.x * 3.14 + t) * 0.5 + 0.5;\n    let g = sin(uv.y * 3.14 + t * 1.3) * 0.5 + 0.5;\n    let b = sin((uv.x + uv.y) * 2.0 - t) * 0.5 + 0.5;\n    return vec4<f32>(r, g, b, 1.0);\n}\n"
+              }
+            }
+          }
+        },
+        "pos": [
+          139.90189,
+          453.6803
+        ]
+      },
+      "17": {
+        "id": 17,
+        "node_type": {
+          "ObPressure": {
+            "device_id": 1,
+            "hub_node_id": 6,
+            "label_color": [
+              57,
+              0,
+              194
+            ]
+          }
+        },
+        "pos": [
+          291.12064,
+          987.58655
+        ]
+      }
+    },
+    "connections": [
+      {
+        "from_node": 9,
+        "from_port": 0,
+        "to_node": 13,
+        "to_port": 0,
+        "label": ""
+      },
+      {
+        "from_node": 14,
+        "from_port": 0,
+        "to_node": 13,
+        "to_port": 1,
+        "label": ""
+      },
+      {
+        "from_node": 13,
+        "from_port": 0,
+        "to_node": 16,
+        "to_port": 0,
+        "label": ""
+      },
+      {
+        "from_node": 16,
+        "from_port": 0,
+        "to_node": 15,
+        "to_port": 0,
+        "label": ""
+      },
+      {
+        "from_node": 17,
+        "from_port": 0,
+        "to_node": 18,
+        "to_port": 0,
+        "label": ""
+      },
+      {
+        "from_node": 18,
+        "from_port": 0,
+        "to_node": 16,
+        "to_port": 1,
+        "label": ""
+      },
+      {
+        "from_node": 19,
+        "from_port": 0,
+        "to_node": 7,
+        "to_port": 1,
+        "label": ""
+      },
+      {
+        "from_node": 17,
+        "from_port": 0,
+        "to_node": 19,
+        "to_port": 0,
+        "label": ""
+      },
+      {
+        "from_node": 17,
+        "from_port": 0,
+        "to_node": 20,
+        "to_port": 0,
+        "label": ""
+      },
+      {
+        "from_node": 20,
+        "from_port": 0,
+        "to_node": 7,
+        "to_port": 0,
+        "label": ""
+      },
+      {
+        "from_node": 7,
+        "from_port": 0,
+        "to_node": 21,
+        "to_port": 0,
+        "label": ""
+      }
+    ],
+    "next_id": 22
+  },
+  "pinned_nodes": [
+    4,
+    5,
+    1,
+    2,
+    3
+  ],
+  "canvas_offset": [
+    234.4562,
+    23.442688
+  ],
+  "canvas_zoom": 0.5112803
+}

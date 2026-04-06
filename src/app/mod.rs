@@ -1127,6 +1127,38 @@ impl PatchworkApp {
             }
             self.graph.remove_connections_to_port(*nid, *port);
         }
+
+        // Generic Script stale-connection sweep: prune any connection whose
+        // from_port or to_port falls outside the Script node's current valid
+        // port range. This catches output-side stale wires (which the
+        // to-port-based pending_disconnects mechanism can't handle) and any
+        // edge cases from load/rename shuffles.
+        {
+            let script_info: Vec<(NodeId, usize, usize, bool)> = self.graph.nodes.iter()
+                .filter_map(|(id, n)| match &n.node_type {
+                    NodeType::Script { input_names, output_names, continuous, .. } =>
+                        Some((*id, input_names.len(), output_names.len(), *continuous)),
+                    _ => None,
+                }).collect();
+            if !script_info.is_empty() {
+                let before = self.graph.connections.len();
+                for (sid, n_in, n_out, cont) in &script_info {
+                    let input_base = if *cont { 1 } else { 2 };
+                    let max_in = input_base + n_in;
+                    self.graph.connections.retain(|c| {
+                        // Prune bad from-side (output port out of range)
+                        if c.from_node == *sid && c.from_port >= *n_out { return false; }
+                        // Prune bad to-side (input port: either control port [0..input_base]
+                        // is always valid, or input_base..max_in is valid; anything beyond is stale)
+                        if c.to_node == *sid && c.to_port >= max_in { return false; }
+                        true
+                    });
+                }
+                if self.graph.connections.len() != before {
+                    self.graph.mark_topo_dirty();
+                }
+            }
+        }
         for &(fn_, fp, tn, tp) in &pending_connections {
             let from_name = self.graph.nodes.get(&fn_).map(|n| n.node_type.title()).unwrap_or("?");
             let to_name = self.graph.nodes.get(&tn).map(|n| n.node_type.title()).unwrap_or("?");
@@ -1872,9 +1904,88 @@ impl eframe::App for PatchworkApp {
                 let detected: Vec<(String, u8)> = self.ob.get_hub(*hub_id)
                     .map(|h| h.devices.keys().cloned().collect())
                     .unwrap_or_default();
+
+                // Build a label list for a (sorted) device set mirroring
+                // the output-port layout used in Graph::outputs() for ObHub.
+                // We compare old vs new so that when a device drops off
+                // (unplugged / timed out) or a new one takes its slot,
+                // any wire whose semantic meaning changed is disconnected
+                // instead of silently re-binding to the wrong device.
+                let build_labels = |devs: &[(String, u8)]| -> Vec<String> {
+                    let mut sorted = devs.to_vec();
+                    sorted.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+                    let mut labels: Vec<String> = Vec::new();
+                    for (dtype, id) in &sorted {
+                        match dtype.as_str() {
+                            "joystick" => {
+                                labels.push(format!("j{}_x", id));
+                                labels.push(format!("j{}_y", id));
+                                labels.push(format!("j{}_btn", id));
+                            }
+                            "encoder" => {
+                                labels.push(format!("e{}_turn", id));
+                                labels.push(format!("e{}_click", id));
+                                labels.push(format!("e{}_pos", id));
+                            }
+                            "move" => {
+                                labels.push(format!("m{}_ax", id));
+                                labels.push(format!("m{}_ay", id));
+                                labels.push(format!("m{}_az", id));
+                                labels.push(format!("m{}_gx", id));
+                                labels.push(format!("m{}_gy", id));
+                                labels.push(format!("m{}_gz", id));
+                            }
+                            "bend" => labels.push(format!("b{}_val", id)),
+                            "pressure" => labels.push(format!("p{}_val", id)),
+                            "distance" => labels.push(format!("d{}_val", id)),
+                            "orb" => {
+                                labels.push(format!("orb{}_ax", id));
+                                labels.push(format!("orb{}_ay", id));
+                                labels.push(format!("orb{}_az", id));
+                                labels.push(format!("orb{}_gx", id));
+                                labels.push(format!("orb{}_gy", id));
+                                labels.push(format!("orb{}_gz", id));
+                            }
+                            other => {
+                                labels.push(format!("{}{}_val",
+                                    other.chars().next().map(|c| c.to_string()).unwrap_or_default(),
+                                    id));
+                            }
+                        }
+                    }
+                    labels
+                };
+
+                let mut stale_ports: Vec<usize> = Vec::new();
+                if let Some(node) = self.graph.nodes.get(hub_id) {
+                    if let NodeType::ObHub { detected_devices, .. } = &node.node_type {
+                        let old_labels = build_labels(detected_devices);
+                        let new_labels = build_labels(&detected);
+                        if old_labels != new_labels {
+                            let max_len = old_labels.len().max(new_labels.len());
+                            for i in 0..max_len {
+                                if old_labels.get(i) != new_labels.get(i) {
+                                    stale_ports.push(i);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if let Some(node) = self.graph.nodes.get_mut(hub_id) {
                     if let NodeType::ObHub { detected_devices, .. } = &mut node.node_type {
                         *detected_devices = detected;
+                    }
+                }
+
+                // Prune stale output-side connections for this hub.
+                if !stale_ports.is_empty() {
+                    let before = self.graph.connections.len();
+                    self.graph.connections.retain(|c| {
+                        !(c.from_node == *hub_id && stale_ports.contains(&c.from_port))
+                    });
+                    if self.graph.connections.len() != before {
+                        self.graph.mark_topo_dirty();
                     }
                 }
             }

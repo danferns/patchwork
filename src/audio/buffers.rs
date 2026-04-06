@@ -291,11 +291,22 @@ impl SamplerBuffer {
         }
     }
 
-    /// Start recording — resets write position, clears previous data.
+    /// Start recording — resets write position, playhead, trim, and clears
+    /// previous data so downstream nodes can't keep playing the old tail.
     pub fn start_recording(&self) {
+        // Stop playback first so the audio thread observes `playing=false`
+        // before `recording=true`. Then reset playhead and trim so there's
+        // no stale loop-point state bleeding into the new take.
+        self.playing.store(false, Ordering::Release);
+        self.read_pos.store(0, Ordering::Release);
+        self.trim_start.store(0, Ordering::Release);
+        self.trim_end.store(0, Ordering::Release);
         self.write_pos.store(0, Ordering::Release);
         self.recorded_length.store(0, Ordering::Release);
-        self.playing.store(false, Ordering::Release);
+        // Zero out the existing audio data so the old buffer tail can't
+        // be heard if play is retriggered before a new recording finishes.
+        let data = unsafe { &mut *self.data.get() };
+        for s in data.iter_mut() { *s = 0.0; }
         self.recording.store(true, Ordering::Release);
     }
 
