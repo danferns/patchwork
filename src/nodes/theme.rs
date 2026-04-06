@@ -1,4 +1,4 @@
-use crate::graph::{NodeId, PortValue, Connection, PortKind};
+use crate::graph::{NodeId, PortValue, Connection, PortKind, Graph};
 use std::collections::HashMap;
 use eframe::egui;
 
@@ -174,7 +174,7 @@ fn inline_input_val(values: &HashMap<(NodeId, usize), PortValue>, connections: &
     None
 }
 
-// Input ports: 0-2 BG, 3-5 Text, 6-8 Accent, 9-11 Win, 12-14 Grid, 15 Font, 16 Round, 17 Space, 18 Alpha, 19 BG Path, 20 Wire, 21 BG Image
+// Input ports: 0-2 BG, 3-5 Text, 6-8 Accent, 9-11 Win, 12-14 Grid, 15 Font, 16 Round, 17 Space, 18 Alpha, 19 BG Path, 20 Wire, 21 BG Image, 22 W Gravity, 23 W Range, 24 W Speed
 // Output ports: 0-2 BG, 3-5 Text, 6-8 Accent
 
 pub fn render(
@@ -319,23 +319,50 @@ pub fn render(
 
     // Wiggly wire sub-settings (only shown when Wiggly is selected)
     if *wire_style == 3 {
+        // Read from input ports if connected (ports 22, 23, 24)
+        let grav_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 22);
+        let range_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 23);
+        let speed_wired = connections.iter().any(|c| c.to_node == node_id && c.to_port == 24);
+        // Port values are normalized 0-1, scaled to the internal ranges
+        if grav_wired {
+            *wiggle_gravity = Graph::static_input_value(connections, values, node_id, 22).as_float().clamp(0.0, 1.0) * 4.0;
+        }
+        if range_wired {
+            *wiggle_range = Graph::static_input_value(connections, values, node_id, 23).as_float().clamp(0.0, 1.0) * 16.0;
+        }
+        if speed_wired {
+            *wiggle_speed = Graph::static_input_value(connections, values, node_id, 24).as_float().clamp(0.0, 1.0) * 16.0;
+        }
+
         ui.horizontal(|ui| {
-            ui.add_space(12.0);
+            super::inline_port_circle(ui, node_id, 22, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Normalized);
             ui.label(egui::RichText::new("Gravity").small().color(egui::Color32::GRAY));
-            ui.add(egui::Slider::new(wiggle_gravity, 0.0..=4.0).step_by(0.1).show_value(false));
-            ui.add(egui::DragValue::new(wiggle_gravity).speed(0.1).range(0.0..=4.0).max_decimals(1));
+            if grav_wired {
+                ui.label(egui::RichText::new(format!("{:.1}", *wiggle_gravity)).small().color(egui::Color32::from_rgb(80, 170, 255)));
+            } else {
+                ui.add(egui::Slider::new(wiggle_gravity, 0.0..=4.0).step_by(0.1).show_value(false));
+                ui.add(egui::DragValue::new(wiggle_gravity).speed(0.1).range(0.0..=4.0).max_decimals(1));
+            }
         });
         ui.horizontal(|ui| {
-            ui.add_space(12.0);
+            super::inline_port_circle(ui, node_id, 23, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Normalized);
             ui.label(egui::RichText::new("Range").small().color(egui::Color32::GRAY));
-            ui.add(egui::Slider::new(wiggle_range, 0.0..=16.0).step_by(0.1).show_value(false));
-            ui.add(egui::DragValue::new(wiggle_range).speed(0.1).range(0.0..=16.0).max_decimals(1));
+            if range_wired {
+                ui.label(egui::RichText::new(format!("{:.1}", *wiggle_range)).small().color(egui::Color32::from_rgb(80, 170, 255)));
+            } else {
+                ui.add(egui::Slider::new(wiggle_range, 0.0..=16.0).step_by(0.1).show_value(false));
+                ui.add(egui::DragValue::new(wiggle_range).speed(0.1).range(0.0..=16.0).max_decimals(1));
+            }
         });
         ui.horizontal(|ui| {
-            ui.add_space(12.0);
+            super::inline_port_circle(ui, node_id, 24, true, connections, port_positions, dragging_from, pending_disconnects, PortKind::Normalized);
             ui.label(egui::RichText::new("Speed").small().color(egui::Color32::GRAY));
-            ui.add(egui::Slider::new(wiggle_speed, 0.0..=16.0).step_by(0.05).show_value(false));
-            ui.add(egui::DragValue::new(wiggle_speed).speed(0.05).range(0.0..=16.0).max_decimals(2));
+            if speed_wired {
+                ui.label(egui::RichText::new(format!("{:.2}", *wiggle_speed)).small().color(egui::Color32::from_rgb(80, 170, 255)));
+            } else {
+                ui.add(egui::Slider::new(wiggle_speed, 0.0..=16.0).step_by(0.05).show_value(false));
+                ui.add(egui::DragValue::new(wiggle_speed).speed(0.05).range(0.0..=16.0).max_decimals(2));
+            }
         });
     }
 

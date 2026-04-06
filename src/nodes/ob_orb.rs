@@ -32,11 +32,9 @@ pub fn render(
 
     // Read IMU (drop borrow before mutable use)
     let (is_active, imu_vals) = {
-        let dev = if hid != 0 {
-            ob_manager.get_hub(hid).and_then(|h| h.get_device("orb", did))
-        } else {
-            ob_manager.find_device("orb", did).map(|(_, d)| d)
-        };
+        let dev = ob_manager.get_hub(hid)
+            .and_then(|h| h.get_device("orb", did))
+            .or_else(|| ob_manager.find_device("orb", did).map(|(_, d)| d));
         let active = dev.map(|d| d.is_active).unwrap_or(false);
         let v: [f32; 6] = if let Some(d) = dev {
             [d.values.get("ax").copied().unwrap_or(0.0), d.values.get("ay").copied().unwrap_or(0.0),

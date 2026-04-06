@@ -26,11 +26,9 @@ pub fn render(
 
     // Read values (drop borrow before mutable use)
     let (x, y, btn, is_active) = {
-        let device = if hid != 0 {
-            ob_manager.get_hub(hid).and_then(|h| h.get_device("joystick", did))
-        } else {
-            ob_manager.find_device("joystick", did).map(|(_, d)| d)
-        };
+        let device = ob_manager.get_hub(hid)
+            .and_then(|h| h.get_device("joystick", did))
+            .or_else(|| ob_manager.find_device("joystick", did).map(|(_, d)| d));
         if let Some(dev) = device {
             (dev.values.get("x").copied().unwrap_or(0.0),
              dev.values.get("y").copied().unwrap_or(0.0),

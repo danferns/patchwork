@@ -5,6 +5,7 @@ The project started as a routing/mapping software to interface between custom ha
 
 Connect nodes to build data pipelines route numbers through math, load and edit files, WGSL shaders, MIDI, OSC, Serial, custom scripts, and more. Everything is a node as much as possible.
 
+![Patchwork Screenshot](assets/screenshot2.png)
 ![Patchwork Screenshot](assets/screenshot.png)
 
 ## Quick start

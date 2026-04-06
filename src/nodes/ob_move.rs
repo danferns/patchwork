@@ -25,11 +25,9 @@ pub fn render(
     let hid = *hub_node_id;
 
     let (vals, is_active) = {
-        let device = if hid != 0 {
-            ob_manager.get_hub(hid).and_then(|h| h.get_device("move", did))
-        } else {
-            ob_manager.find_device("move", did).map(|(_, d)| d)
-        };
+        let device = ob_manager.get_hub(hid)
+            .and_then(|h| h.get_device("move", did))
+            .or_else(|| ob_manager.find_device("move", did).map(|(_, d)| d));
         if let Some(dev) = device {
             ([
                 dev.values.get("ax").copied().unwrap_or(0.0),

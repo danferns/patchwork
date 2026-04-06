@@ -95,6 +95,10 @@ pub fn render(
                 gains.push(0.8);
             }
             if ui.small_button("−").on_hover_text("Remove channel").clicked() && *channel_count > 2 {
+                // Disconnect the removed channel's ports before shrinking
+                let removed_ch = *channel_count - 1;
+                pending_disconnects.push((node_id, removed_ch * 2));     // audio port
+                pending_disconnects.push((node_id, removed_ch * 2 + 1)); // gain port
                 *channel_count -= 1;
                 gains.truncate(*channel_count);
             }

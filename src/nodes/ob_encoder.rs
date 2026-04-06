@@ -25,11 +25,9 @@ pub fn render(
     let hid = *hub_node_id;
 
     let (turn, click, position, is_active) = {
-        let device = if hid != 0 {
-            ob_manager.get_hub(hid).and_then(|h| h.get_device("encoder", did))
-        } else {
-            ob_manager.find_device("encoder", did).map(|(_, d)| d)
-        };
+        let device = ob_manager.get_hub(hid)
+            .and_then(|h| h.get_device("encoder", did))
+            .or_else(|| ob_manager.find_device("encoder", did).map(|(_, d)| d));
         if let Some(dev) = device {
             (dev.values.get("turn").copied().unwrap_or(0.0),
              dev.values.get("click").copied().unwrap_or(0.0),

@@ -1348,11 +1348,9 @@ impl eframe::App for PatchworkApp {
                         ob_injected = true;
                     }
                     NodeType::ObJoystick { device_id, hub_node_id, .. } => {
-                        let find = if *hub_node_id != 0 {
-                            self.ob.get_hub(*hub_node_id).and_then(|h| h.get_device("joystick", *device_id))
-                        } else {
-                            self.ob.find_device("joystick", *device_id).map(|(_, d)| d)
-                        };
+                        let find = self.ob.get_hub(*hub_node_id)
+                            .and_then(|h| h.get_device("joystick", *device_id))
+                            .or_else(|| self.ob.find_device("joystick", *device_id).map(|(_, d)| d));
                         if let Some(dev) = find {
                             let x = dev.values.get("x").copied().unwrap_or(0.0);
                             let y = dev.values.get("y").copied().unwrap_or(0.0);
@@ -1371,11 +1369,9 @@ impl eframe::App for PatchworkApp {
                         ob_injected = true;
                     }
                     NodeType::ObEncoder { device_id, hub_node_id, .. } => {
-                        let find = if *hub_node_id != 0 {
-                            self.ob.get_hub(*hub_node_id).and_then(|h| h.get_device("encoder", *device_id))
-                        } else {
-                            self.ob.find_device("encoder", *device_id).map(|(_, d)| d)
-                        };
+                        let find = self.ob.get_hub(*hub_node_id)
+                            .and_then(|h| h.get_device("encoder", *device_id))
+                            .or_else(|| self.ob.find_device("encoder", *device_id).map(|(_, d)| d));
                         if let Some(dev) = find {
                             let turn = dev.values.get("turn").copied().unwrap_or(0.0);
                             let click = dev.values.get("click").copied().unwrap_or(0.0);
@@ -1393,11 +1389,9 @@ impl eframe::App for PatchworkApp {
                         ob_injected = true;
                     }
                     NodeType::ObMove { device_id, hub_node_id } => {
-                        let find = if *hub_node_id != 0 {
-                            self.ob.get_hub(*hub_node_id).and_then(|h| h.get_device("move", *device_id))
-                        } else {
-                            self.ob.find_device("move", *device_id).map(|(_, d)| d)
-                        };
+                        let find = self.ob.get_hub(*hub_node_id)
+                            .and_then(|h| h.get_device("move", *device_id))
+                            .or_else(|| self.ob.find_device("move", *device_id).map(|(_, d)| d));
                         if let Some(dev) = find {
                             let vals: [f32; 6] = [
                                 dev.values.get("ax").copied().unwrap_or(0.0),
@@ -1417,11 +1411,9 @@ impl eframe::App for PatchworkApp {
                         ob_injected = true;
                     }
                     NodeType::ObBend { device_id, hub_node_id, .. } => {
-                        let find = if *hub_node_id != 0 {
-                            self.ob.get_hub(*hub_node_id).and_then(|h| h.get_device("bend", *device_id))
-                        } else {
-                            self.ob.find_device("bend", *device_id).map(|(_, d)| d)
-                        };
+                        let find = self.ob.get_hub(*hub_node_id)
+                            .and_then(|h| h.get_device("bend", *device_id))
+                            .or_else(|| self.ob.find_device("bend", *device_id).map(|(_, d)| d));
                         if let Some(dev) = find {
                             let val = dev.values.get("val").copied().unwrap_or(0.0);
                             values.insert((id, 0), PortValue::Float(val));
@@ -1434,11 +1426,9 @@ impl eframe::App for PatchworkApp {
                         ob_injected = true;
                     }
                     NodeType::ObPressure { device_id, hub_node_id, .. } => {
-                        let find = if *hub_node_id != 0 {
-                            self.ob.get_hub(*hub_node_id).and_then(|h| h.get_device("pressure", *device_id))
-                        } else {
-                            self.ob.find_device("pressure", *device_id).map(|(_, d)| d)
-                        };
+                        let find = self.ob.get_hub(*hub_node_id)
+                            .and_then(|h| h.get_device("pressure", *device_id))
+                            .or_else(|| self.ob.find_device("pressure", *device_id).map(|(_, d)| d));
                         if let Some(dev) = find {
                             let val = dev.values.get("val").copied().unwrap_or(0.0);
                             values.insert((id, 0), PortValue::Float(val));
@@ -1451,11 +1441,9 @@ impl eframe::App for PatchworkApp {
                         ob_injected = true;
                     }
                     NodeType::ObDistance { device_id, hub_node_id, .. } => {
-                        let find = if *hub_node_id != 0 {
-                            self.ob.get_hub(*hub_node_id).and_then(|h| h.get_device("distance", *device_id))
-                        } else {
-                            self.ob.find_device("distance", *device_id).map(|(_, d)| d)
-                        };
+                        let find = self.ob.get_hub(*hub_node_id)
+                            .and_then(|h| h.get_device("distance", *device_id))
+                            .or_else(|| self.ob.find_device("distance", *device_id).map(|(_, d)| d));
                         if let Some(dev) = find {
                             let val = dev.values.get("val").copied().unwrap_or(0.0);
                             values.insert((id, 0), PortValue::Float(val));
@@ -1468,11 +1456,9 @@ impl eframe::App for PatchworkApp {
                         ob_injected = true;
                     }
                     NodeType::ObOrb { device_id, hub_node_id, .. } => {
-                        let find = if *hub_node_id != 0 {
-                            self.ob.get_hub(*hub_node_id).and_then(|h| h.get_device("orb", *device_id))
-                        } else {
-                            self.ob.find_device("orb", *device_id).map(|(_, d)| d)
-                        };
+                        let find = self.ob.get_hub(*hub_node_id)
+                            .and_then(|h| h.get_device("orb", *device_id))
+                            .or_else(|| self.ob.find_device("orb", *device_id).map(|(_, d)| d));
                         if let Some(dev) = find {
                             let vals: [f32; 6] = [
                                 dev.values.get("ax").copied().unwrap_or(0.0),
